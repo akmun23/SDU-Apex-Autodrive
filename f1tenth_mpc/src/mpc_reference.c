@@ -23,6 +23,10 @@ static int finite_sample(const MpcTrajectorySample_t *point)
         isfinite(point->acceleration) &&
         point->speed >= 0.0 && point->left_bound > 0.0 &&
         point->right_bound > 0.0 &&
+        (point->source_input_history_valid == 0 ||
+         (point->source_input_history_valid == 1 && point->source_witness_valid &&
+          isfinite(point->source_previous_steering_target) &&
+          fabs(point->source_previous_steering_target) <= 0.5235988)) &&
         (point->source_witness_valid == 0 ||
          (point->source_witness_valid == 1 &&
           isfinite(point->source_heading_error) &&
@@ -51,6 +55,7 @@ int mpc_trajectory_prepare(
     for (size_t i = 0; i < count; ++i) {
         if (!finite_sample(&points[i])) return 0;
         if (points[i].source_witness_valid != points[0].source_witness_valid) return 0;
+        if (points[i].source_input_history_valid != points[0].source_input_history_valid) return 0;
         if (i > 0 && !(points[i].s > points[i - 1].s)) return 0;
         if (i > 0) {
             points[i].heading = points[i - 1].heading +
@@ -152,6 +157,8 @@ static int sample_with_frame(
         /* Actual commands are held, not interpolated across a packet edge. */
         sample->source_steering_target = a->source_steering_target;
         sample->source_throttle = a->source_throttle;
+        sample->source_input_history_valid = a->source_input_history_valid;
+        sample->source_previous_steering_target = a->source_previous_steering_target;
     }
     if (frame) {
         frame->sample = *sample;

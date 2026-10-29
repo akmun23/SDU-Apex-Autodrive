@@ -1940,7 +1940,7 @@ TEST(MpcRti, IterationLimitedCandidateIsAcceptedOnlyAfterExactValidation)
 
 TEST(MpcRtiCostGradient, CondensedDirectionMatchesExactRollout)
 {
-  for (int scenario : {0, -1, 1, 3, -2, 2}) {
+  for (int scenario : {0, -1, 1, 3, -2, 2, -4, 4}) {
     const bool source_witness=std::abs(scenario)>1;
     const int turn=scenario==3 ? 0 : scenario<0 ? -1 : scenario>0 ? 1 : 0;
     SCOPED_TRACE(turn);
@@ -1973,6 +1973,10 @@ TEST(MpcRtiCostGradient, CondensedDirectionMatchesExactRollout)
         p.source_physical_steering=.03*direction;
         p.source_steering_target=.04*direction;
         p.source_throttle=.2;
+        if (std::abs(scenario)==4) {
+          p.source_input_history_valid=1;
+          p.source_previous_steering_target=.03*direction;
+        }
       }
     }
     size_t count = samples.size();
@@ -2017,6 +2021,10 @@ TEST(MpcRtiCostGradient, CondensedDirectionMatchesExactRollout)
     ASSERT_TRUE(mpc_rti_build_nominal(&initial, 5., &previous,
         trajectory, count, length, PREDICTION_DT_SECONDS, PREDICTION_HORIZON,
         &c, &nominal, references));
+    if (std::abs(scenario)==4)
+      for(int k=1;k<=PREDICTION_HORIZON;++k)
+        EXPECT_FLOAT_EQ(references[k].source_previous_steering_target,
+                        references[k-1].source_steering_target);
     MpcRtiProblem_t problem{};
     ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal.states, nominal.controls,
         references, PREDICTION_HORIZON, PREDICTION_DT_SECONDS, &c, &problem));
@@ -2084,6 +2092,47 @@ TEST(MpcRtiCostGradient, CondensedDirectionMatchesExactRollout)
       }
     }
   }
+}
+
+TEST(MpcSourceInputCost, ExactPlannedInputIncrementDoesNotPayRackSlewPenalty)
+{
+  MpcTrajectorySample_t points[]={{0.,0.,0.,0.,0.,5.,10.,10.,0.},
+      {30.,30.,0.,0.,0.,5.,10.,10.,0.}, {60.,60.,0.,0.,0.,5.,10.,10.,0.}};
+  for (auto &p : points) {
+    p.source_witness_valid=p.source_input_history_valid=1;
+    p.source_physical_steering=.02;
+    p.source_steering_target=.04;
+    p.source_previous_steering_target=.01;
+    p.source_throttle=.2;
+  }
+  size_t count=3; double length;
+  ASSERT_TRUE(mpc_trajectory_prepare(points,&count,&length));
+  MpcRtiCycleConfiguration_t c{};
+  c.model.weight_e_y=c.model.weight_e_psi=c.model.weight_u=c.model.weight_u_overspeed=1.f;
+  c.model.max_speed_mps=c.model.active_speed_ceiling_mps=16.f;
+  c.model.max_steering_rad=SOURCE_MAX_STEERING_RAD;
+  c.model.terminal_multiplier=1.f;
+  c.model.corridor_margin_m=c.model.first_prediction_corridor_margin_m=.05f;
+  MpcRtiState_t initial{};
+  initial.plant.u=5.f;
+  initial.plant.delayed_steering_command_2=.01f;
+  initial.plant.delayed_throttle_command_1=initial.plant.delayed_throttle_command_2=.2f;
+  ASSERT_TRUE(vehicle_model_initialize_plant_state(&initial.plant));
+  MpcModelControl_t controls[PREDICTION_HORIZON]{};
+  controls[0]={.04f,.2f};
+  MpcRtiNominal_t without{},with{}; int failed;
+  ASSERT_EQ(mpc_rti_validate_candidate_plan(&initial,1.,controls,points,count,length,
+      1,PREDICTION_DT_SECONDS,&c,&without,&failed),MPC_RTI_ROLLOUT_OK);
+  c.model.weight_steering_slew=1500.f;
+  ASSERT_EQ(mpc_rti_validate_candidate_plan(&initial,1.,controls,points,count,length,
+      1,PREDICTION_DT_SECONDS,&c,&with,&failed),MPC_RTI_ROLLOUT_OK);
+  EXPECT_NEAR(with.validation_objective,without.validation_objective,1.e-6f);
+  // The v1 rack reference has zero change and incorrectly charges this exact
+  // .03 rad planned input increase 1500*.03^2 = 1.35 objective units.
+  for(auto &p:points) p.source_input_history_valid=0;
+  ASSERT_EQ(mpc_rti_validate_candidate_plan(&initial,1.,controls,points,count,length,
+      1,PREDICTION_DT_SECONDS,&c,&with,&failed),MPC_RTI_ROLLOUT_OK);
+  EXPECT_NEAR(with.validation_objective-without.validation_objective,1.35f,1.e-5f);
 }
 
 TEST(MpcSlipCost, SourceSlipLossEntersQpAndExactStageObjective)

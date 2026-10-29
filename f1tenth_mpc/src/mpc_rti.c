@@ -101,6 +101,9 @@ static int finite_reference(const MpcRtiReference_t *reference)
         isfinite(reference->path_curvature) &&
         isfinite(reference->left_bound) && reference->left_bound > 0.0f &&
         isfinite(reference->right_bound) && reference->right_bound > 0.0f &&
+        (!reference->source_input_history_valid ||
+         (reference->source_witness_valid &&
+          isfinite(reference->source_previous_steering_target))) &&
         (!reference->source_witness_valid ||
          (isfinite(reference->source_steering_target) &&
           isfinite(reference->source_throttle) &&
@@ -332,7 +335,9 @@ static int reference_at_progress(
         .right_bound = right_bound,
         .source_witness_valid = sample.source_witness_valid,
         .source_steering_target = (float)sample.source_steering_target,
-        .source_throttle = (float)sample.source_throttle};
+        .source_throttle = (float)sample.source_throttle,
+        .source_input_history_valid = sample.source_input_history_valid,
+        .source_previous_steering_target = (float)sample.source_previous_steering_target};
     return finite_reference(reference);
 }
 
@@ -384,7 +389,7 @@ static int rollout_nominal_controls(
     return 1;
 }
 
-static void align_yaw_rate_references(
+static void align_horizon_references(
     MpcRtiReference_t references[PREDICTION_HORIZON + 1],
     int horizon)
 {
@@ -395,6 +400,14 @@ static void align_yaw_rate_references(
     if (!references[horizon].source_witness_valid)
         references[horizon].r = references[horizon].path_curvature *
             references[horizon].u;
+    /* Future progress need not advance by exactly one source-plan packet:
+     * the vehicle may be ahead/behind its requested speed. Future input slew
+     * must use adjacent HORIZON references, not repeatedly subtract the plan's
+     * fixed 25 ms history. Only the initial node needs that stored history. */
+    for (int k = 1; k <= horizon; ++k)
+        if (references[k].source_input_history_valid)
+            references[k].source_previous_steering_target =
+                references[k-1].source_steering_target;
 }
 
 static void record_rollout_failure(
@@ -690,6 +703,25 @@ static void add_tracking_cost(
     add_tracking_term(Q, q, 5,
         configuration->weight_steering_command,
         reference->steering_command, multiplier);
+}
+
+/* Physical rack and commanded target are different source signals. A v2
+ * witness carries the exact preceding 25 ms input (including the lap seam),
+ * so command tracking/slew can use the input chronology without pretending
+ * that an actuator's output increment is its requested target increment.
+ * The old corridor/v1 references retain their established objective. */
+static float previous_input_reference(const MpcRtiReference_t *reference)
+{
+    return reference->source_input_history_valid ?
+        reference->source_previous_steering_target : reference->steering_command;
+}
+
+static float steering_increment_reference(
+    const MpcRtiReference_t *current, const MpcRtiReference_t *next)
+{
+    return current->source_input_history_valid ?
+        current->source_steering_target-current->source_previous_steering_target :
+        next->steering_command-current->steering_command;
 }
 
 /* Nonlinear acceptance scores the maximum source slip excess DURING each
@@ -1061,7 +1093,7 @@ int mpc_rti_build_ltv_qp(
                 (model_stage + 1 == horizon ? configuration->terminal_multiplier : 1.0f);
             stage->R_diag[0] += doubled_weight;
             stage->r[0] -= doubled_weight *
-                references[reference_index].steering_command;
+                previous_input_reference(&references[reference_index]);
         }
 
         stage->R_diag[0] +=
@@ -1080,8 +1112,8 @@ int mpc_rti_build_ltv_qp(
          * leaves the Hessian/cross terms unchanged and adds only these linear
          * terms, where delta_ref is ref[k+1] - ref[k]. */
         const float steering_reference_delta =
-            references[solver_stage + 1].steering_command -
-            references[solver_stage].steering_command;
+            steering_increment_reference(&references[solver_stage],
+                                          &references[solver_stage + 1]);
         stage->q[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND] +=
             steering_slew_hessian * steering_reference_delta;
         stage->r[0] -=
@@ -1416,7 +1448,7 @@ static int mpc_rti_build_nominal_impl(
      * saw little speed error and emitted tiny throttle.  The nonlinear source
      * rollout itself remains the feasibility check; it already accounts for
      * command delay, wheel spin, and the reachable body speed. */
-    align_yaw_rate_references(references, horizon);
+    align_horizon_references(references, horizon);
     nominal->progress_reference_resampling_us +=
         monotonic_microseconds() - phase_start_us;
     for (int k = 0; k <= horizon; ++k)
@@ -1927,7 +1959,7 @@ static int evaluate_nonlinear_candidate(
         if (candidate->speed_reference_valid)
             references[k].u = candidate->speed_reference[k];
     }
-    align_yaw_rate_references(references, candidate->horizon);
+    align_horizon_references(references, candidate->horizon);
     for (int k = 0; k <= candidate->horizon; ++k) {
         const MpcRtiReference_t *reference = &references[k];
         if (k > 0) {
@@ -1947,7 +1979,7 @@ static int evaluate_nonlinear_candidate(
             state->u - reference->u,
             state->v - reference->v,
             state->r - reference->r,
-            state->delayed_steering_command_2 - reference->steering_command,
+            state->delayed_steering_command_2 - previous_input_reference(reference),
             state->actual_steering_angle - reference->steering_command};
         const double speed_weight = state->u > reference->u
             ? overspeed_weight_for_reference(model, reference)
@@ -1987,8 +2019,7 @@ static int evaluate_nonlinear_candidate(
         const double throttle_delta =
             (double)control->throttle_command - previous_throttle;
         const double steering_reference_delta =
-            (double)references[k + 1].steering_command -
-            references[k].steering_command;
+            steering_increment_reference(&references[k], &references[k + 1]);
         const double steering_slew_error =
             steering_delta - steering_reference_delta;
         cost += model->weight_steering_slew *
@@ -2839,7 +2870,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
                 refinement_nominal.speed_reference[k] =
                     nominal.speed_reference[k];
             }
-            align_yaw_rate_references(refinement_references, horizon);
+            align_horizon_references(refinement_references, horizon);
             MpcRtiPassResult_t refined_pass;
             memset(&refined_pass, 0, sizeof(refined_pass));
             const MpcRtiCycleStatus_t refined_status = solve_rti_pass(
@@ -3152,7 +3183,7 @@ float mpc_rti_scalar_stage_cost(
     const float ev = state->plant.v - reference->v;
     const float er = state->plant.r - reference->r;
     const float edelta = state->plant.delayed_steering_command_2 -
-        reference->steering_command;
+        previous_input_reference(reference);
     const float eactual_delta = state->plant.actual_steering_angle -
         reference->steering_command;
     return configuration->weight_e_y * ey * ey +
