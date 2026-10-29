@@ -164,12 +164,6 @@ def test_guarded_solver_overlay_preserves_strict_failure_gate():
     assert "'phase1_restart_checkpoint'" in _PHASE1_REPORT_EXPORT
 
 
-def test_bash_script_v2316_does_not_overwrite_v2315():
-    s=(Path(__file__).parents[1]/'diagnose_phase1_v2316.sh').read_text()
-    assert 'optimized_practice_v2_3_16_contact_debug' in s
-    assert 'optimized_practice_v2_3_15_native_slip_debug' not in s
-
-
 def test_cached_solver_can_switch_hessian_modes_without_erasing_source(tmp_path):
     from tests.test_phase1_overlay import _sample,LEGACY,SOLVER
     from solver_overlay import prepare_working_solver, transform_solver_v240

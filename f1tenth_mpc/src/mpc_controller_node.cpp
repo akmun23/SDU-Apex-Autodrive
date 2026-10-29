@@ -413,8 +413,6 @@ public:
             "diagnostics_topic", "/mpc/diagnostics");
         const bool publish_diagnostics = declare_parameter<bool>(
             "publish_diagnostics", false);
-        open_loop_horizon_test_enabled_ = declare_parameter<bool>(
-            "open_loop_horizon_test_enabled", false);
         prefer_full_validated_prior_plan_on_rejection_ =
             declare_parameter<bool>(
                 "prefer_full_validated_prior_plan_on_rejection", false);
@@ -440,11 +438,6 @@ public:
             declare_parameter<double>(
                 "quality_prefix_stale_prior_max_clearance_loss_m", 0.02),
             0.0, 1.0);
-        open_loop_horizon_test_min_speed_mps_ = clamp(
-            declare_parameter<double>(
-                "open_loop_horizon_test_min_speed_mps", 6.0), 0.0, 16.0);
-        open_loop_horizon_test_topic_ = declare_parameter<std::string>(
-            "open_loop_horizon_test_topic", "/mpc/open_loop_test");
         path_frame_ = declare_parameter<std::string>("path_frame", "map");
         command_frame_ = declare_parameter<std::string>("command_frame", "base_link");
         trajectory_file_ = declare_parameter<std::string>("trajectory_file", "");
@@ -505,16 +498,6 @@ public:
         }
         rti_config_.capture_diagnostic_outputs =
             diagnostics_pub_ != nullptr;
-        if (enabled_ && open_loop_horizon_test_enabled_) {
-            open_loop_horizon_test_pub_ =
-                create_publisher<std_msgs::msg::String>(
-                    open_loop_horizon_test_topic_, rclcpp::QoS(10));
-            RCLCPP_WARN(get_logger(),
-                "ONE-SHOT MPC OPEN-LOOP TEST ARMED: latch one accepted %d-step "
-                "plan at >= %.2f m/s and execute it without replanning",
-                PREDICTION_HORIZON,
-                open_loop_horizon_test_min_speed_mps_);
-        }
         // State is time-sensitive: if executor/DDS scheduling falls behind,
         // drop old samples instead of replaying them as current control input.
         control_callback_group_ = create_callback_group(
@@ -744,7 +727,6 @@ public:
     ~MpcControllerNode() override
     {
         if (control_timer_) control_timer_->cancel();
-        if (open_loop_horizon_timer_) open_loop_horizon_timer_->cancel();
         if (control_executor_) control_executor_->cancel();
         if (control_thread_.joinable()) control_thread_.join();
         report_health("shutdown");
@@ -875,7 +857,6 @@ private:
         if (control_fault_latched_) return;
         control_fault_latched_ = true;
         ++control_fault_cycles_;
-        abort_open_loop_horizon_test(reason);
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
             "%s; MPC fault latched and no replacement drive command published",
             reason);
@@ -1797,267 +1778,6 @@ private:
         if (!diagnostics_pub_) return;
         enqueue_diagnostic_text("{\"status\":\"waiting_for_actuator\","
             "\"reason\":\"drive_command_subscription_not_matched\"}");
-    }
-
-    void publish_open_loop_horizon_event(const std::string & json)
-    {
-        if (!open_loop_horizon_test_pub_) return;
-        std_msgs::msg::String message;
-        message.data = json;
-        open_loop_horizon_test_pub_->publish(message);
-    }
-
-    void abort_open_loop_horizon_test(const char * reason)
-    {
-        if (!open_loop_horizon_test_active_) return;
-        std::ostringstream json;
-        json << "{\"event\":\"abort\",\"plan_id\":"
-             << open_loop_horizon_test_plan_id_
-             << ",\"next_stage\":" << open_loop_horizon_test_next_stage_
-             << ",\"reason\":\"" << reason << "\"}";
-        publish_open_loop_horizon_event(json.str());
-        open_loop_horizon_test_active_ = false;
-        open_loop_horizon_test_finished_ = true;
-        if (open_loop_horizon_timer_) open_loop_horizon_timer_->cancel();
-    }
-
-    int open_loop_stage_at(int64_t stamp_ns) const
-    {
-        if (open_loop_horizon_start_stamp_ns_ <= 0 ||
-            stamp_ns <= open_loop_horizon_start_stamp_ns_) return 0;
-        const double elapsed_s = static_cast<double>(
-            stamp_ns - open_loop_horizon_start_stamp_ns_) * 1.0e-9;
-        return std::clamp(static_cast<int>(std::llround(
-            elapsed_s / TIME_STEP_SECONDS)), 0,
-            open_loop_horizon_test_plan_.horizon);
-    }
-
-    void publish_open_loop_observation_gap(int stage, const char * reason)
-    {
-        std::ostringstream gap;
-        gap << "{\"event\":\"observation_gap\",\"plan_id\":"
-            << open_loop_horizon_test_plan_id_
-            << ",\"stage\":" << stage
-            << ",\"reason\":\"" << reason << "\"}";
-        publish_open_loop_horizon_event(gap.str());
-    }
-
-    void record_open_loop_observation_gaps_through(
-        int observed_stage, const char * reason)
-    {
-        observed_stage = std::clamp(observed_stage, 0,
-            open_loop_horizon_test_plan_.horizon);
-        for (int stage = open_loop_horizon_last_sample_stage_ + 1;
-             stage < observed_stage; ++stage) {
-            publish_open_loop_observation_gap(stage, reason);
-        }
-    }
-
-    void finish_open_loop_horizon_test(bool terminal_state_observed)
-    {
-        if (!open_loop_horizon_test_active_) return;
-        open_loop_horizon_test_active_ = false;
-        open_loop_horizon_test_finished_ = true;
-        std::ostringstream completed;
-        completed << "{\"event\":\"complete\",\"plan_id\":"
-                  << open_loop_horizon_test_plan_id_
-                  << ",\"outputs\":"
-                  << open_loop_horizon_test_plan_.horizon
-                  << ",\"terminal_state_observed\":"
-                  << (terminal_state_observed ? "true" : "false") << '}';
-        publish_open_loop_horizon_event(completed.str());
-        if (open_loop_horizon_timer_) open_loop_horizon_timer_->cancel();
-    }
-
-    void open_loop_horizon_timer_callback()
-    {
-        const int64_t callback_steady_ns = steady_time_ns();
-        if (!open_loop_horizon_test_active_) return;
-        if (open_loop_horizon_test_next_stage_ <
-            open_loop_horizon_test_plan_.horizon) {
-            const int stage = open_loop_horizon_test_next_stage_++;
-            const char *publication_fault_reason = nullptr;
-            if (publish_open_loop_horizon_command(stage, callback_steady_ns,
-                    &publication_fault_reason) == 0) {
-                report_control_fault(
-                    publication_fault_reason ? publication_fault_reason :
-                    "latched MPC plan command violates the drive envelope");
-                return;
-            }
-            if (open_loop_horizon_test_next_stage_ ==
-                open_loop_horizon_test_plan_.horizon) {
-                open_loop_horizon_all_outputs_sent_ = true;
-            }
-            return;
-        }
-
-        // Observe the terminal state without inventing a new actuator action.
-        if (!open_loop_horizon_terminal_waiting_) {
-            open_loop_horizon_terminal_waiting_ = true;
-            open_loop_horizon_terminal_wait_start_ns_ = steady_time_ns();
-            if (open_loop_horizon_last_sample_stage_ >=
-                open_loop_horizon_test_plan_.horizon) {
-                finish_open_loop_horizon_test(true);
-            }
-            return;
-        }
-        if (steady_time_ns() - open_loop_horizon_terminal_wait_start_ns_ >=
-            100000000LL) {
-            finish_open_loop_horizon_test(false);
-        }
-    }
-
-    void publish_open_loop_horizon_plan(
-        const MpcRtiState_t & initial_state, int64_t stamp_ns)
-    {
-        std::ostringstream json;
-        json << std::setprecision(9)
-             << "{\"event\":\"plan\",\"plan_id\":"
-             << open_loop_horizon_test_plan_id_
-             << ",\"stamp_ns\":" << stamp_ns
-             << ",\"horizon\":" << open_loop_horizon_test_plan_.horizon
-             << ",\"step_s\":" << TIME_STEP_SECONDS
-             << ",\"trigger_speed_mps\":" << initial_state.plant.u
-             << ",\"controls\":[";
-        for (int step = 0; step < open_loop_horizon_test_plan_.horizon; ++step) {
-            if (step > 0) json << ',';
-            const MpcModelControl_t & control =
-                open_loop_horizon_test_plan_.controls[step];
-            json << '[' << control.steering_target_rad << ','
-                 << control.throttle_command << ']';
-        }
-        json << "],\"predictions\":[";
-        for (int step = 0; step <= open_loop_horizon_test_plan_.horizon; ++step) {
-            if (step > 0) json << ',';
-            const MpcRtiState_t & predicted =
-                open_loop_horizon_test_plan_.states[step];
-            const double predicted_s =
-                open_loop_horizon_test_plan_.progress[step];
-            MpcTrajectorySample_t reference{};
-            if (!mpc_trajectory_sample(trajectory_.data(), trajectory_.size(),
-                    track_length_m_, predicted_s, &reference)) {
-                json << "null";
-                continue;
-            }
-            const double predicted_x = reference.x -
-                std::sin(reference.heading) * predicted.plant.e_y;
-            const double predicted_y = reference.y +
-                std::cos(reference.heading) * predicted.plant.e_y;
-            const double predicted_yaw =
-                reference.heading + predicted.plant.e_psi;
-            json << "{\"stage\":" << step
-                 << ",\"time_s\":" << step * TIME_STEP_SECONDS
-                 << ",\"progress_m\":" << predicted_s
-                 << ",\"pose\":[" << predicted_x << ',' << predicted_y
-                 << ',' << predicted_yaw << "],\"state\":["
-                 << predicted.plant.e_y << ',' << predicted.plant.e_psi << ','
-                 << predicted.plant.u << ',' << predicted.plant.v << ','
-                 << predicted.plant.r << ','
-                 << predicted.plant.actual_steering_angle;
-            for (int wheel = 0; wheel < 4; ++wheel) {
-                json << ',' << predicted.plant.source_plant_internal_state[
-                    MPC_PLANT_STATE_WHEEL_OMEGA_FL + wheel];
-            }
-            json << "]}";
-        }
-        json << "]}";
-        publish_open_loop_horizon_event(json.str());
-    }
-
-    void publish_open_loop_horizon_sample(
-        int stage, const MpcRtiState_t & actual,
-        const MpcSynchronizedState & synchronized,
-        const MpcSynchronizedState & command_time_state,
-        const MpcPathProjection_t & actual_projection,
-        int64_t control_stamp_ns)
-    {
-        if (stage < 0 || stage > open_loop_horizon_test_plan_.horizon) return;
-        const MpcRtiState_t & predicted =
-            open_loop_horizon_test_plan_.states[stage];
-        MpcTrajectorySample_t reference{};
-        const double predicted_s =
-            open_loop_horizon_test_plan_.progress[stage];
-        if (!mpc_trajectory_sample(trajectory_.data(), trajectory_.size(),
-                track_length_m_, predicted_s, &reference)) {
-            abort_open_loop_horizon_test("predicted-reference-unavailable");
-            return;
-        }
-
-        const double predicted_x = reference.x -
-            std::sin(reference.heading) * predicted.plant.e_y;
-        const double predicted_y = reference.y +
-            std::cos(reference.heading) * predicted.plant.e_y;
-        const double predicted_yaw = reference.heading + predicted.plant.e_psi;
-        const auto append_state = [](std::ostringstream & out,
-                                     const MpcModelState_t & state) {
-            out << '[' << state.e_y << ',' << state.e_psi << ',' << state.u
-                << ',' << state.v << ',' << state.r << ','
-                << state.actual_steering_angle;
-            for (int wheel = 0; wheel < 4; ++wheel) {
-                out << ',' << state.source_plant_internal_state[
-                    MPC_PLANT_STATE_WHEEL_OMEGA_FL + wheel];
-            }
-            out << ']';
-        };
-
-        std::ostringstream json;
-        json << std::setprecision(9)
-             << "{\"event\":\"sample\",\"plan_id\":"
-             << open_loop_horizon_test_plan_id_
-             << ",\"stage\":" << stage
-             << ",\"control_stamp_ns\":" << control_stamp_ns
-             << ",\"source_stamp_ns\":" << synchronized.source_stamp_ns
-             << ",\"odom_source_stamp_ns\":"
-             << synchronized.odom_source_stamp_ns
-             << ",\"actual_progress_m\":" << actual_projection.s
-             << ",\"predicted_progress_m\":" << predicted_s
-             << ",\"predicted_pose\":[" << predicted_x << ','
-             << predicted_y << ',' << predicted_yaw
-             << "],\"actual_pose\":[" << command_time_state.map_x << ','
-             << command_time_state.map_y << ',' << command_time_state.map_yaw
-             << "],\"source_pose\":[" << synchronized.map_x << ','
-             << synchronized.map_y << ',' << synchronized.map_yaw
-             << "],\"predicted_state\":";
-        append_state(json, predicted.plant);
-        json << ",\"actual_state\":";
-        append_state(json, actual.plant);
-        if (stage < open_loop_horizon_test_plan_.horizon) {
-            const MpcModelControl_t & control =
-                open_loop_horizon_test_plan_.controls[stage];
-            json << ",\"planned_control\":["
-                 << control.steering_target_rad << ','
-                 << control.throttle_command << ']';
-        } else {
-            json << ",\"planned_control\":null";
-        }
-        json << '}';
-        publish_open_loop_horizon_event(json.str());
-    }
-
-    int64_t publish_open_loop_horizon_command(
-        int stage, int64_t callback_steady_ns,
-        const char **fault_reason)
-    {
-        const MpcModelControl_t & control =
-            open_loop_horizon_test_plan_.controls[stage];
-        MpcDriveCommand bounded{};
-        if (!bound_mpc_drive_command(
-                control.steering_target_rad, control.throttle_command,
-                actuator_steering_limit_rad_, &bounded)) return 0;
-        const int64_t command_stamp_ns = publish_command(
-            bounded.steering_target_rad, bounded.throttle_normalized,
-            callback_steady_ns, fault_reason);
-        if (command_stamp_ns == 0) return 0;
-        std::ostringstream output;
-        output << std::setprecision(9)
-               << "{\"event\":\"output\",\"plan_id\":"
-               << open_loop_horizon_test_plan_id_
-               << ",\"stage\":" << stage
-               << ",\"steady_stamp_ns\":" << steady_time_ns()
-               << ",\"control\":[" << bounded.steering_target_rad << ','
-               << bounded.throttle_normalized << "]}";
-        publish_open_loop_horizon_event(output.str());
-        return command_stamp_ns;
     }
 
     void record_cycle_health(MpcRtiCycleStatus_t status,
@@ -3379,12 +3099,6 @@ private:
             return;
         }
         if (odom_status != MpcSyncStatus::kOk) {
-            if (open_loop_horizon_test_active_) {
-                record_open_loop_observation_gaps_through(
-                    open_loop_stage_at(now().nanoseconds()),
-                    MpcStateSynchronizer::status_name(odom_status));
-                return;
-            }
             report_control_fault(
                 "MPC rejected uncertain legal odometry sample");
             return;
@@ -3422,12 +3136,6 @@ private:
             const std::string reason = std::string(
                 "MPC rejected unsynchronized legal state: ") +
                 MpcStateSynchronizer::status_name(sync_status);
-            if (open_loop_horizon_test_active_) {
-                record_open_loop_observation_gaps_through(
-                    open_loop_stage_at(control_ros_time.nanoseconds()),
-                    MpcStateSynchronizer::status_name(sync_status));
-                return;
-            }
             report_control_fault(reason.c_str());
             return;
         }
@@ -3468,12 +3176,6 @@ private:
         if (!mpc_trajectory_project(trajectory_.data(), trajectory_.size(),
                 track_length_m_, coherent_state.map_x, coherent_state.map_y,
                 coherent_state.map_yaw, previous_segment, 160, &projection)) {
-            if (open_loop_horizon_test_active_) {
-                record_open_loop_observation_gaps_through(
-                    open_loop_stage_at(control_ros_time.nanoseconds()),
-                    "trajectory_projection_failed");
-                return;
-            }
             report_control_fault("MPC could not project uncertain pose");
             return;
         }
@@ -3634,12 +3336,6 @@ private:
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
                 "MPC command-time prediction rejected state: %s",
                 control_time_status_name(prediction_status));
-            if (open_loop_horizon_test_active_) {
-                record_open_loop_observation_gaps_through(
-                    open_loop_stage_at(control_ros_time.nanoseconds()),
-                    control_time_status_name(prediction_status));
-                return;
-            }
             report_control_fault("MPC command-time state prediction is uncertain");
             return;
         }
@@ -3677,34 +3373,6 @@ private:
         state.plant.v = static_cast<float>(command_time_state.v);
         state.plant.r = static_cast<float>(command_time_state.yaw_rate);
 
-        if (open_loop_horizon_test_active_) {
-            const int stage = open_loop_stage_at(
-                control_ros_time.nanoseconds());
-            record_open_loop_observation_gaps_through(stage, "no_sample");
-            if (stage > open_loop_horizon_last_sample_stage_ &&
-                (stage < open_loop_horizon_test_plan_.horizon ||
-                 open_loop_horizon_all_outputs_sent_)) {
-                publish_open_loop_horizon_sample(stage, state, coherent_state,
-                    command_time_state, command_time_projection,
-                    control_ros_time.nanoseconds());
-                if (!open_loop_horizon_test_active_) {
-                    // A diagnostic failure must not fall through into normal
-                    // MPC output or synthesize a braking command.
-                    return;
-                }
-                open_loop_horizon_last_sample_stage_ = stage;
-            }
-            if (stage >= open_loop_horizon_test_plan_.horizon &&
-                open_loop_horizon_all_outputs_sent_) {
-                finish_open_loop_horizon_test(true);
-            }
-            return;
-        }
-        if (open_loop_horizon_test_finished_) {
-            // The run supervisor stops the simulator after observing this
-            // terminal event; MPC does not issue an unplanned brake command.
-            return;
-        }
 
         MpcRtiCycleResult_t result{};
         if (deadline_recovery_pending_) {
@@ -4024,94 +3692,6 @@ private:
             }
             return;
         }
-        if (enabled_ && open_loop_horizon_test_enabled_ &&
-            !open_loop_horizon_test_triggered_ &&
-            state.plant.u >= open_loop_horizon_test_min_speed_mps_ &&
-            rti_memory_.nominal.valid &&
-            rti_memory_.nominal.horizon == PREDICTION_HORIZON) {
-            open_loop_horizon_test_plan_ = rti_memory_.nominal;
-            ++open_loop_horizon_test_plan_id_;
-            open_loop_horizon_test_triggered_ = true;
-            open_loop_horizon_test_active_ = true;
-            open_loop_horizon_test_next_stage_ = 1;
-            open_loop_horizon_start_stamp_ns_ =
-                candidate_command_stamp_ns;
-            open_loop_horizon_last_sample_stage_ = 0;
-            open_loop_horizon_all_outputs_sent_ = false;
-            open_loop_horizon_terminal_waiting_ = false;
-            publish_open_loop_horizon_plan(
-                state, candidate_command_stamp_ns);
-            publish_open_loop_horizon_sample(0, state, coherent_state,
-                command_time_state, command_time_projection,
-                candidate_command_stamp_ns);
-            if (!open_loop_horizon_test_active_) {
-                return;
-            }
-            if (!cycle_time_is_valid(callback_steady_ns,
-                    &timing_fault_reason)) {
-                if (diagnostics_pub_)
-                    publish_cycle_diagnostics(state, coherent_state,
-                        control_time_prediction, control_prediction_us,
-                        last_projected_s_, source_dt, result, solve_us,
-                        control_ros_time.nanoseconds(),
-                        candidate_command_stamp_ns, callback_steady_ns,
-                        synchronize_steady_ns);
-                report_control_fault(timing_fault_reason, false);
-                publish_cycle_failure(timing_fault_reason);
-                return;
-            }
-            RCLCPP_WARN(get_logger(),
-                "Latched MPC plan_id=%llu at %.3f m/s; next %d command "
-                "outputs will be emitted on the fixed 25 ms clock",
-                static_cast<unsigned long long>(open_loop_horizon_test_plan_id_),
-                state.plant.u, PREDICTION_HORIZON);
-            const char *publication_fault_reason = nullptr;
-            const int64_t command_stamp_ns = publish_open_loop_horizon_command(
-                0, callback_steady_ns,
-                &publication_fault_reason);
-            if (command_stamp_ns == 0) {
-                if (last_publication_gate_elapsed_ms_ >=
-                        end_to_end_cycle_budget_ms_) {
-                    const bool may_retry = defer_single_deadline_miss(
-                        &result, solve_us);
-                    if (!may_retry) {
-                        report_control_fault(publication_fault_reason ?
-                            publication_fault_reason :
-                            "consecutive publication deadlines missed", false);
-                        publish_cycle_failure(publication_fault_reason ?
-                            publication_fault_reason :
-                            "consecutive publication deadlines missed");
-                    }
-                    return;
-                }
-                report_control_fault(
-                    publication_fault_reason ? publication_fault_reason :
-                    "latched MPC plan start violates the drive envelope");
-                return;
-            }
-            record_cycle_health(status, result, solve_us);
-            certified_plan_ = rti_memory_.nominal;
-            clear_validated_recovery_prefix();
-            if (certified_plan_.valid && certified_plan_.horizon > 0) {
-                certified_plan_.controls[0].steering_target_rad =
-                    result.published_steering_command;
-                certified_plan_.controls[0].throttle_command =
-                    result.published_throttle;
-            }
-            last_command_publication_lead_ns_ = command_stamp_ns >=
-                control_stamp_ns ? command_stamp_ns - control_stamp_ns : 0;
-            open_loop_horizon_timer_ = create_wall_timer(
-                std::chrono::milliseconds(25),
-                std::bind(&MpcControllerNode::open_loop_horizon_timer_callback,
-                    this), control_callback_group_);
-            if (diagnostics_pub_)
-                publish_cycle_diagnostics(state, coherent_state,
-                    control_time_prediction, control_prediction_us,
-                    last_projected_s_, source_dt, result, solve_us,
-                    control_ros_time.nanoseconds(), candidate_command_stamp_ns,
-                    callback_steady_ns, synchronize_steady_ns);
-            return;
-        }
         if (enabled_) {
             const char *publication_fault_reason = nullptr;
             const int64_t command_stamp_ns = publish_command(
@@ -4273,8 +3853,6 @@ private:
     double startup_progress_m_{};
     double last_projected_s_{};
     std::string unity_plant_state_topic_;
-    std::string open_loop_horizon_test_topic_;
-    bool open_loop_horizon_test_enabled_{};
     bool prefer_full_validated_prior_plan_on_rejection_{};
     bool quality_aware_prefix_selection_on_rejection_{};
     bool quality_prefix_attempted_{};
@@ -4304,18 +3882,6 @@ private:
     int quality_prior_control_count_{};
     MpcModelControl_t quality_prior_controls_[
         kCommandEffectValidationHorizon]{};
-    double open_loop_horizon_test_min_speed_mps_{6.0};
-    bool open_loop_horizon_test_triggered_{};
-    bool open_loop_horizon_test_active_{};
-    bool open_loop_horizon_test_finished_{};
-    bool open_loop_horizon_all_outputs_sent_{};
-    bool open_loop_horizon_terminal_waiting_{};
-    int open_loop_horizon_test_next_stage_{};
-    int open_loop_horizon_last_sample_stage_{-1};
-    int64_t open_loop_horizon_start_stamp_ns_{};
-    int64_t open_loop_horizon_terminal_wait_start_ns_{};
-    std::uint64_t open_loop_horizon_test_plan_id_{};
-    MpcRtiNominal_t open_loop_horizon_test_plan_{};
     bool source_plant_handoff_valid_{};
     bool unity_plant_state_used_{};
     int64_t source_plant_handoff_stamp_ns_{};
@@ -4350,13 +3916,10 @@ private:
         unity_plant_state_sub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr diagnostics_pub_;
     std::unique_ptr<DiagnosticPublisherWorker> diagnostics_worker_;
-    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr
-        open_loop_horizon_test_pub_;
     rclcpp::CallbackGroup::SharedPtr control_callback_group_;
     std::unique_ptr<rclcpp::executors::SingleThreadedExecutor> control_executor_;
     std::thread control_thread_;
     rclcpp::TimerBase::SharedPtr control_timer_;
-    rclcpp::TimerBase::SharedPtr open_loop_horizon_timer_;
     std::uint64_t control_cycles_{};
     std::uint64_t accepted_optimal_{};
     std::uint64_t accepted_feasible_{};

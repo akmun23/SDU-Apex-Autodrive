@@ -220,8 +220,8 @@ private:
     double local_cluster_min_weight_ = 0.75;
     // Keep translational scan correction independently disabled until a
     // geometry-aware matcher supplies calibrated anisotropic information.
-    // Yaw is observable from the wall orientation even when along-corridor
-    // translation is not, so it has its own experimentally tunable gain.
+    // Yaw is observable from wall orientation even when along-corridor
+    // translation is not, so it has an independently configured gain.
     double local_scan_correction_xy_gain_ = 0.0;
     bool local_scan_correction_cross_track_only_ = true;
     // Attenuate only the raceline-tangent component of a local scan
@@ -234,8 +234,7 @@ private:
     double local_scan_correction_fast_speed_threshold_mps_ = 3.0;
     double local_scan_correction_fast_along_track_gain_ = 0.25;
     double local_scan_correction_yaw_gain_ = 0.0;
-    // Experimental scan-likelihood translation; production remains disabled
-    // until the matched live AMCL/Pure Pursuit holdout passes.
+    // Reinitialize the local particle cloud around an accepted tracking update.
     bool local_tracking_reinitialize_cloud_ = true;
     double local_tracking_cloud_covariance_xy_ = 0.01;
     double local_tracking_cloud_covariance_yaw_ = 0.01;

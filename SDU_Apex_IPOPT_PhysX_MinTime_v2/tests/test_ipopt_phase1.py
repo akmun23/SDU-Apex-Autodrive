@@ -1,7 +1,7 @@
 import io
 from contextlib import redirect_stdout
 from pathlib import Path
-from diagnose_report import summary
+from diagnostic_fixtures.diagnose_report import summary
 from run_ipopt import (print_feasibility_diagnostics,
                        competition_wall_margin,
                        run_phase1_or_diagnose,

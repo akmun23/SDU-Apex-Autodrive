@@ -18,9 +18,8 @@ if [[ ! "${run_id}" =~ ^[[:alnum:]_-]+$ ]]; then
   exit 2
 fi
 if [[ "${record_profile}" != "full" &&
-      "${record_profile}" != "mpc_open_loop_test" &&
       "${record_profile}" != "mpc_performance" ]]; then
-  echo "SDU_APEX_RECORD_PROFILE must be full, mpc_open_loop_test, or mpc_performance." >&2
+  echo "SDU_APEX_RECORD_PROFILE must be full or mpc_performance." >&2
   exit 2
 fi
 
@@ -55,39 +54,6 @@ exec docker run --rm --name "${container}" \
       --event-handlers console_direct+ \
       --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
     source /workspace/install/setup.bash
-    if [[ "${ROSBAG_PROFILE}" == "mpc_open_loop_test" ]]; then
-      exec ros2 bag record --max-cache-size 10485760 -o "${ROSBAG_OUTPUT}" \
-      /autodrive/roboracer_1/odom \
-      /autodrive/roboracer_1/ips \
-      /autodrive/roboracer_1/imu \
-      /autodrive/roboracer_1/steering \
-      /autodrive/roboracer_1/throttle \
-      /autodrive/roboracer_1/steering_command \
-      /autodrive/roboracer_1/throttle_command \
-      /autodrive/roboracer_1/collision_count \
-      /autodrive/roboracer_1/lap_count \
-      /autodrive/roboracer_1/bridge_packet_timing \
-      /autodrive/roboracer_1/development_actuator_timing \
-      /autodrive/roboracer_1/bridge_timing_fault \
-      /autodrive/roboracer_1/bridge_timing_fault_detail \
-      /odom \
-      /odom/unity_plant_state \
-      /odom/diagnostics \
-      /ekf_odom \
-      /ekf_pose \
-      /amcl_pose \
-      /amcl_localization_health \
-      /amcl_scan_alignment \
-      /amcl_particle_count \
-      /amcl_kld_diagnostics \
-      /amcl_timing \
-      /amcl_gpu_timing \
-      /current_map_pose \
-      /mpc/drive_command \
-      /mpc/diagnostics \
-      /mpc/open_loop_test \
-      /csv_replay/diagnostics
-    fi
     if [[ "${ROSBAG_PROFILE}" == "mpc_performance" ]]; then
       exec ros2 bag record --max-cache-size 10485760 -o "${ROSBAG_OUTPUT}" \
       /autodrive/roboracer_1/lidar \
@@ -125,7 +91,6 @@ exec docker run --rm --name "${container}" \
       /amcl_timing \
       /current_map_pose \
       /mpc/diagnostics \
-      /mpc/open_loop_test \
       /csv_replay/diagnostics \
       /map
     fi
@@ -165,7 +130,6 @@ exec docker run --rm --name "${container}" \
       /amcl_timing \
       /current_map_pose \
       /mpc/diagnostics \
-      /mpc/open_loop_test \
       /csv_replay/diagnostics \
       /map
   '

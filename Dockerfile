@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-ament-cmake-python \
     ros-humble-rosidl-default-generators \
     ros-humble-nav2-lifecycle-manager ros-humble-nav2-map-server \
+    ros-humble-slam-toolbox \
     ros-humble-rclc ros-humble-rclcpp-components \
     ros-humble-tf2-geometry-msgs \
     && rm -rf /var/lib/apt/lists/*

@@ -15,7 +15,6 @@ SDU_Apex_IPOPT_PhysX_MinTime_v2/*
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/pytest.ini
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/min_curvature_seed.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/solver_overlay_v251.py
-!SDU_Apex_IPOPT_PhysX_MinTime_v2/make_exploratory_ipopt_seed.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/path_frame.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/source_equation_kernels.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/ipopt_time_progress.py
@@ -23,6 +22,7 @@ SDU_Apex_IPOPT_PhysX_MinTime_v2/*
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/command_realizability.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/command_ocp.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/command_campaign.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/track_optimizer.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/command_ocp_kernel.cpp
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/benchmark_source_equation_kernels.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/solver_overlay_condensed_v242.py
@@ -34,7 +34,6 @@ SDU_Apex_IPOPT_PhysX_MinTime_v2/*
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/
 SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/*
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_v251_phase1_reduction.py
-!SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_exploratory_ipopt_seed.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_path_frame.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_native_clearance.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_source_equation_kernels.py
@@ -42,6 +41,7 @@ SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/*
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_command_realizability.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_command_ocp.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_command_campaign.py
+!SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_track_optimizer.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_v251_source_equation_parity.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_physics_ctypes_abi.py
 !SDU_Apex_IPOPT_PhysX_MinTime_v2/tests/test_ipopt_nlp_audit.py

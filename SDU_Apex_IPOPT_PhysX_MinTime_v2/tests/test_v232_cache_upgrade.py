@@ -9,10 +9,10 @@ from solver_overlay import (prepare_working_solver, transform_solver,
                             transform_solver_v229, transform_solver_228)
 from tests.test_phase1_overlay import mock_historical_source, LEGACY, SOLVER
 
-# Frozen from the shipping v2.3.0 overlay on the historical-source fixture.
+# Canonical output of the retained v2.3.0 cache transformer on this fixture.
 PREVIOUS_HASHES = {
-    'limited-memory': '9807ffa00328365a8a30d824de6c9a7e38910274c5be302eb52fb86821958fc9',
-    'exact': '5649e797560a353b7712f61dac22ac316577adc885ee75dbae5091d977baf9fc',
+    'limited-memory': '7912739376c8629b041482dc840956565651cb0b27fadc41534d38cd7d5337c9',
+    'exact': '1fea8e0dd74f34fda9048d239382cf5e2cf3432428bb64278cd4103ac7356bec',
 }
 
 

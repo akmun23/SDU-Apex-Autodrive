@@ -13,7 +13,7 @@ from wheel_model_overlay_v2315 import (transform_wheel_model as v2315,
                                        _BODY_FORCES_OLD)
 from tests.test_v2314_native_lateral_slip_sign import wheel_source
 from tests.test_phase1_overlay import _sample,LEGACY,SOLVER
-from diagnose_contact_v2316 import interpolate_native_body_rates,rms
+from diagnostic_fixtures.diagnose_contact_v2316 import interpolate_native_body_rates,rms
 
 
 def realistic_original_wheel_fixture():

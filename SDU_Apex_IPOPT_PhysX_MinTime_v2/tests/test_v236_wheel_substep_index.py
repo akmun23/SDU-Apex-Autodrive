@@ -119,14 +119,3 @@ def test_generated_wheel_source_uses_native_5_mps_threshold_and_upgrades_bad_cac
     (working / rel).write_text(patched + '# unknown edit\n')
     with pytest.raises(RuntimeError, match='Unknown generated PhysX substep helper'):
         prepare_working_physx_substep_source(recovered, working)
-
-
-def test_v236_diagnostic_uses_algebraic_projection_not_unprojected_seed():
-    from pathlib import Path
-    code = (Path(__file__).resolve().parents[1] /
-            'diagnose_phase1_v236.sh').read_text()
-    assert '--seed-file ./optimized_practice_v2_3_0/' in code
-    assert '--no-seed-force-projection' not in code
-    assert '--brake-zones' not in code
-    assert '--skip-native' in code
-    assert '--feasibility-iterations 50' in code

@@ -24,7 +24,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 MAP_NAME = "autodrive_practice_20260924_b.yaml"
 RACELINE_PATH = os.path.join(
     "autodrive_practice_20260924_b",
-    "ipopt_v343_tracking_reserve_raceline.csv")
+    "source_command_4p800.csv")
 
 
 def _bool(value: str) -> bool:
@@ -151,7 +151,12 @@ def _setup(context):
             },
         ], remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")])
 
-    mpc_parameters = [os.path.join(mpc, "config", "mpc_competition.yaml")]
+    # The fastline file is an overlay; retain the complete base configuration,
+    # including command publication and the solver/plant settings it omits.
+    mpc_parameters = [
+        os.path.join(mpc, "config", "mpc_competition.yaml"),
+        os.path.join(mpc, "config", "mpc_practice_fastline.yaml"),
+    ]
     if overlays["mpc_parameter_overlay"]:
         mpc_parameters.append(overlays["mpc_parameter_overlay"])
     diagnostics = _bool(

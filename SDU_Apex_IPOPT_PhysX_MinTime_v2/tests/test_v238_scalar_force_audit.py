@@ -5,7 +5,7 @@ import pytest
 from types import SimpleNamespace
 
 from seed_projection import project_algebraics
-from diagnose_force_consistency_v238 import analyze_seed, evaluate_scalar_tire_forces
+from diagnostic_fixtures.diagnose_force_consistency_v238 import analyze_seed, evaluate_scalar_tire_forces
 
 
 class Tire:

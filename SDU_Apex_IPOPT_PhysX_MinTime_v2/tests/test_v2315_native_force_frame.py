@@ -9,7 +9,7 @@ from wheel_model_overlay_v2315 import (
 )
 from tests.test_v2314_native_lateral_slip_sign import wheel_source
 from tests.test_phase1_overlay import LEGACY, _sample
-from diagnose_force_frame_v2315 import rotation_prediction
+from diagnostic_fixtures.diagnose_force_frame_v2315 import rotation_prediction
 
 
 def genuine_fragment():

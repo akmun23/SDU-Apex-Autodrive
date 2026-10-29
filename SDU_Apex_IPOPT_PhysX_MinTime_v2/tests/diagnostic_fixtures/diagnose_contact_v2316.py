@@ -16,11 +16,11 @@ import json
 from pathlib import Path
 import numpy as np
 import casadi as ca
-from diagnose_slip_parity_v2314 import reconstruct_records
-from diagnose_force_frame_v2315 import rotation_prediction, metric
+from .diagnose_slip_parity_v2314 import reconstruct_records
+from .diagnose_force_frame_v2315 import rotation_prediction, metric
 from recover import load_modules
 from source_vehicle import current_model, bind_current_wheel_moment_arms
-from diagnose_slip_v2313 import WHEELS
+from .diagnose_slip_v2313 import WHEELS
 
 
 def interpolate_native_body_rates(seed: dict, records: list[dict], length_m: float):

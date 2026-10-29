@@ -18,9 +18,9 @@ class BlendedContinuationReplayTests(unittest.TestCase):
 
     def test_replay_arguments_make_backtracking_explicit_and_bounded(self):
         baseline = replay.replay_arguments()
-        experimental = replay.replay_arguments(3)
+        three_backtracks = replay.replay_arguments(3)
         self.assertEqual(baseline[replay.REPLAY_LINE_SEARCH_ARGUMENT_INDEX], "0")
-        self.assertEqual(experimental[replay.REPLAY_LINE_SEARCH_ARGUMENT_INDEX], "3")
+        self.assertEqual(three_backtracks[replay.REPLAY_LINE_SEARCH_ARGUMENT_INDEX], "3")
         for invalid in (-1, 4, True, 1.5):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 replay.replay_arguments(invalid)

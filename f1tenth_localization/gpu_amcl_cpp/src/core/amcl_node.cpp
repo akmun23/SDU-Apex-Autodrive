@@ -1072,13 +1072,9 @@ void AmclNode::map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
         init_est.covariance(1, 1) = local_tracking_cloud_covariance_xy_;
         init_est.covariance(2, 2) = local_tracking_cloud_covariance_yaw_;
 
-        // Local race-start initialization is already a valid map lock.  The
-        // previous implementation only populated this reference when a
-        // global particle hypothesis was accepted, so local startup skipped
-        // the odometry-consistency guard entirely and could slowly migrate
-        // to a visually similar section of the circuit.  Anchor the local
-        // cloud to the odom sample used at startup; subsequent scan updates
-        // are then checked against this fixed map-to-odom reference.
+        // Local race-start initialization is already a valid map lock. Anchor
+        // the local cloud to the odom sample used at startup so subsequent
+        // scan updates are checked against a fixed map-to-odom reference.
         if (odom_received_) {
             local_odom_reference_x_ = prev_x_;
             local_odom_reference_y_ = prev_y_;
@@ -1615,13 +1611,10 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
     bool local_tracking_update = false;
     const auto causal_odom_covariance = [&]() {
         std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
-        // A rejected scan does not make the already validated causal odometry
-        // state instantly uncertain.  The previous implementation added a
-        // fixed 0.01 m^2 on every scan, so a confidence floor at 20 Hz forced
-        // the controller to stop after roughly one second even when odometry
-        // was still tracking the simulator.  Odom callbacks already grow the
-        // propagated covariance using the configured process model; preserve
-        // that state here and let the health counter expose the scan outage.
+        // A rejected scan does not invalidate the causal odometry estimate.
+        // Odom callbacks already propagate covariance using the configured
+        // process model; preserve that estimate and expose scan outages via
+        // the localization health counter.
         Eigen::Matrix3d covariance = current_map_pose_covariance_;
         if (!map_odom_valid_ || !covariance.allFinite()) {
             covariance.setZero();
@@ -1976,12 +1969,9 @@ void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         pose_covariance_xy <= global_pose_covariance_xy_max_ &&
         pose_covariance_yaw <= global_pose_covariance_yaw_max_;
 
-    /* A circuit can contain multiple visually identical corridors. At race
-     * startup the vehicle is required to be at the known first waypoint, so a
-     * low-covariance alias elsewhere on the same raceline is not sufficient
-     * to unlock the controller. This remains a map/raceline prior and does
-     * not consume simulator ground truth. Disable it only for deliberate
-     * arbitrary-track-position localization experiments. */
+    /* A circuit can contain visually identical corridors. At race startup,
+     * the known start waypoint is a map prior: a low-covariance alias elsewhere
+     * on the raceline is not sufficient to unlock the controller. */
     const bool explicit_start_anchor =
         std::isfinite(global_start_anchor_x_m_) &&
         std::isfinite(global_start_anchor_y_m_) &&
@@ -2507,12 +2497,9 @@ void AmclNode::publish_current_map_pose(
         return;
     }
 
-    // The EKF output covariance is cumulative in its local odom epoch.  Use it
-    // as the lower bound for the propagated map pose instead of adding a
-    // fixed per-second ramp.  The old ramp reached 0.25 m^2 during a long but
-    // accurate run and made the controller reject the pose solely because of
-    // elapsed wall time.  Keep the configured process rates only as a legacy
-    // fallback for messages that do not carry finite source covariance.
+    // The EKF output covariance is cumulative in its local odom epoch. Use it
+    // as the lower bound for propagated map-pose uncertainty. Configured
+    // process rates are used only when the incoming covariance is unusable.
     Eigen::Matrix3d odom_covariance = Eigen::Matrix3d::Zero();
     odom_covariance(0, 0) = odom_msg.pose.covariance[0];
     odom_covariance(0, 1) = odom_msg.pose.covariance[1];
@@ -2527,9 +2514,8 @@ void AmclNode::publish_current_map_pose(
         odom_covariance(0, 0) >= 0.0 && odom_covariance(1, 1) >= 0.0 &&
         odom_covariance(2, 2) >= 0.0;
     if (usable_odom_covariance) {
-        // A previous scan estimate must never be allowed to poison the
-        // controller-facing propagated pose.  This also covers a malformed
-        // covariance from a legacy AMCL update before the EKF source arrives.
+        // Keep a malformed scan covariance from poisoning the
+        // controller-facing propagated pose before valid odometry arrives.
         if (!current_map_pose_covariance_.allFinite()) {
             current_map_pose_covariance_.setZero();
         }

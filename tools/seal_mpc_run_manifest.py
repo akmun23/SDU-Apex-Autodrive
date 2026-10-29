@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seal MPC experiment provenance before simulator/controller launch."""
+"""Seal MPC trial provenance before simulator/controller launch."""
 
 from __future__ import annotations
 
@@ -161,9 +161,9 @@ def file_record(root: Path, raw_path: str) -> dict:
 def validate_mpc_overlay(path: Path) -> None:
     """Reject ROS selectors that would silently leave the MPC unchanged.
 
-    The maintained launch names its unnamespaced component
-    /mpc_controller_node. A typo in a YAML selector is otherwise accepted by
-    ROS while applying none of the intended experiment parameters.
+    The launch names its unnamespaced component /mpc_controller_node. A typo
+    in a YAML selector is otherwise accepted by ROS while applying none of the
+    requested parameters.
     """
     validate_node_overlay(path, "mpc_controller_node")
 

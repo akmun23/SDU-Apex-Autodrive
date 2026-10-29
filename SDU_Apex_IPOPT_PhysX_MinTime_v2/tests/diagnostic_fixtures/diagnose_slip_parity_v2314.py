@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 from recover import load_modules
 from source_vehicle import current_model, bind_current_wheel_moment_arms
-from diagnose_slip_v2313 import WHEELS, build_casadi_audit, build_audit, summarize
+from .diagnose_slip_v2313 import WHEELS, build_casadi_audit, build_audit, summarize
 
 
 def reconstruct_records(rows: list[dict]) -> list[dict]:

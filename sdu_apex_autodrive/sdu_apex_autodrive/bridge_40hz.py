@@ -712,7 +712,7 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
 
 
 def _install_packet_contract() -> None:
-    """Accept both legacy and source-camera-disabled simulator packets."""
+    """Accept simulator packets with or without optional camera fields."""
     global _packet_contract_installed
     if _packet_contract_installed:
         return
@@ -744,7 +744,7 @@ def _install_packet_contract() -> None:
                 # The official bridge accesses this key unconditionally.
                 # Injecting an empty placeholder keeps its numeric decoder
                 # compatible with the source-disabled packet and replaces a
-                # legacy image field before base64/PIL work can happen.
+                # optional image field before base64/PIL work can happen.
                 data = dict(data)
                 data["V1 Front Camera Image"] = ""
             if isinstance(data, dict) and any(

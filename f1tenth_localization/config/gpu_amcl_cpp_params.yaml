@@ -44,7 +44,7 @@ gpu_amcl_cpp:
     # The EKF odom message already carries cumulative, calibrated source-time
     # covariance. Do not add a second arbitrary time-based covariance ramp to
     # an otherwise accurate map pose; nonzero values remain only as a fallback
-    # for legacy odometry messages without a usable covariance.
+    # for odometry messages without a usable covariance.
     current_map_pose_process_xy_m2_per_s: 0.0
     current_map_pose_process_yaw2_per_s: 0.0
     localization_degraded_after_s: 0.30

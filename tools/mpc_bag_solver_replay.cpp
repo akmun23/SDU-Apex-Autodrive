@@ -524,14 +524,14 @@ int main(int argc, char **argv)
                  * trajectory/source-plant initializer, not the previous
                  * rejected QP suffix. The current sensor state still carries
                  * the immutable in-flight actuator queue. This is a replay
-                 * experiment only; it is not a publishable recovery action
+                 * offline analysis only; it is not a publishable recovery action
                  * and does not reconstruct an unavailable certified suffix. */
                 memory.nominal.valid = 0;
                 memory.warm_start_controls_valid = 0;
                 memory.warm_start_control_count = 0;
             }
             if (solver_start == "dual-cold") {
-                /* Experimental hybrid ADMM seed: retain shifted primal
+                /* Hybrid ADMM seed: retain shifted primal
                  * projections (z), adapted rho values, and nominal/command
                  * history, but discard dual multipliers (y). This isolates
                  * whether stale duals hurt difficult corridor states without
@@ -559,7 +559,7 @@ int main(int argc, char **argv)
             const bool nominal_seed_injected =
                 seed_it != nominal_seed_controls.end();
             if (nominal_seed_injected) {
-                /* Offline-only source-plant continuation experiment. The
+                /* Offline source-plant continuation analysis. The
                  * seed file stores 30 actions already checked from this
                  * saved state by the source-plant audit. The warm-start
                  * contract shifts out element zero (the action in flight),

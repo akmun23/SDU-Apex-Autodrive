@@ -15,8 +15,12 @@ case "${track}" in
     image="autodriveecosystem/autodrive_roboracer_sim:2026-icra-compete"
     container="${SDU_APEX_SIM_CONTAINER:-sdu_apex_sim_compete}"
     ;;
+  iros)
+    image="autodriveecosystem/autodrive_roboracer_sim@sha256:749fbef07942109d18497cbcf6ffe9452e06ae487f2bfc915e92440bc4b4663d"
+    container="${SDU_APEX_SIM_CONTAINER:-sdu_apex_sim_iros}"
+    ;;
   *)
-    echo "SDU_APEX_SIM_TRACK must be practice or compete." >&2
+    echo "SDU_APEX_SIM_TRACK must be practice, compete, or iros." >&2
     exit 2
     ;;
 esac

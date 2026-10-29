@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import casadi as ca
 import pytest
-from diagnose_slip_v2313 import build_audit, build_casadi_audit, summarize
+from diagnostic_fixtures.diagnose_slip_v2313 import build_audit, build_casadi_audit, summarize
 
 
 def _record():
@@ -60,7 +60,7 @@ def test_source_seed_capture_records_true_native_wheel_state():
     assert "'wheel_omega_radps': raw[3:7].copy()" in source
     assert "if contact_records is not None:" in source
     assert 'body velocities and wheel angular speeds are sampled after' in (
-        Path(__file__).resolve().parents[1]/'diagnose_slip_v2313.py').read_text()
+        Path(__file__).resolve().parent/'diagnostic_fixtures'/'diagnose_slip_v2313.py').read_text()
 
 
 def test_native_audit_casadi_function_preserves_wheel_order_and_native_slip_path():

@@ -1,0 +1,80 @@
+# Contiguous-gap Follow The Gap (FTG) mapping configuration
+# =========================================================
+# Selects one connected effective-clearance gap. Disconnected openings are
+# never averaged into a straight command.
+
+ftg_node:
+  ros__parameters:
+    mapping_throttle_normalized: 0.02
+    scan_topic: /autodrive/roboracer_1/lidar
+    command_topic: /mpc/drive_command
+
+    # ===================
+    # Vehicle Parameters
+    # ===================
+    # AutoDRIVE simulator geometry; keep aligned with
+    # f1tenth_planning/config/autodrive_sim_vehicle.yaml.
+    wheelbase: 0.324         # Distance between front and rear axles (m)
+    car_width: 0.273         # Vehicle width for the clearance cone (m)
+
+    # ===================
+    # Speed Control
+    # ===================
+    max_speed: 0.40          # Initial hairpin mapping ceiling (m/s)
+    min_speed: 0.12          # Crawl speed while a path remains valid (m/s)
+    speed_full_range: 2.0    # Range (m) at which full speed is used
+    steer_slowdown_gain: 1.0 # Full anticipatory steering slowdown
+
+    # ===================
+    # Steering Control
+    # ===================
+    max_steering: 0.5235          # [rad] AutoDRIVE steering saturation
+    steering_gain: 1.0            # Proportional gain on target angle
+    max_steering_rate: 3.2        # [rad/s] AutoDRIVE steering-rate limit
+    target_ema_alpha: 1.0         # Disabled initially to avoid hairpin delay
+
+    # ===================
+    # Contiguous-gap scoring
+    # ===================
+    heading_weight: 0.20       # Mild preference for forward gaps
+    score_power: 1.5
+    clearance_cone_scale: 1.05
+    min_score_range: 0.25
+    gap_switch_margin: 0.15    # Relative score advantage before switching branch
+    gap_switch_scans: 2        # Consecutive LiDAR scans required
+
+    # ===================
+    # Ackermann swept-footprint rollout
+    # ===================
+    car_length: 0.510
+    rear_overhang: 0.080
+    lidar_to_rear_axle: 0.2733  # Active mapping TF base_link -> lidar x
+    footprint_margin: 0.03
+    rollout_distance: 1.50
+    rollout_step: 0.05
+    trajectory_min_free_distance: 0.25
+    trajectory_candidate_count: 31
+
+    # ===================
+    # Safety Parameters
+    # ===================
+    emergency_brake_distance: 0.10  # Raw-return emergency threshold (m)
+
+    # ===================
+    # LiDAR Processing
+    # ===================
+    disparity_threshold: 0.5  # Disparity detection threshold (m)
+    wall_margin: 0.03         # Single explicit geometric wall margin (m)
+    gap_threshold: 0.5        # Min range to count as "gap" for visualisation
+    min_gap_width: 0.10       # Minimum control-gap width (rad)
+
+    # ===================
+    # Generic LiDAR Preprocessing
+    # ===================
+    lidar:
+      range_min: 0.06        # Navigation minimum; raw safety runs independently
+      range_max: 10.0        # Maximum range to consider (m)
+      angle_min: -2.0944     # Min angle to process (rad) = -120 deg
+      angle_max: 2.0944      # Max angle to process (rad) = +120 deg
+      apply_median_filter: true    # Median filter for noise reduction
+      median_window_size: 3        # Window (must be odd)

@@ -14,8 +14,8 @@ import json
 from pathlib import Path
 import numpy as np
 
-from diagnose_slip_parity_v2314 import reconstruct_records
-from diagnose_slip_v2313 import build_casadi_audit
+from .diagnose_slip_parity_v2314 import reconstruct_records
+from .diagnose_slip_v2313 import build_casadi_audit
 from recover import load_modules
 from source_vehicle import current_model, bind_current_wheel_moment_arms
 

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from diagnose_force_consistency_v238 import evaluate_scalar_tire_forces
+from .diagnose_force_consistency_v238 import evaluate_scalar_tire_forces
 from recover import load_modules
 from seed_projection import load_native_seed, validate_seed_provenance
 from source_vehicle import bind_current_wheel_moment_arms, current_model

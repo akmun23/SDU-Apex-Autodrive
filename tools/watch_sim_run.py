@@ -30,8 +30,7 @@ def stall_watch_armed(watch_mpc_run: bool, mpc_active: bool) -> bool:
 
 
 class SimRunWatcher(Node):
-    def __init__(self, watch_mpc_horizon_test: bool = False,
-                 watch_mpc_run: bool = False,
+    def __init__(self, watch_mpc_run: bool = False,
                  watch_csv_command_test: bool = False,
                  watch_csv_path_follow: bool = False) -> None:
         super().__init__("development_sim_run_watcher")
@@ -42,8 +41,6 @@ class SimRunWatcher(Node):
         self.last_odometry_position: tuple[float, float] | None = None
         self.total_odometry_distance_m = 0.0
         self.last_progress_time: float | None = None
-        self.mpc_horizon_event: str | None = None
-        self.mpc_horizon_terminal_observed = False
         self.mpc_fault_reason: str | None = None
         self.mpc_active = False
         self.csv_command_event: str | None = None
@@ -60,13 +57,6 @@ class SimRunWatcher(Node):
             10,
         )
         self.create_subscription(Odometry, "/odom", self._odom_callback, 10)
-        if watch_mpc_horizon_test:
-            self.create_subscription(
-                String,
-                "/mpc/open_loop_test",
-                self._mpc_horizon_callback,
-                10,
-            )
         if watch_mpc_run:
             self.create_subscription(
                 String,
@@ -112,18 +102,6 @@ class SimRunWatcher(Node):
         if dx * dx + dy * dy >= 0.10 * 0.10:
             self.progress_position = current
             self.last_progress_time = time.monotonic()
-
-    def _mpc_horizon_callback(self, message: String) -> None:
-        try:
-            payload = json.loads(message.data)
-        except (TypeError, json.JSONDecodeError):
-            return
-        event = payload.get("event")
-        if event in ("complete", "abort"):
-            self.mpc_horizon_event = event
-            self.mpc_horizon_terminal_observed = bool(
-                payload.get("terminal_state_observed", False))
-            print(f"MPC_HORIZON_TEST_{event.upper()}: {message.data}", flush=True)
 
     def _mpc_diagnostics_callback(self, message: String) -> None:
         try:
@@ -173,8 +151,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-lap", type=int, default=0)
     parser.add_argument("--collision-only", action="store_true")
-    parser.add_argument("--mpc-horizon-test", action="store_true",
-                        help="keep collision watch active until one-shot horizon stops")
     parser.add_argument("--mpc-run", action="store_true",
                         help="abort the simulator on the first rejected MPC cycle")
     parser.add_argument("--csv-command-test", action="store_true",
@@ -196,18 +172,16 @@ def main() -> int:
     )
     args = parser.parse_args()
     if ((args.target_lap < 1 and not args.collision_only and
-         not args.mpc_horizon_test and not args.mpc_run and
+         not args.mpc_run and
          not args.csv_command_test) or
             (args.collision_only and args.target_lap != 0) or
-            (args.mpc_horizon_test and
-             (args.target_lap != 0 or args.collision_only or args.mpc_run)) or
             (args.mpc_run and
              (args.collision_only or args.csv_command_test or
               args.csv_path_follow)) or
             (args.csv_command_test and
-             (args.target_lap != 0 or args.collision_only or args.mpc_horizon_test)) or
+             (args.target_lap != 0 or args.collision_only)) or
             (args.csv_path_follow and
-             (args.target_lap < 1 or args.collision_only or args.mpc_horizon_test or
+             (args.target_lap < 1 or args.collision_only or
               args.csv_command_test)) or
             args.timeout_s <= 0.0 or args.stall_timeout_s <= 0.0 or
             args.post_target_lap_guard_s < 0.0 or
@@ -217,10 +191,8 @@ def main() -> int:
 
     rclpy.init()
     watcher = SimRunWatcher(
-        args.mpc_horizon_test, args.mpc_run or args.mpc_horizon_test,
-        args.csv_command_test, args.csv_path_follow)
+        args.mpc_run, args.csv_command_test, args.csv_path_follow)
     print("WATCHER_READY: collision, lap, odometry"
-          + (", and fixed-horizon completion" if args.mpc_horizon_test else "")
           + (", and MPC rejection" if args.mpc_run else "")
           + (", and CSV replay completion" if args.csv_command_test else "")
           + (", CSV follower abort, and target-lap completion"
@@ -236,10 +208,6 @@ def main() -> int:
             if watcher.collision_count is not None and watcher.collision_count > 0:
                 print("SCREEN_ABORT: collision", flush=True)
                 result = 3
-                break
-            if watcher.mpc_horizon_event == "abort":
-                print("SCREEN_ABORT: MPC fixed-horizon execution aborted", flush=True)
-                result = 5
                 break
             if watcher.mpc_fault_reason is not None:
                 print(f"SCREEN_ABORT: MPC fault ({watcher.mpc_fault_reason})",
@@ -267,17 +235,6 @@ def main() -> int:
                           flush=True)
                     result = 0
                     break
-            if (args.mpc_horizon_test and
-                    watcher.mpc_horizon_event == "complete"):
-                if not watcher.mpc_horizon_terminal_observed:
-                    print("SCREEN_ABORT: MPC horizon ended without a terminal "
-                          "state observation", flush=True)
-                    result = 5
-                    break
-                print("SCREEN_COMPLETE: full MPC horizon observed; simulator "
-                      "will be stopped by the run supervisor", flush=True)
-                result = 0
-                break
             if (not args.collision_only and
                     stall_watch_armed(args.mpc_run, watcher.mpc_active) and
                     watcher.last_progress_time is not None and
