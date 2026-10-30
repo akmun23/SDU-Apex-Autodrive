@@ -85,3 +85,35 @@ C. If the sector predictor remains trapped, introduce map-constrained geometry
 D. Keep exactly one heavy optimization job active. The dashboard should show
    the active new workspace and distinguish certified improvements from
    infeasible IPOPT progress.
+
+
+## 30 October: substantial equal-time quality improvement and early acceptance
+
+The running equal-time clearance objective produced a separate, near-feasible
+geometry at 7.100 seconds. Its repair phase saved an iterate with scaled
+constraint residual 9.622098e-06, but IPOPT had not converged by ~700
+iterations. Stopping the solve at a durable checkpoint and running
+`certify_witness` against the unchanged production source model produced a
+**source-certified 7.100 s witness with 0.016890176 m extra 1 ms footprint
+clearance**, beyond the same 0.05 m required margin. The steering-command
+step RMS also improved from ~0.05218 rad to ~0.04237 rad.
+
+This is an equal-time **quality** gain, not a faster lap and not a Unity
+ten-lap driving result. The checkpoint meets the strict scaled dynamics
+acceptance threshold of 1e-05, but does not prove an exact mathematical
+solution or performance on the physical controller.
+
+A new optional `solve_witness(early_clearance_target_m=...)` monitors the
+*restoration objective only*. Every 40 iterations, if scaled NLP residual and
+periodic state defect are <=1e-05, it runs the original full 1 ms source replay.
+It stops IPOPT at a saved candidate only if that replay passes the full XY
+mismatch gate and yields at least the required positive clearance reserve.
+The normal final source rollout and independent `certify_witness` still run
+before archiving or promoting the witness. The elite restoration caller sets
+the acceptance reserve to the incumbent slack plus 2 mm. In a full-source
+replay using the saved high-clearance iterate, the early acceptance triggered
+at iteration 0 and still produced `source_witness_passed`.
+
+The GUI now correctly counts all equal-time alternatives, not only margin
+and geometry variations. It reports the *published* source clearance separately
+from archived alternative clearance and names restoration phases explicitly.

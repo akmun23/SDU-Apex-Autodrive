@@ -264,7 +264,8 @@ def polish_equal_time(*, repo, seed, map_path, output, iterations=300, workers=4
                     command_seed=restore_seed,workers=workers,
                     clearance_cuts=sorted(restore_cuts),
                     stagnation_iterations=stagnation_iterations,
-                    cancel_requested=cancel_requested,objective_mode='repair')
+                    cancel_requested=cancel_requested,objective_mode='repair',
+                    early_clearance_target_m=state['best_clearance_slack_m']+.002)
             for repair in range(1,4):
                 if restore_report['status']=='source_witness_passed':
                     break
@@ -301,7 +302,8 @@ def polish_equal_time(*, repo, seed, map_path, output, iterations=300, workers=4
                     command_seed=restore_seed,workers=workers,
                     clearance_cuts=sorted(restore_cuts),
                     stagnation_iterations=stagnation_iterations,
-                    cancel_requested=cancel_requested,objective_mode='repair')
+                    cancel_requested=cancel_requested,objective_mode='repair',
+                    early_clearance_target_m=state['best_clearance_slack_m']+.002)
             restoration_status=restore_report.get('status')
             if restoration_status=='source_witness_passed':
                 report=restore_report

@@ -364,3 +364,16 @@ def test_sector_time_predictor_has_independent_cyclic_timing_decisions(maps):
     with pytest.raises(ValueError,match='sector timing only'):
         command_problem(root,function,digest,initial_x,initial_u,
             1,grid,.05,1,time_predictor=False,time_sectors=3)
+
+
+
+@pytest.mark.parametrize('target,objective',[
+    (-.001,'repair'),(float('nan'),'repair'),(.003,'clearance'),(.2,'repair')])
+def test_early_checkpoint_requires_valid_repair_clearance_target(
+        tmp_path,target,objective):
+    from command_ocp import solve_witness
+    with pytest.raises(ValueError,match='early certification target'):
+        solve_witness(repo=tmp_path,checkpoint=None,mesh=None,audit=None,
+            map_path=tmp_path/'not_available.pgm',output=tmp_path/'must_not_write',
+            early_clearance_target_m=target,objective_mode=objective)
+    assert not (tmp_path/'must_not_write').exists()

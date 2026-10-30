@@ -187,6 +187,7 @@ def test_infeasible_quality_proposal_is_restored_then_archived_at_same_duration(
     assert calls[1]['command_seed']==calls[0]['output']/'best_quality_proposal.npz'
     assert calls[1]['output'].name=='polish_00_restore'
     assert calls[1]['count']==40
+    assert calls[1]['early_clearance_target_m']==pytest.approx(.0022)
     assert state['attempts'][0]['proposal_restoration_status']=='source_witness_passed'
     assert len(state['accepted'])==1
     assert state['accepted'][0]['lap_s']==pytest.approx(1.)

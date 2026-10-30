@@ -607,8 +607,14 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
                   count=197, iterations=80, cpu_seconds=120., margin=.05,
                   command_seed=None, workers=8, clearance_cuts=(),
                   shorten_packet=False, stagnation_iterations=0, cancel_requested=None,
-                  recondition_seed=False, objective_mode='repair'):
+                  recondition_seed=False, objective_mode='repair',
+                  early_clearance_target_m=None):
     margin = validate_margin(margin)
+    if early_clearance_target_m is not None and (
+            not math.isfinite(early_clearance_target_m) or
+            early_clearance_target_m < 0. or early_clearance_target_m > .10 or
+            objective_mode != 'repair'):
+        raise ValueError('invalid early certification target for repair objective')
     if output.exists(): raise FileExistsError('refusing to overwrite command OCP')
     output.mkdir(parents=True)
     function, digest = production_command_map(repo, repo/'build_task/command_ocp')
@@ -656,6 +662,8 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
     significant = [float('inf'), 0]
     significant_objective = [float('inf')]
     stagnated = [False]
+    early_verified = [None]
+    early_checked_iteration = [-40]
     def callback(iteration):
         if cancel_requested is not None and cancel_requested():
             raise RuntimeError('command campaign interruption requested')
@@ -673,6 +681,45 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
                        residual, objective)
             save_command_checkpoint(output/'best_iterate.npz', *best[0][:2],
                                     digest, residual, int(iteration))
+        # The restoration OCP can have a source-certified, materially better
+        # checkpoint hundreds of iterations before IPOPT satisfies dual
+        # optimality. Evaluate occasionally, and interrupt ONLY after the
+        # unchanged full 1ms source-model and footprint gates have passed.
+        # This is one solver process, not a concurrent validation worker.
+        if (early_clearance_target_m is not None and
+                iteration-early_checked_iteration[0]>=40 and
+                0. <= residual <= 1.e-5):
+            early_checked_iteration[0]=int(iteration)
+            candidate_x=np.asarray(opti.debug.value(x))
+            candidate_u=np.asarray(opti.debug.value(u))
+            periodic=candidate_x[:,-1]-candidate_x[:,0]
+            periodic[2]-=winding*2*math.pi
+            periodic_scaled=float(np.max(np.abs(periodic/STATE_SCALES)))
+            if periodic_scaled<=1.e-5:
+                candidate_rollout=check_full_witness(
+                    function,candidate_x,candidate_u,grid,margin,repo=repo)
+                slack=float(candidate_rollout['minimum_1ms_footprint_slack_m'])
+                passed=(candidate_rollout['full_lap_xy_max_m']<=.05 and
+                        slack>=early_clearance_target_m)
+                print(json.dumps(dict(event='early_source_checkpoint_gate',
+                    iteration=int(iteration), lap_s=count*.025,
+                    clearance_slack_m=slack,
+                    target_slack_m=early_clearance_target_m,
+                    periodic_scaled_defect=periodic_scaled,
+                    source_xy_error_m=candidate_rollout['full_lap_xy_max_m'],
+                    accepted=passed)),flush=True)
+                if passed:
+                    # The normal solve_witness post-IPOPT report and export
+                    # still reruns the full source verifier. No shortcut is a
+                    # substitute for the two independent certification gates.
+                    best[0]=(candidate_x,candidate_u,residual,objective)
+                    save_command_checkpoint(output/'best_iterate.npz',
+                                            candidate_x,candidate_u,
+                                            digest,residual,int(iteration))
+                    early_verified[0]=dict(iteration=int(iteration),
+                        clearance_slack_m=slack,source_xy_error_m=
+                        candidate_rollout['full_lap_xy_max_m'])
+                    raise RuntimeError('source-certified restoration checkpoint accepted')
         if objective_mode in ('clearance', 'smooth'):
             merit = quality_proposal_merit(residual, objective, initial_objective)
             if merit is not None and (best_quality_proposal[0] is None or
@@ -724,8 +771,10 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
         source_plant_sha256=digest, trial_lap_s=count*.025, elapsed_s=time.monotonic()-started,
         required_margin_m=margin,
         initial_residual=violation(initial), last_significant_iteration=significant[1],
-        termination_reason=(('objective_stagnation' if residual <= 1.e-5 else
-            'feasibility_stagnation') if stagnated[0] else stats.get('return_status')),
+        termination_reason=('early_source_checkpoint' if early_verified[0]
+            else (('objective_stagnation' if residual <= 1.e-5 else
+            'feasibility_stagnation') if stagnated[0] else stats.get('return_status'))),
+        early_source_checkpoint=early_verified[0],
         max_constraint_violation=residual, ipopt_status=stats.get('return_status'),
         ipopt_iterations=stats.get('iter_count'), error=error, rollout=rollout,
         jacobian_workers=workers, initializer=str(command_seed or checkpoint),
