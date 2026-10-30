@@ -135,7 +135,7 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                  cancel_requested=None, coarse_fraction=0., on_improvement=None,
                  hybrid_time=False, predict=solve_time_predictor,
                  elite_refinements=0, elite_polish=None, elite_first=False,
-                 margin=.05, time_sectors=1):
+                 margin=.05, time_sectors=1, adaptive_regions=0):
     repo, seed, map_path, output = [Path(p).resolve() for p in (repo, seed, map_path, output)]
     margin = validate_margin(margin)
     if not isinstance(time_sectors,int) or not 1 <= time_sectors <= 32:
@@ -144,7 +144,8 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
             (not math.isfinite(target_seconds) or target_seconds < .75)) or phases < 1
             or not math.isfinite(coarse_fraction) or not 0. <= coarse_fraction < 1.
             or refinements < 0 or iterations < 1 or stagnation_iterations < 5
-            or elite_refinements < 0 or elite_refinements > 3):
+            or elite_refinements < 0 or elite_refinements > 3
+            or not isinstance(adaptive_regions,int) or not 0 <= adaptive_regions <= 24):
         raise ValueError('invalid campaign target or search settings')
     if digest is None:
         _, digest = production_command_map(repo, repo/'build_task/command_ocp')
@@ -158,10 +159,11 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
         map_metadata_sha256=(file_hash(map_path.with_suffix('.yaml'))
                              if map_path.with_suffix('.yaml').exists() else None))
     contract['elite_refinements'] = elite_refinements
+    contract['adaptive_regions'] = adaptive_regions
     contract['elite_first'] = bool(elite_first)
     contract['start_order'] = 'near-time-before-coarse/drop-first-v2'
     contract['command_objective_scaling'] = 'periodic-regularizer-v2'
-    contract['equal_time_search'] = 'causal-control-basin-v4'
+    contract['equal_time_search'] = ('adaptive-regions-v5' if adaptive_regions else 'causal-control-basin-v4')
     if hybrid_time:
         contract['time_predictor'] = ('source-24-25ms-sector-chord/v2'
                                       if time_sectors>1 else 'source-24-25ms-chord/v1')
@@ -248,7 +250,7 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
         exploration_key = baseline_hash+':'+contract['equal_time_search']
         explored = state.setdefault('elite_explored', [])
         if exploration_key not in explored:
-            elite_dir = output/'elite_causal_v4'/baseline_hash[:16]
+            elite_dir = output/('elite_adaptive_v5' if adaptive_regions else 'elite_causal_v4')/baseline_hash[:16]
             state['active_elite_polish'] = dict(seed=str(incumbent),
                 output=str(elite_dir), source_lap_s=source_count(incumbent)*.025)
             save()
@@ -267,6 +269,7 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                 # variations. Every candidate still needs original source
                 # feasibility and independent 1 ms footprint certification.
                 control_seeds=((.002,1),(-.002,1),(.004,2),(-.004,2),(.008,1)),
+                adaptive_regions=adaptive_regions,
                 on_candidate=on_improvement,
                 # Explore other local geometry basins at exactly the
                 # incumbent duration, in addition to improving clearance.
@@ -310,7 +313,7 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                     on_improvement=on_improvement,
                     hybrid_time=hybrid_time, predict=predict,
                     elite_refinements=0, elite_first=False, margin=margin,
-                    time_sectors=time_sectors)
+                    time_sectors=time_sectors, adaptive_regions=0)
                 if child['best_lap_s'] < state['best_lap_s']-1.e-9:
                     state['best_lap_s'] = child['best_lap_s']
                     state['best_witness'] = child['best_witness']
@@ -460,7 +463,12 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                             shorten_packet=strategy == 'drop-packet' and source_count(start) == count+1,
                             recondition_seed=hybrid_time and source_count(start) != count,
                             stagnation_iterations=stagnation_iterations,
-                            cancel_requested=cancel_requested, **margin_kwargs)
+                            cancel_requested=cancel_requested,
+                            # Recover independently verified shortening
+                            # checkpoints before IPOPT gets stuck minimizing
+                            # objective dual residuals at the track wall.
+                            early_clearance_target_m=0.,
+                            **margin_kwargs)
                         start = destination/'witness.npz'
                     if report['status'] != 'source_witness_passed':
                         # A source-correct, single-picometre wall shortfall is

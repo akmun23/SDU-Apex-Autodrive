@@ -88,7 +88,7 @@ def implementation_digest():
     digest = hashlib.sha256()
     for path in (Path(__file__), root/'command_ocp.py', root/'command_campaign.py',
                  root/'elite_refinement.py', root/'sector_time.py', root/'causal_seed.py',
-                 root/'rigid_pose_polish.py',
+                 root/'rigid_pose_polish.py', root/'adaptive_regions.py',
                  root/'map_track.py', root/'min_curvature_seed.py', root/'physics.py',
                  root/'path_frame.py', root/'command_realizability.py',
                  root.parent/'tools/build_mapped_raceline.py'):
@@ -348,7 +348,8 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
               phases=4, refinements=6, stagnation_iterations=250, prepare_only=False,
               bootstrap_only=False, cancel=None, driving_reference=None, hybrid_time=False,
               command_seed=None, elite_refinements=2, elite_first=True,
-              allow_search_code_update=False, time_sectors=1):
+              allow_search_code_update=False, time_sectors=1,
+              adaptive_regions=8):
     cancel = cancel or (lambda: False)
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -363,6 +364,7 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
         workers=workers, iterations=iterations, stagnation_iterations=stagnation_iterations, phases=phases,
         refinements=refinements, elite_refinements=elite_refinements,
         elite_first=bool(elite_first),
+        adaptive_regions=adaptive_regions,
         time_sectors=time_sectors,
         direction='unity_verified' if verified else 'clockwise',
         direction_reference_sha256=verified['sha256'] if verified else None,
@@ -521,6 +523,7 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
                 stagnation_iterations=stagnation_iterations, coarse_fraction=.1,
                 hybrid_time=hybrid_time, time_sectors=time_sectors,
                 elite_refinements=elite_refinements,
+                adaptive_regions=adaptive_regions,
                 elite_first=elite_first,
                 resume=(campaign/'campaign.json').exists(), cancel_requested=cancel,
                 on_improvement=promote)
@@ -600,6 +603,8 @@ def main():
     parser.add_argument('--allow-search-code-update', action='store_true',
                         help='explicitly audit and resume an optimizer-only code update '
                              'with identical map, source, seed and nondecreasing budgets')
+    parser.add_argument('--adaptive-regions', type=int, default=8,
+                        help='number of checkpointed, feedback-driven local corner starts')
     parser.add_argument('--no-elite-first', dest='elite_first', action='store_false',
                         help='defer equal-time diversification until the first plateau')
     parser.set_defaults(elite_first=True)
@@ -615,7 +620,8 @@ def main():
     args = parser.parse_args()
     if (not 1 <= args.workers <= (os.cpu_count() or 1) or args.iterations < 1
             or args.phases < 1 or args.refinements < 0 or args.stagnation_iterations < 5
-            or not 0 <= args.elite_refinements <= 3):
+            or not 0 <= args.elite_refinements <= 3
+            or not 0 <= args.adaptive_regions <= 24):
         parser.error('invalid solver search settings')
     image, metadata, config = resolve_map(args.map, args.yaml)
     driving_reference = args.driving_reference
@@ -656,6 +662,7 @@ def main():
             workers=args.workers, iterations=args.iterations, phases=args.phases,
             refinements=args.refinements, stagnation_iterations=args.stagnation_iterations,
             elite_refinements=args.elite_refinements, elite_first=args.elite_first,
+            adaptive_regions=args.adaptive_regions,
             allow_search_code_update=args.allow_search_code_update,
             prepare_only=args.prepare_only, bootstrap_only=args.bootstrap_only,
             driving_reference=driving_reference,

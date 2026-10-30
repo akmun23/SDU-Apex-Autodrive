@@ -51,8 +51,20 @@ def project_periodic_guess(states, winding:int):
 def source_alternative_seed(repo,seed,destination,amplitude_rad,harmonic,
                             phase_rad=0.,settling_laps=3, map_path=None,
                             max_initial_clearance_deficit_m=.01):
-    """Build coherent steering-driven seeds; promote only after independent OCP."""
-    from command_ocp import production_command_map, save_command_checkpoint, seed_dynamic_defect
+    """Legacy global harmonic perturbation with propagated source state."""
+    from command_campaign import source_count
+    return source_profile_seed(
+        repo,seed,destination,
+        control_profile(source_count(Path(seed)),amplitude_rad,harmonic,phase_rad),
+        settling_laps=settling_laps,map_path=map_path,
+        max_initial_clearance_deficit_m=max_initial_clearance_deficit_m)
+
+
+def source_profile_seed(repo,seed,destination,steering_delta,*,
+                        settling_laps=3,map_path=None,
+                        max_initial_clearance_deficit_m=.01):
+    """Source-propagate steering controls; output remains uncertified."""
+    from command_ocp import production_command_map, save_command_checkpoint
     repo,seed,destination=map(Path,(repo,seed,destination))
     if not 1 <= settling_laps <= 12:
         raise ValueError('bad source-history settling count')
@@ -65,7 +77,10 @@ def source_alternative_seed(repo,seed,destination,amplitude_rad,harmonic,
         controls=np.asarray(stored['controls'],dtype=float).copy()
     count=controls.shape[1]
     winding=round((original[2,-1]-original[2,0])/(2*math.pi))
-    profile=control_profile(count,amplitude_rad,harmonic,phase_rad)
+    profile=np.asarray(steering_delta,dtype=float).reshape(-1)
+    if (profile.shape!=(count,) or not np.isfinite(profile).all() or
+            np.max(np.abs(profile))>.0800001):
+        raise ValueError('invalid source-profile perturbation')
     controls[0] = np.clip(controls[0]+profile,-.5235987755982988,.5235987755982988)
     initial=original[:,0].copy()
     for _ in range(settling_laps):

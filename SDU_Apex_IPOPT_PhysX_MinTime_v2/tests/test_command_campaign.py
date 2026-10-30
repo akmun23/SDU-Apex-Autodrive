@@ -64,6 +64,7 @@ def test_source_wall_cuts_feed_exact_primal_back_to_ipopt_then_keep_faster(setup
     assert calls[1]['clearance_cuts'] == [(1, 7)]
     assert calls[1]['command_seed'] == calls[0]['output']/'witness.npz'
     assert all(c['cpu_seconds'] == 1.e20 for c in calls)
+    assert all(c['early_clearance_target_m'] == 0. for c in calls)
     assert not state['runtime_promoted'] and not state['unity_validated']
 
 

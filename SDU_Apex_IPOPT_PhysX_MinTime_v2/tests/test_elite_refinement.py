@@ -314,3 +314,95 @@ def test_control_basin_generation_precedes_geometry_and_is_not_auto_certified(
     assert all(a['strategy']=='control' for a in result['attempts'])
     assert len(result['accepted'])==2
     assert len(result['control_seed_diagnostics'])==2
+
+
+def test_adaptive_elite_branches_follow_certified_success_with_shifted_center(
+        tmp_path, monkeypatch):
+    import adaptive_regions, causal_seed, map_track
+    baseline=tmp_path/'baseline'
+    certificate(baseline,slack=.0001)
+    grid=tmp_path/'map.pgm'
+    grid.write_bytes(b'dummy-map-contract')
+    monkeypatch.setattr(map_track.MapGrid,'load',staticmethod(lambda path:object()))
+    monkeypatch.setattr(adaptive_regions,'ranked_sectors',
+        lambda states,grid,sectors:[
+            dict(sector=i,score=10-i,minimum_node_slack_m=.01,
+                 peak_lateral_accel_mps2=5.) for i in range(8)])
+    seeds=[]
+    def source_profile(repo,seed,destination,steering_delta,**kw):
+        seeds.append((str(seed),np.asarray(steering_delta).copy()))
+        with np.load(seed,allow_pickle=False) as data:
+            x=data['state'].copy()
+            u=data['controls'].copy()
+        x[0]+=0.02
+        u[0]+=steering_delta
+        save_command_checkpoint(destination,x,u,'fixture',.001,-1)
+        return dict(path=str(destination),source_certified=False,
+                    initial_scaled_dynamic_defect=.001,
+                    initial_minimum_node_slack_m=.01)
+    monkeypatch.setattr(causal_seed,'source_profile_seed',source_profile)
+    def solve(**kw):
+        kw['output'].mkdir()
+        with np.load(kw['command_seed'],allow_pickle=False) as f:
+            save_command_checkpoint(kw['output']/'witness.npz',
+                f['state'],f['controls'],'fixture',.0,-1)
+        report=dict(status='source_witness_passed',trial_lap_s=1.)
+        (kw['output']/'report.json').write_text(json.dumps(report))
+        return report
+    certificates=[]
+    def certify(repo,seed,map_path,out):
+        certificates.append(out)
+        return certificate(out,slack=.003+len(certificates)*.002,
+                           marker=.03*len(certificates))
+    kwargs=dict(repo=tmp_path,seed=baseline/'witness.npz',map_path=grid,
+        output=tmp_path/'adaptive',adaptive_regions=2,
+        margin_steps=(),quality_objectives=(),geometry_seeds=(),
+        control_seeds=(),max_elites=5,solve=solve,certify=certify)
+    result=polish_equal_time(**kwargs)
+    assert result['complete'] and len(result['accepted'])==2
+    assert len(result['attempts'])==2
+    first,second=result['attempts']
+    assert first['adaptive_spec']['source']=='explore_ranked_region'
+    assert second['adaptive_spec']['source']=='exploit_certified'
+    assert second['adaptive_spec']['sector']==first['adaptive_spec']['sector']
+    assert second['adaptive_spec']['center_shift_sectors']==pytest.approx(.25)
+    assert seeds[1][0]==first['certified_witness']
+    assert len(result['adaptive_hotspots'])==8
+    assert len(result['adaptive_choices'])==2
+    assert polish_equal_time(**kwargs)['attempts']==result['attempts']
+    assert len(seeds)==2
+
+def test_adaptive_starts_are_interleaved_with_equal_time_quality(tmp_path,monkeypatch):
+    import adaptive_regions,causal_seed,map_track
+    monkeypatch.setattr(map_track.MapGrid,'load',staticmethod(lambda path:object()))
+    monkeypatch.setattr(adaptive_regions,'ranked_sectors',
+        lambda x,grid,sectors:[dict(sector=i,score=10-i) for i in range(sectors)])
+    def generate(repo,seed,destination,profile,**kwargs):
+        with np.load(seed,allow_pickle=False) as source:
+            save_command_checkpoint(destination,source['state'],source['controls'],
+                                    'fixture',.001,-1)
+        return dict(path=str(destination),source_certified=False,
+                    initial_minimum_node_slack_m=.01)
+    monkeypatch.setattr(causal_seed,'source_profile_seed',generate)
+    root=tmp_path/'seed'
+    certificate(root,slack=.0005)
+    map_path=tmp_path/'map.pgm'; map_path.write_bytes(b'mockmap')
+    types=[]
+    def solver(**kw):
+        types.append(kw.get('objective_mode','repair'))
+        kw['output'].mkdir(parents=True)
+        with np.load(kw['command_seed'],allow_pickle=False) as source:
+            save_command_checkpoint(kw['output']/'witness.npz',
+                source['state'],source['controls'],'fixture',.3,-1)
+        result=dict(status='no_validated_witness',trial_lap_s=1.,
+                    rollout=dict(violating_source_ticks=[],
+                                 full_lap_xy_max_m=.2))
+        (kw['output']/'report.json').write_text(json.dumps(result))
+        return result
+    state=polish_equal_time(repo=tmp_path,seed=root/'witness.npz',
+        map_path=map_path,output=tmp_path/'run',adaptive_regions=2,
+        quality_objectives=('clearance','smooth'),margin_steps=(),
+        solve=solver,certify=lambda *args:None)
+    assert [a['strategy'] for a in state['attempts']] == [
+        'adaptive','objective','adaptive','objective']
+    assert state['contract']['adaptive_strategy']=='interleaved-cyclic-regions-v2'
