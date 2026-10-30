@@ -10,6 +10,7 @@ from command_ocp import shorten_seed_by_packet
 from command_ocp import time_prediction_seed, certify_witness, save_npz_checkpoint
 from command_ocp import recondition_command_seed
 from command_ocp import command_problem, STATE_SCALES
+import command_ocp
 from physics import SourcePlant
 
 
@@ -219,6 +220,51 @@ def test_raw_time_relaxation_is_never_a_source_witness(tmp_path):
         certify_witness(tmp_path, path, tmp_path/'unused.pgm', tmp_path/'certified')
 
 
+def test_certification_uses_and_reports_explicit_required_margin(tmp_path, monkeypatch):
+    count = 3
+    witness = tmp_path/'witness.npz'
+    states = np.zeros((21, count+1))
+    states[2] = np.linspace(0., 2*np.pi, count+1)
+    controls = np.zeros((2, count))
+    save_npz_checkpoint(witness, schema='production-command-ocp/v1',
+                        state=states, controls=controls, dt_s=.025)
+
+    class Mapped:
+        def map(self, columns, _mode):
+            assert columns == count
+            return lambda _packed: states[:, 1:]
+
+    class Grid:
+        @staticmethod
+        def load(_path):
+            return object()
+
+    checked_margins = []
+    def check(_function, _states, _controls, _grid, margin, **_kwargs):
+        checked_margins.append(margin)
+        return dict(full_lap_xy_max_m=0., minimum_1ms_footprint_slack_m=0.)
+
+    monkeypatch.setattr(command_ocp, 'production_command_map', lambda *_: (Mapped(), 'source'))
+    monkeypatch.setattr(command_ocp, 'MapGrid', Grid)
+    monkeypatch.setattr(command_ocp, 'check_full_witness', check)
+    monkeypatch.setattr(command_ocp, 'export_reference', lambda *_: dict(path='fixture'))
+
+    report = certify_witness(tmp_path, witness, tmp_path/'map.pgm',
+                             tmp_path/'certification', margin=.125)
+
+    assert report['status'] == 'source_witness_passed'
+    assert report['required_margin_m'] == .125
+    assert checked_margins == [.125]
+
+
+@pytest.mark.parametrize('margin', [-.01, float('nan'), float('inf')])
+def test_certification_rejects_invalid_margin_before_writing(tmp_path, margin):
+    with pytest.raises(ValueError, match='margin'):
+        certify_witness(tmp_path, tmp_path/'missing.npz', tmp_path/'map.pgm',
+                        tmp_path/'certification', margin=margin)
+    assert not (tmp_path/'certification').exists()
+
+
 def test_source_history_initialization_preserves_body_guess_and_propagates_hidden_states(maps):
     function, _, plant, _ = maps
     plant.reset(0., 0., 0., 3.)
@@ -260,5 +306,61 @@ def test_cost_rescaling_preserves_every_relative_penalty(maps):
     opti.set_initial(u, trial_u)
     old_cost = (.001*np.sum(((trial_x-initial_x)/STATE_SCALES[:, None])**2)/count
                 +.001*np.sum((trial_u-initial_u)**2)/count
-                +.0001*np.sum(np.diff(trial_u, axis=1)**2)/count)
+                +.0001*np.sum((trial_u-np.roll(trial_u,1,axis=1))**2)/count)
     assert float(opti.value(opti.f, opti.initial())) == pytest.approx(old_cost*count/.001)
+
+
+def test_feasible_checkpoint_retains_quality_instead_of_lowest_residual():
+    from command_ocp import iterate_rank, quality_proposal_merit
+    assert iterate_rank(5.e-7, .1) < iterate_rank(1.e-12, 1.)
+    assert iterate_rank(1.e-12, 1.) < iterate_rank(.001, -.5)
+    assert iterate_rank(.002, 10.) < iterate_rank(.01, -100.)
+    assert iterate_rank(float('nan'), 0.) > iterate_rank(.1, 100.)
+    # A good feasible checkpoint remains the selected witness while a distinct
+    # exploratory proposal records a materially better, slightly infeasible point.
+    assert iterate_rank(5.e-7, .1) < iterate_rank(.0036, -.31)
+    assert quality_proposal_merit(.0036, -.31, .1) == pytest.approx(-.274)
+    assert quality_proposal_merit(.01001, -.5, .1) is None
+    assert quality_proposal_merit(.001, .099999, .1) is None
+
+
+def test_equal_time_smoothing_can_leave_old_command_sequence(maps):
+    from map_track import MapGrid
+    root=Path(__file__).resolve().parents[2]
+    function,_,_,digest=maps
+    production_command_map(root,root/'build_task/command_ocp')
+    initial_x=np.zeros((21,5))
+    initial_u=np.array([[.15,-.15,.15,-.15],[.1,.1,.1,.1]])
+    image=np.full((80,80),255,dtype=np.uint8)
+    grid=MapGrid(image,image>0,.05,np.zeros(2),0.,np.full((80,80),3.))
+    opti,x,u,_=command_problem(root,function,digest,initial_x,initial_u,1,grid,
+                              .05,1,objective_mode='smooth')
+    seed_cost=float(opti.value(opti.f,opti.initial()))
+    opti.set_initial(u,np.array([[0.,0.,0.,0.],[.1,.1,.1,.1]]))
+    assert float(opti.value(opti.f,opti.initial())) < seed_cost*.01
+
+
+def test_sector_time_predictor_has_independent_cyclic_timing_decisions(maps):
+    from map_track import MapGrid
+    root=Path(__file__).resolve().parents[2]
+    function,_,_,digest=maps
+    production_command_map(root,root/'build_task/command_ocp')
+    count=6
+    initial_x=np.zeros((21,count+1))
+    initial_x[2]=np.linspace(0,2*np.pi,count+1)
+    initial_x[3]=4.
+    initial_u=np.vstack([np.zeros(count),np.full(count,.1)])
+    image=np.full((90,90),255,dtype=np.uint8)
+    grid=MapGrid(image,image>0,.05,np.zeros(2),0.,np.full((90,90),4.))
+    opti,x,u,theta=command_problem(root,function,digest,initial_x,initial_u,
+        1,grid,.05,1,time_predictor=True,time_sectors=3)
+    assert theta.shape==(3,1)
+    before=float(opti.value(opti.f,opti.initial()))
+    assert before==pytest.approx(.15)
+    opti.set_initial(theta,[0.,1.,1.])
+    after=float(opti.value(opti.f,opti.initial()))
+    assert 0 < before-after < .003
+    assert opti.ng > 0
+    with pytest.raises(ValueError,match='sector timing only'):
+        command_problem(root,function,digest,initial_x,initial_u,
+            1,grid,.05,1,time_predictor=False,time_sectors=3)

@@ -67,6 +67,48 @@ def test_source_wall_cuts_feed_exact_primal_back_to_ipopt_then_keep_faster(setup
     assert not state['runtime_promoted'] and not state['unity_validated']
 
 
+def test_padded_margin_reaches_baseline_predictor_shortening_and_certification(setup):
+    margin = .12
+    solves, predictions, certifications = [], [], []
+
+    def solve(**kwargs):
+        solves.append(kwargs)
+        return solver_report(kwargs, passed=len(solves) > 1, residual=.1)
+
+    def predict(**kwargs):
+        predictions.append(kwargs)
+        return dict(status='no_time_proposal')
+
+    def certify(repo, seed, map_path, destination, margin=.05):
+        certifications.append(margin)
+        return checked(repo, seed, map_path, destination)
+
+    result = run_campaign(**setup, margin=margin, solve=solve, predict=predict,
+        certify=certify, hybrid_time=True)
+
+    assert result['status'] == 'target_reached'
+    assert result['contract']['required_margin_m'] == margin
+    assert len(solves) >= 2 and solves[0]['shorten_packet']
+    assert all(call['margin'] == margin for call in solves)
+    assert predictions and predictions[0]['margin'] == margin
+    assert certifications == [margin, margin]  # baseline and independent candidate gate
+
+
+def test_legacy_campaign_contract_resumes_at_default_margin(setup):
+    result = run_campaign(**setup, solve=lambda **kw: solver_report(kw, passed=True),
+                          certify=checked)
+    state_path = setup['output']/'campaign.json'
+    state = json.loads(state_path.read_text())
+    del state['contract']['required_margin_m']
+    state_path.write_text(json.dumps(state))
+
+    resumed = run_campaign(**setup, resume=True,
+        solve=lambda **kw: solver_report(kw, passed=True), certify=checked)
+
+    assert resumed['status'] == result['status']
+    assert resumed['contract']['required_margin_m'] == .05
+
+
 def test_failed_multistarts_plateau_without_repeating_or_losing_baseline(setup):
     calls = []
     def solve(**kwargs):
@@ -335,7 +377,12 @@ def test_interrupted_time_predictor_resumes_checkpoint_before_exact_repair(setup
 def test_plateau_tries_both_packet_and_time_objectives_from_distinct_elites(
         setup, tmp_path):
     """A same-time elite archive is a branching search, not a new fastest lap."""
-    seeds, solved, time_predictions, callbacks = [], [], [], []
+    seeds, solved, time_predictions, prediction_calls, callbacks = [], [], [], [], []
+    certifications = []
+
+    def certify_with_margin(repo, seed, map_path, destination, margin=.05):
+        certifications.append(margin)
+        return checked(repo, seed, map_path, destination)
     for index in (1, 2):
         folder=tmp_path/f'certified_elite_{index}'
         folder.mkdir()
@@ -377,22 +424,26 @@ def test_plateau_tries_both_packet_and_time_objectives_from_distinct_elites(
 
     def predict(**kw):
         time_predictions.append(str(kw['command_seed']))
+        prediction_calls.append(kw)
         kw['output'].mkdir(parents=True,exist_ok=True)
         result=dict(status='no_time_proposal',trial_lap_s=None,
                     predicted_lap_s=1.,proposed_intervals=None)
         (kw['output']/'report.json').write_text(json.dumps(result))
         return result
 
-    settings=dict(setup,target_seconds=.975,phases=1,hybrid_time=True,
+    settings=dict(setup,target_seconds=.975,phases=1,hybrid_time=True,margin=.12,
                   elite_refinements=2,elite_polish=elite,predict=predict,
                   on_improvement=lambda path,lap:callbacks.append((path,lap)))
-    state=run_campaign(**settings,solve=solve,certify=checked)
+    state=run_campaign(**settings,solve=solve,certify=certify_with_margin)
     assert state['status']=='target_reached'
     assert state['best_lap_s']==pytest.approx(.975)
     assert len(state['elite_archives'])==1
     # Both elites get their own source-grid and time-objective attempts.
     assert any('/elite_campaigns/elite1/' in x for x in time_predictions)
     assert any('/elite_campaigns/elite2/' in x for x in time_predictions)
+    assert all(call['margin'] == .12 for call in solved)
+    assert prediction_calls and all(call['margin'] == .12 for call in prediction_calls)
+    assert certifications and set(certifications) == {.12}
     child_folders=[x for x in (settings['output']/'elite_campaigns').iterdir() if x.is_dir()]
     assert len(child_folders)==2
     assert all((folder/'campaign.json').is_file() for folder in child_folders)
@@ -446,3 +497,49 @@ def test_hybrid_time_optimizer_uses_full_1200_300_budget(setup):
     assert len(predicted)==1
     assert predicted[0]['iterations']==1200
     assert predicted[0]['stagnation_iterations']==300
+
+
+def test_sector_time_predictor_is_separate_versioned_search(setup):
+    received=[]
+    def predict(**kw):
+        received.append(kw)
+        return predictor_report(kw,proposal=False)
+    state=run_campaign(**setup,hybrid_time=True,time_sectors=12,
+        predict=predict,solve=lambda **kw:solver_report(kw,passed=False,residual=.1),
+        certify=checked)
+    assert state['status']=='plateau'
+    assert state['contract']['time_sectors']==12
+    assert state['contract']['time_predictor']=='source-24-25ms-sector-chord/v2'
+    assert received and received[0]['time_sectors']==12
+
+
+def test_picometre_near_miss_is_revalidated_not_silently_accepted(setup,monkeypatch):
+    import rigid_pose_polish
+    repairs=[]
+    def fake_recovery(repo,seed,map_path,output,*,margin,certify):
+        repairs.append(seed)
+        output.mkdir(parents=True)
+        archive=output/'certified'
+        verified=checked(repo,seed,map_path,archive)
+        verified['rollout']=dict(minimum_1ms_footprint_slack_m=1e-11)
+        (archive/'report.json').write_text(json.dumps(verified))
+        return dict(status='source_witness_passed',
+            witness=str(archive/'witness.npz'),
+            certificate=str(archive/'report.json'),
+            numerical_only=True,shifted_slack_m=1e-11)
+    monkeypatch.setattr(rigid_pose_polish,'recover_numerical_near_miss',fake_recovery)
+    def near_miss(**kwargs):
+        report=solver_report(kwargs,passed=False,residual=1e-9)
+        report['rollout']['minimum_1ms_footprint_slack_m']=-4e-12
+        (kwargs['output']/'report.json').write_text(json.dumps(report))
+        return report
+    calls=[]
+    result=run_campaign(**setup,solve=near_miss,certify=checked,
+        on_improvement=lambda path,lap:calls.append((path,lap)))
+    assert result['status']=='target_reached'
+    assert result['best_lap_s']==pytest.approx(.975)
+    assert repairs and calls
+    assert len(calls)==2  # baseline and newly independently certified witness
+    assert calls[-1][1]==pytest.approx(.975)
+    assert Path(result['best_witness']).exists()
+    assert len(result['attempts'])==1

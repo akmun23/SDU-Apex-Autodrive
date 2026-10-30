@@ -103,6 +103,31 @@ def test_atomic_export_never_replaces_best_with_slower_or_uncertified(tmp_path):
     assert (tmp_path/'best.json').read_bytes() == first
 
 
+def test_equal_time_clearer_candidate_exports_and_replaces_best(tmp_path):
+    source=tmp_path/'source'
+    source.mkdir()
+    witness(source/'seed.npz')
+    baseline=tmp_path/'baseline'
+    certification(tmp_path,source/'seed.npz',tmp_path/'map',baseline)
+    state=dict(best_lap_s=None)
+    optimizer.publish_best(tmp_path,baseline/'witness.npz',1.,state,source_digest='fixture')
+    first=json.loads((tmp_path/'best.json').read_text())
+    candidate=tmp_path/'candidate'
+    report=certification(tmp_path,source/'seed.npz',tmp_path/'map',candidate)
+    with np.load(candidate/'witness.npz') as data:
+        x,u=data['state'].copy(),data['controls'].copy()
+    x[0]+=.02
+    save_command_checkpoint(candidate/'witness.npz',x,u,'fixture',0.,0)
+    report['rollout']=dict(minimum_1ms_footprint_slack_m=.012)
+    (candidate/'report.json').write_text(json.dumps(report))
+    optimizer.publish_best(tmp_path,candidate/'witness.npz',1.,state,source_digest='fixture')
+    second=json.loads((tmp_path/'best.json').read_text())
+    assert second['lap_s']==first['lap_s']
+    assert second['witness_sha256']!=first['witness_sha256']
+    assert second['quality']['clearance_slack_m']==pytest.approx(.012)
+    assert len(list((tmp_path/'exports').glob('*/manifest.json')))==2
+
+
 def test_verified_unity_reference_orients_optimizer_to_driven_laps():
     ref = optimizer.REPO/'live_runs/iros_mpc_initial_20261029_02/raceline.csv'
     if not ref.is_file():

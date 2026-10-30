@@ -27,7 +27,7 @@ from scipy.interpolate import CubicSpline
 
 from command_campaign import run_campaign, unused_directory, budget_increase_only
 from command_ocp import (certify_witness, production_command_map, save_command_checkpoint,
-                         save_json_checkpoint, solve_witness)
+                         save_json_checkpoint, solve_witness, witness_quality, quality_key)
 from physics import SourcePlant
 
 REPO = Path(__file__).resolve().parents[1]
@@ -87,7 +87,8 @@ def implementation_digest():
     root = Path(__file__).resolve().parent
     digest = hashlib.sha256()
     for path in (Path(__file__), root/'command_ocp.py', root/'command_campaign.py',
-                 root/'elite_refinement.py',
+                 root/'elite_refinement.py', root/'sector_time.py', root/'causal_seed.py',
+                 root/'rigid_pose_polish.py',
                  root/'map_track.py', root/'min_curvature_seed.py', root/'physics.py',
                  root/'path_frame.py', root/'command_realizability.py',
                  root.parent/'tools/build_mapped_raceline.py'):
@@ -245,8 +246,9 @@ def publish_best(output, witness, lap_s, state, *, source_digest,
     require_travel_orientation(witness,
         verified_direction['winding'] if verified_direction else -1,
         verified=verified_direction is not None)
-    if state.get('best_lap_s') is not None and lap_s >= state['best_lap_s']-1.e-9:
+    if state.get('best_lap_s') is not None and lap_s > state['best_lap_s']+1.e-9:
         return
+    quality = witness_quality(witness, checked)
     directory = output/'exports'/file_hash(witness)[:16]
     directory.mkdir(parents=True, exist_ok=True)
     files = {'witness': witness, 'validation': report_path}
@@ -271,12 +273,24 @@ def publish_best(output, witness, lap_s, state, *, source_digest,
     if 'raceline' not in published:
         raise ValueError('certified witness has no exported raceline')
     summary = dict(lap_s=lap_s, files=published, witness_sha256=file_hash(witness),
+                   quality=quality,
                    source_plant_sha256=source_digest,
                    direction='unity_verified' if verified_direction else 'clockwise',
                    direction_reference_sha256=(verified_direction['sha256'] if verified_direction else None),
                    source_only=True,
                    unity_validated=False, mpc_validated=False, runtime_promoted=False)
     save_json_checkpoint(directory/'manifest.json', summary)
+    # Equal-time geometry/control alternatives are still exported: the Unity
+    # validator must be able to compare them, and their shortening searches
+    # must not be forced back to the first witness with this packet count.
+    if state.get('best_lap_s') is not None and abs(lap_s-state['best_lap_s']) <= 1.e-9:
+        previous = json.loads(Path(state['best_manifest']).read_text())
+        previous_quality = previous.get('quality')
+        if previous_quality is None:
+            previous_quality = witness_quality(Path(previous['files']['witness']),
+                json.loads(Path(previous['files']['validation']).read_text()))
+        if quality_key(quality) <= quality_key(previous_quality):
+            return
     save_json_checkpoint(output/'best.json', summary)
     state.update(best_lap_s=lap_s, best_manifest=str(directory/'manifest.json'))
 
@@ -334,7 +348,7 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
               phases=4, refinements=6, stagnation_iterations=250, prepare_only=False,
               bootstrap_only=False, cancel=None, driving_reference=None, hybrid_time=False,
               command_seed=None, elite_refinements=2, elite_first=True,
-              allow_search_code_update=False):
+              allow_search_code_update=False, time_sectors=1):
     cancel = cancel or (lambda: False)
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -349,10 +363,12 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
         workers=workers, iterations=iterations, stagnation_iterations=stagnation_iterations, phases=phases,
         refinements=refinements, elite_refinements=elite_refinements,
         elite_first=bool(elite_first),
+        time_sectors=time_sectors,
         direction='unity_verified' if verified else 'clockwise',
         direction_reference_sha256=verified['sha256'] if verified else None,
         expected_winding=verified['winding'] if verified else -1, schema=2 if verified else 1)
     contract['hybrid_time_search'] = hybrid_time
+    contract['time_sectors'] = time_sectors if hybrid_time else 1
     if command_seed is not None:
         command_seed = Path(command_seed).resolve()
         contract['command_seed_sha256'] = file_hash(command_seed)
@@ -375,7 +391,7 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
                                      stagnation_iterations=previous['stagnation_iterations']),
                 new_budget=dict(iterations=iterations,
                                 stagnation_iterations=stagnation_iterations),
-                reason='explicit algorithm-only budget-cap removal',
+                reason='explicit search algorithm update with unchanged vehicle/map',
                 epoch_s=time.time()))
         state.setdefault('budget_updates', []).append(dict(
             previous=previous, requested=contract, epoch_s=time.time()))
@@ -503,7 +519,8 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
                 map_path=bundled_image, output=campaign, target_seconds=None,
                 phases=phases, workers=workers, iterations=iterations, refinements=refinements,
                 stagnation_iterations=stagnation_iterations, coarse_fraction=.1,
-                hybrid_time=hybrid_time, elite_refinements=elite_refinements,
+                hybrid_time=hybrid_time, time_sectors=time_sectors,
+                elite_refinements=elite_refinements,
                 elite_first=elite_first,
                 resume=(campaign/'campaign.json').exists(), cancel_requested=cancel,
                 on_improvement=promote)
@@ -588,6 +605,8 @@ def main():
     parser.set_defaults(elite_first=True)
     parser.add_argument('--prepare-only', action='store_true')
     parser.add_argument('--bootstrap-only', action='store_true')
+    parser.add_argument('--time-sectors', type=int, default=12,
+                        help='independent cyclic local timing parameters in IPOPT')
     parser.add_argument('--hybrid-time-search', action='store_true',
                         help='Add local minimum-time proposals followed by exact command repair')
     parser.add_argument('--status', action='store_true')
@@ -640,7 +659,7 @@ def main():
             allow_search_code_update=args.allow_search_code_update,
             prepare_only=args.prepare_only, bootstrap_only=args.bootstrap_only,
             driving_reference=driving_reference,
-            hybrid_time=args.hybrid_time_search,
+            hybrid_time=args.hybrid_time_search, time_sectors=args.time_sectors,
             command_seed=args.command_seed,
             cancel=lambda: stop[0])
         return 0 if state['status'] in ('plateau', 'prepared', 'search_domain_reached') else 3

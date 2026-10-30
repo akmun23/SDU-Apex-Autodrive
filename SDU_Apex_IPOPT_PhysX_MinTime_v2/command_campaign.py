@@ -21,7 +21,7 @@ import numpy as np
 
 from command_ocp import (certify_witness, load_command_seed, production_command_map,
                          save_command_checkpoint, save_json_checkpoint, solve_witness,
-                         solve_time_predictor)
+                         solve_time_predictor, validate_margin)
 
 
 def unused_directory(path):
@@ -95,6 +95,15 @@ def budget_increase_only(previous, requested):
     return a == b and all(requested.get(k, 50) >= previous.get(k, 50) for k in keys)
 
 
+def quality_search_update_only(previous, requested):
+    """Migrate search objectives while requiring identical map/source/seed inputs."""
+    keys = ('command_objective_scaling', 'equal_time_search')
+    return (any(previous.get(k) != requested.get(k) for k in keys) and
+            requested.get('equal_time_search') in ('clearance-smooth-v3','causal-control-basin-v4') and
+            budget_increase_only({k:v for k,v in previous.items() if k not in keys},
+                                 {k:v for k,v in requested.items() if k not in keys}))
+
+
 def reopen_budget_limited_attempts(state):
     """Give stopped primals a real retry after increasing exploration budgets."""
     retained = []
@@ -122,8 +131,12 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                  solve=solve_witness, certify=certify_witness, digest=None,
                  cancel_requested=None, coarse_fraction=0., on_improvement=None,
                  hybrid_time=False, predict=solve_time_predictor,
-                 elite_refinements=0, elite_polish=None, elite_first=False):
+                 elite_refinements=0, elite_polish=None, elite_first=False,
+                 margin=.05, time_sectors=1):
     repo, seed, map_path, output = [Path(p).resolve() for p in (repo, seed, map_path, output)]
+    margin = validate_margin(margin)
+    if not isinstance(time_sectors,int) or not 1 <= time_sectors <= 32:
+        raise ValueError('invalid time predictor sector count')
     if ((target_seconds is not None and
             (not math.isfinite(target_seconds) or target_seconds < .75)) or phases < 1
             or not math.isfinite(coarse_fraction) or not 0. <= coarse_fraction < 1.
@@ -138,14 +151,18 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
         phases=phases, workers=workers, iterations=iterations,
         stagnation_iterations=stagnation_iterations, refinements=refinements,
         include_packet_starts=include_packet_starts, coarse_fraction=coarse_fraction,
+        required_margin_m=margin,
         map_metadata_sha256=(file_hash(map_path.with_suffix('.yaml'))
                              if map_path.with_suffix('.yaml').exists() else None))
     contract['elite_refinements'] = elite_refinements
     contract['elite_first'] = bool(elite_first)
     contract['start_order'] = 'duration-before-phase/drop-first-v1'
-    contract['command_objective_scaling'] = 'unit-regularizer-v1'
+    contract['command_objective_scaling'] = 'periodic-regularizer-v2'
+    contract['equal_time_search'] = 'causal-control-basin-v4'
     if hybrid_time:
-        contract['time_predictor'] = 'source-24-25ms-chord/v1'
+        contract['time_predictor'] = ('source-24-25ms-sector-chord/v2'
+                                      if time_sectors>1 else 'source-24-25ms-chord/v1')
+        contract['time_sectors']=time_sectors
     state_path = output/'campaign.json'
     if output.exists() and not resume:
         raise FileExistsError('campaign exists; use --resume, never overwrite it')
@@ -160,6 +177,17 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
 
     def event(name, **values):
         print(json.dumps(dict(event=name, **values)), flush=True)
+
+    # Keep the historical injected-call contract for the default margin. A
+    # nondefault campaign margin must be explicit at every physics gate.
+    margin_kwargs = {} if margin == .05 else {'margin': margin}
+
+    def certify_with_margin(*args):
+        return certify(*args, **margin_kwargs)
+
+    def solve_with_margin(**kwargs):
+        kwargs.update(margin_kwargs)
+        return solve(**kwargs)
 
     def time_prediction(incumbent, old_count):
         """One time-objective proposal per incumbent, always followed by exact repair."""
@@ -193,7 +221,8 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
             # as fixed 25 ms and equal-time IPOPT.
             output=destination, workers=workers, iterations=iterations,
             stagnation_iterations=stagnation_iterations,
-            cancel_requested=cancel_requested, resume_checkpoint=resume_checkpoint)
+            cancel_requested=cancel_requested, resume_checkpoint=resume_checkpoint,
+            time_sectors=time_sectors, **margin_kwargs)
         stored[ident] = report
         state.pop('active_predictor', None)
         save()
@@ -213,9 +242,10 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
         # NOT silently replace the fastest published witness.
         from elite_refinement import polish_equal_time
         baseline_hash = file_hash(incumbent)
+        exploration_key = baseline_hash+':'+contract['equal_time_search']
         explored = state.setdefault('elite_explored', [])
-        if baseline_hash not in explored:
-            elite_dir = output/'elite_refinement'/baseline_hash[:16]
+        if exploration_key not in explored:
+            elite_dir = output/'elite_causal_v4'/baseline_hash[:16]
             state['active_elite_polish'] = dict(seed=str(incumbent),
                 output=str(elite_dir), source_lap_s=source_count(incumbent)*.025)
             save()
@@ -229,6 +259,12 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                 # remain sequential and independently certified.
                 iterations=iterations,
                 margin_steps=(.0001, .0005, .002)[:elite_refinements],
+                quality_objectives=('clearance','smooth'),
+                # Better-conditioned, source-propagated changes before XY-only
+                # variations. Every candidate still needs original source
+                # feasibility and independent 1 ms footprint certification.
+                control_seeds=((.002,1),(-.002,1),(.004,2),(-.004,2),(.008,1)),
+                on_candidate=on_improvement,
                 # Explore other local geometry basins at exactly the
                 # incumbent duration, in addition to improving clearance.
                 # Both child minimizers run with EXACT 25 ms source maps
@@ -238,7 +274,7 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                 max_elites=5, diversity_threshold_m=.015,
                 stagnation_iterations=stagnation_iterations,
                 cancel_requested=cancel_requested,
-                solve=solve, certify=certify)
+                solve=solve_with_margin, certify=certify_with_margin)
             state.setdefault('elite_archives', {})[baseline_hash] = str(
                 elite_dir/'elite.json')
             state.pop('active_elite_polish',None)
@@ -270,7 +306,8 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                     coarse_fraction=coarse_fraction,
                     on_improvement=on_improvement,
                     hybrid_time=hybrid_time, predict=predict,
-                    elite_refinements=0, elite_first=False)
+                    elite_refinements=0, elite_first=False, margin=margin,
+                    time_sectors=time_sectors)
                 if child['best_lap_s'] < state['best_lap_s']-1.e-9:
                     state['best_lap_s'] = child['best_lap_s']
                     state['best_witness'] = child['best_witness']
@@ -281,16 +318,27 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                           seed=candidate['witness'],
                           witness=state['best_witness'])
             state.pop('active_elite',None)
-            explored.append(baseline_hash)
+            explored.append(exploration_key)
             save()
         return improved
 
     try:
         if resume:
             state = json.loads(state_path.read_text())
-            if state['contract'] != contract:
-                if not budget_increase_only(state['contract'], contract):
+            previous_contract = dict(state['contract'])
+            # Campaigns created before explicit margin tracking used the same
+            # 5 cm default. Treat that absent field as the historical default.
+            previous_contract.setdefault('required_margin_m', .05)
+            if previous_contract != contract:
+                objective_update = quality_search_update_only(previous_contract, contract)
+                if not (budget_increase_only(previous_contract, contract) or objective_update):
                     raise ValueError('campaign source/map/settings changed; create a new campaign')
+                if objective_update:
+                    state.setdefault('search_updates', []).append(dict(
+                        previous=state['contract'], requested=contract, epoch_s=time.time()))
+                    state['elite_first_done'] = False
+                    if state['status']=='plateau':
+                        state['status']='running'
                 state.setdefault('budget_updates', []).append(dict(
                     previous=state['contract'], requested=contract, epoch_s=time.time()))
                 state['contract'] = contract
@@ -301,6 +349,11 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                 event('budgets_increased', iterations=iterations,
                       stagnation_iterations=stagnation_iterations,
                       reopened=len(state.get('retry_starts', {})))
+            elif state['contract'] != contract:
+                # Persist the explicit default while preserving the validity
+                # of campaigns written before the margin field existed.
+                state['contract'] = contract
+                save()
             if state['status'] in ('target_reached', 'plateau', 'search_domain_reached'):
                 event('already_finished', status=state['status'], best_lap_s=state['best_lap_s'])
                 return state
@@ -315,7 +368,7 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
             save()
         if state['status'] == 'initializing':
             baseline_dir = unused_directory(output/'baseline')
-            baseline = certify(repo, seed, map_path, baseline_dir)
+            baseline = certify(repo, seed, map_path, baseline_dir, **margin_kwargs)
             if baseline['status'] != 'source_witness_passed':
                 raise ValueError('initial witness fails current source gates')
             state.update(status='running', best_witness=str(baseline_dir/'witness.npz'),
@@ -404,11 +457,33 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                             shorten_packet=strategy == 'drop-packet' and source_count(start) == count+1,
                             recondition_seed=hybrid_time and source_count(start) != count,
                             stagnation_iterations=stagnation_iterations,
-                            cancel_requested=cancel_requested)
+                            cancel_requested=cancel_requested, **margin_kwargs)
                         start = destination/'witness.npz'
+                    if report['status'] != 'source_witness_passed':
+                        # A source-correct, single-picometre wall shortfall is
+                        # a numerical boundary issue, NOT evidence of a
+                        # physical collision. Try a rigid SE(2) perturbation,
+                        # then independently rerun the unchanged source
+                        # dynamics and 1ms perimeter validator.
+                        from rigid_pose_polish import recover_numerical_near_miss
+                        if (report.get('rollout') and
+                                report.get('max_constraint_violation',float('inf'))<=1e-5 and
+                                -1e-6 <= report['rollout'].get(
+                                    'minimum_1ms_footprint_slack_m',-float('inf')) < 0.):
+                            rigid_dir=unused_directory(directory/'rigid_recovery')
+                            rigid=recover_numerical_near_miss(
+                                repo,start,map_path,rigid_dir,margin=margin,certify=certify)
+                            if rigid is not None:
+                                start=Path(rigid['witness'])
+                                report=json.loads(Path(rigid['certificate']).read_text())
+                                event('rigid_near_miss_certified',key=key,
+                                      lap_s=report['trial_lap_s'],
+                                      numerical_only=rigid['numerical_only'],
+                                      shifted_slack_m=rigid['shifted_slack_m'])
                     if report['status'] == 'source_witness_passed':
                         destination = unused_directory(directory/'certified')
-                        checked = certify(repo, start, map_path, destination)
+                        checked = certify(repo, start, map_path, destination,
+                                          **margin_kwargs)
                         if checked['status'] == 'source_witness_passed':
                             state.update(best_witness=str(destination/'witness.npz'),
                                 best_lap_s=checked['trial_lap_s'])
@@ -502,10 +577,14 @@ def main():
     parser.add_argument('--iterations', type=int, default=1500)
     parser.add_argument('--stagnation-iterations', type=int, default=250)
     parser.add_argument('--refinements', type=int, default=6)
+    parser.add_argument('--margin', type=float, default=.05,
+                        help='Required footprint clearance beyond the vehicle envelope, in metres')
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--resume-if-exists', action='store_true',
                         help='For unattended service restarts: resume a matching saved campaign')
     parser.add_argument('--no-packet-starts', action='store_true')
+    parser.add_argument('--time-sectors', type=int, default=1,
+                        help='cyclic timing degrees of freedom in the 24/25 ms predictor')
     parser.add_argument('--hybrid-time-search', action='store_true',
                         help='After a failed shortening, propose geometry/controls with a time objective')
     args = parser.parse_args()
@@ -527,7 +606,8 @@ def main():
             resume=args.resume or (args.resume_if_exists and (args.output/'campaign.json').exists()),
             include_packet_starts=not args.no_packet_starts,
             coarse_fraction=args.coarse_fraction,
-            hybrid_time=args.hybrid_time_search,
+            hybrid_time=args.hybrid_time_search,time_sectors=args.time_sectors,
+            margin=args.margin,
             cancel_requested=lambda: stop_requested[0])
     except KeyboardInterrupt:
         print('Interrupted; best witness and active primal retained. Use --resume.', flush=True)
