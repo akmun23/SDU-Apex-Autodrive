@@ -117,3 +117,19 @@ at iteration 0 and still produced `source_witness_passed`.
 The GUI now correctly counts all equal-time alternatives, not only margin
 and geometry variations. It reports the *published* source clearance separately
 from archived alternative clearance and names restoration phases explicitly.
+
+
+## 30 October: prioritize shorter feasible duration steps
+
+A subsequent campaign from the high-clearance 7.100 s source witness first
+attempted **6.400 s** with a globally resampled initializer; the large
+dynamic infeasibility made this a poor initial use of the solver budget.
+The campaign search-starters ordering was corrected to try the **7.075 s**
+one-packet removal first, then 7.075 s resampling, and only then successively
+larger duration reductions (7.050 s, etc.). Large coarse jumps remain
+available rather than being discarded. The order is versioned as
+near-time-before-coarse/drop-first-v2 so an interrupted older campaign
+cannot silently change its execution history on resume.
+
+The 7.100 s / +16.89 mm clearance model-certified witness remains the
+launch seed. It has not been validated as a completed Unity/MPC 10-lap race.

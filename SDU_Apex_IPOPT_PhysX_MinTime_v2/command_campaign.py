@@ -76,15 +76,18 @@ def trial_counts(count, fraction, minimum):
 
 
 def search_starts(counts, rotations, old_count, include_packet_starts):
-    """Back off duration before rephasing the same unsuccessful large jump.
+    """Try the smallest physical time reduction first, then explore coarse jumps.
 
-    Near the incumbent, removing one packet preserves every other exact source
-    transition. Try that initializer before globally resampling hidden states.
-    All configured phases/durations are still visited if none succeeds.
+    The adjacent 25ms target can delete exactly one production command packet,
+    preserving all other discrete vehicle transitions. Larger jumps resample
+    more hidden physical history and should only consume solver budget after
+    nearby candidates. Phase rotations remain independent follow-up basins.
     """
-    return [(count, rotation, strategy) for rotation in rotations for count in counts
-            for strategy in (('drop-packet', 'resample')
-                if include_packet_starts and count == old_count-1 else ('resample',))]
+    ordered_counts=sorted(set(counts),reverse=True)
+    return [(count, rotation, strategy)
+            for rotation in rotations for count in ordered_counts
+            for strategy in (('drop-packet','resample')
+                if include_packet_starts and count==old_count-1 else ('resample',))]
 
 
 def budget_increase_only(previous, requested):
@@ -156,7 +159,7 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                              if map_path.with_suffix('.yaml').exists() else None))
     contract['elite_refinements'] = elite_refinements
     contract['elite_first'] = bool(elite_first)
-    contract['start_order'] = 'duration-before-phase/drop-first-v1'
+    contract['start_order'] = 'near-time-before-coarse/drop-first-v2'
     contract['command_objective_scaling'] = 'periodic-regularizer-v2'
     contract['equal_time_search'] = 'causal-control-basin-v4'
     if hybrid_time:

@@ -233,12 +233,13 @@ def test_open_search_has_no_track_specific_target_and_publishes_each_gain(setup)
         return solver_report(kwargs, passed=kwargs['count'] == 36, residual=.1)
     state = run_campaign(**settings, solve=solve, certify=checked,
         on_improvement=lambda path, lap: published.append(lap))
-    assert calls[0]['count'] == 36
+    assert calls[0]['count'] == 39
+    assert calls[0]['shorten_packet']
     assert state['status'] == 'plateau'
     assert state['contract']['target_intervals'] is None
     assert state['best_lap_s'] == pytest.approx(.9)
     assert published == pytest.approx([1., .9])
-    assert calls[-1]['count'] == 35
+    assert calls[-1]['count'] == 33
 
 
 def test_resuming_rejects_changed_metric_metadata_even_with_identical_pixels(setup):
@@ -337,9 +338,9 @@ def test_hybrid_proposal_must_be_repaired_and_independently_certified(setup):
 def test_search_tries_smaller_duration_reductions_before_repeating_hard_phases():
     counts = trial_counts(326, .1, 30)
     starts = search_starts(counts, [0, 81, 163, 244], 326, True)
-    assert [c for c, phase, _ in starts if phase == 0] == [294, 310, 318, 322, 324, 325, 325]
-    assert starts[5:7] == [(325, 0, 'drop-packet'), (325, 0, 'resample')]
-    assert starts[7] == (294, 81, 'resample')
+    assert [c for c, phase, _ in starts if phase == 0] == [325, 325, 324, 322, 318, 310, 294]
+    assert starts[0:2] == [(325, 0, 'drop-packet'), (325, 0, 'resample')]
+    assert starts[7] == (325, 81, 'drop-packet')
     assert len(set(starts)) == len(starts) == 28
 
 
@@ -543,3 +544,19 @@ def test_picometre_near_miss_is_revalidated_not_silently_accepted(setup,monkeypa
     assert calls[-1][1]==pytest.approx(.975)
     assert Path(result['best_witness']).exists()
     assert len(result['attempts'])==1
+
+
+
+def test_near_time_packet_removal_runs_before_large_jump_even_with_coarse_budget(setup):
+    settings=dict(setup,target_seconds=None,coarse_fraction=.1,phases=1)
+    calls=[]
+    def solve(**kw):
+        calls.append(kw)
+        return solver_report(kw,passed=False,residual=.1)
+    result=run_campaign(**settings,solve=solve,certify=checked)
+    assert result['status']=='plateau'
+    assert calls[0]['count']==39
+    assert calls[0]['shorten_packet']
+    assert calls[1]['count']==39
+    assert not calls[1]['shorten_packet']
+    assert result['contract']['start_order']=='near-time-before-coarse/drop-first-v2'
