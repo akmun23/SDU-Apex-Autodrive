@@ -70,8 +70,9 @@ def test_equal_time_alternatives_archived_and_restored(tmp_path):
     assert state['complete'] and len(state['accepted'])==2
     assert state['best_clearance_slack_m']==pytest.approx(.0012)
     assert calls[0]['count']==calls[1]['count']==40
-    assert calls[0]['margin']==pytest.approx(.0501)
-    assert calls[1]['margin']==pytest.approx(.0505)
+    assert calls[0]['margin']==pytest.approx(.05011)
+    assert calls[1]['margin']==pytest.approx(.0508)
+    assert all(c['early_clearance_target_m']==0. for c in calls)
     assert calls[1]['command_seed']==Path(state['accepted'][0]['witness'])
     assert polish_equal_time(**kwargs)['attempts']==state['attempts']
     assert len(calls)==2
@@ -104,6 +105,151 @@ def test_nondefault_margin_and_extra_target_are_independently_checked(tmp_path,s
     if accepted:
         assert result['accepted'][0]['required_margin_m']==.12
         assert result['accepted'][0]['requested_margin_m']==pytest.approx(.121)
+
+
+def test_clearance_continuation_exceeds_roomy_seed_instead_of_weaker_baseline(tmp_path):
+    baseline=tmp_path/'baseline'
+    certificate(baseline,slack=.0344)
+    grid=tmp_path/'map.pgm';grid.write_bytes(b'mock map')
+    calls=[]
+    def solve(**kw):
+        calls.append(kw)
+        return certificate(kw['output'],marker=.03)
+    def certify(repo,seed,map_path,out):
+        return certificate(out,slack=.035,marker=.03)
+    state=polish_equal_time(repo=tmp_path,seed=baseline/'witness.npz',map_path=grid,
+        output=tmp_path/'elite',margin_steps=(.0005,),solve=solve,certify=certify)
+    assert calls[0]['margin']==pytest.approx(.0849)
+    assert calls[0]['early_clearance_target_m']==0.
+    assert len(state['accepted'])==1
+    assert state['clearance_requests']['0']['policy']=='measured-clearance-frontier/v1'
+    assert state['best_clearance_slack_m']==pytest.approx(.035)
+
+
+def test_pending_clearance_target_stays_fixed_on_resume(tmp_path):
+    baseline=tmp_path/'baseline'
+    certificate(baseline,slack=.003)
+    grid=tmp_path/'map.pgm';grid.write_bytes(b'mock map')
+    calls=[]
+    def solve(**kw):
+        calls.append(kw)
+        if len(calls)==1:
+            kw['output'].mkdir()
+            witness(kw['output']/'best_iterate.npz')
+            raise KeyboardInterrupt('fixture power loss after target saved')
+        return certificate(kw['output'],marker=.03)
+    def certify(repo,seed,map_path,out):
+        return certificate(out,slack=.004,marker=.03)
+    args=dict(repo=tmp_path,seed=baseline/'witness.npz',map_path=grid,
+        output=tmp_path/'elite',margin_steps=(.0005,),solve=solve,certify=certify)
+    with pytest.raises(KeyboardInterrupt):
+        polish_equal_time(**args)
+    archive=tmp_path/'elite/elite.json'
+    saved=json.loads(archive.read_text())
+    saved['best_clearance_slack_m']=.0032
+    archive.write_text(json.dumps(saved))
+    state=polish_equal_time(**args)
+    assert calls[0]['margin']==calls[1]['margin']==pytest.approx(.0535)
+    assert len(state['attempts'])==1
+
+
+def test_clearance_continuation_precedes_exploration_without_changing_indices(tmp_path):
+    baseline=tmp_path/'baseline';certificate(baseline)
+    grid=tmp_path/'map.pgm';grid.write_bytes(b'mock map')
+    calls=[]
+    def solve(**kw):
+        calls.append(kw)
+        return certificate(kw['output'],marker=.03*len(calls))
+    def certify(repo,seed,map_path,out):
+        return certificate(out,slack=.005,marker=.03*len(calls))
+    state=polish_equal_time(repo=tmp_path,seed=baseline/'witness.npz',map_path=grid,
+        output=tmp_path/'elite',margin_steps=(.002,),quality_objectives=('clearance',),
+        solve=solve,certify=certify)
+    assert calls[0]['output'].name=='polish_01'
+    assert calls[0]['objective_mode']=='repair' and calls[0]['margin']==pytest.approx(.052)
+    assert calls[1]['output'].name=='polish_00'
+    assert calls[1]['objective_mode']=='clearance'
+    assert calls[1]['command_seed']==Path(state['accepted'][0]['witness'])
+    assert [a['index'] for a in state['attempts']]==[1,0]
+
+
+def test_failed_clearance_requests_backtrack_and_resumed_archive_gets_bounded_retry(tmp_path):
+    baseline=tmp_path/'baseline';certificate(baseline)
+    grid=tmp_path/'map.pgm';grid.write_bytes(b'mock map')
+    calls=[]
+    def solve(**kw):
+        calls.append(kw)
+        return certificate(kw['output'],valid=False)
+    def certify(*args):
+        raise AssertionError('failed solve must not be certified')
+    args=dict(repo=tmp_path,seed=baseline/'witness.npz',map_path=grid,
+        output=tmp_path/'elite',margin_steps=(.002,.005,.01),solve=solve,certify=certify)
+    first=polish_equal_time(**args)
+    assert [k['margin'] for k in calls]==pytest.approx([.052,.051,.0505])
+    assert len(first['attempts'])==3
+    second=polish_equal_time(**args)
+    assert [k['margin'] for k in calls]==pytest.approx([.052,.051,.0505,.05025,.050125])
+    assert second['clearance_retry_indices']==[3,4,5]
+    assert second['attempts'][-1]['status']=='clearance_bracket_exhausted'
+    polish_equal_time(**args)
+    assert len(calls)==5  # no unbounded restart/retry loop
+
+
+@pytest.mark.parametrize('valid',[True,False])
+def test_partial_clearance_gain_needs_independent_nominal_certificate(tmp_path,valid):
+    baseline=tmp_path/'baseline';certificate(baseline)
+    grid=tmp_path/'map.pgm';grid.write_bytes(b'mock map')
+    def solve(**kw):
+        r=certificate(kw['output'],valid=False,marker=.03)
+        r.update(required_margin_m=kw['margin'],
+                 rollout=dict(minimum_1ms_footprint_slack_m=-.0003,full_lap_xy_max_m=.001))
+        (kw['output']/'report.json').write_text(json.dumps(r))
+        return r
+    def certify(repo,seed,map_path,out):
+        return certificate(out,slack=.0017,marker=.03,valid=valid)
+    exported=[]
+    state=polish_equal_time(repo=tmp_path,seed=baseline/'witness.npz',map_path=grid,
+        output=tmp_path/'elite',margin_steps=(.002,),solve=solve,certify=certify,
+        on_candidate=lambda path,lap:exported.append(path))
+    if valid:
+        assert state['best_clearance_slack_m']==pytest.approx(.0017)
+        assert state['attempts'][0]['status']=='partial_clearance_improvement'
+        assert state['accepted'][0]['requested_target_met'] is False
+        assert state['accepted'][0]['partial_clearance_improvement'] is True
+        assert len(exported)==1
+    else:
+        assert not state['accepted'] and not exported
+
+
+def test_recover_preexisting_partial_result_without_rerunning_ipopt(tmp_path):
+    baseline=tmp_path/'baseline';certificate(baseline)
+    grid=tmp_path/'map.pgm';grid.write_bytes(b'mock map')
+    calls=[]
+    def solve(**kw):
+        calls.append(kw)
+        r=certificate(kw['output'],valid=False,marker=.03)
+        r.update(required_margin_m=.052,
+                 rollout=dict(minimum_1ms_footprint_slack_m=-.0003,full_lap_xy_max_m=.001))
+        (kw['output']/'report.json').write_text(json.dumps(r))
+        return r
+    def certify(repo,seed,map_path,out):
+        return certificate(out,slack=.0017,marker=.03)
+    args=dict(repo=tmp_path,seed=baseline/'witness.npz',map_path=grid,
+              output=tmp_path/'elite',margin_steps=(.002,),solve=solve,certify=certify,max_elites=1)
+    state=polish_equal_time(**args)
+    archive=tmp_path/'elite/elite.json'
+    # Recreate an archive written by the old all-or-nothing policy. Existing
+    # independent certificate stays available, but nothing was published.
+    state['accepted']=[];state['best_seed']=str(baseline/'witness.npz')
+    state['best_clearance_slack_m']=0.
+    state['best_quality']['clearance_slack_m']=0.
+    state['attempts'][0].update(status='no_validated_witness',clearance_slack_m=None)
+    archive.write_text(json.dumps(state))
+    recovered=polish_equal_time(**args)
+    assert len(calls)==1
+    assert recovered['best_clearance_slack_m']==pytest.approx(.0017)
+    assert recovered['attempts'][0]['partial_clearance_reviewed'] is True
+    assert len(recovered['accepted'])==1
 
 
 def test_failed_or_rejected_polish_is_never_promoted(tmp_path):

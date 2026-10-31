@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import hashlib
 
 import casadi as ca
 import numpy as np
@@ -14,6 +15,31 @@ from command_ocp import command_problem, STATE_SCALES
 from command_ocp import source_clearance_refinement, reported_clearance_cuts, clearance_interpolant
 import command_ocp
 from physics import SourcePlant
+
+
+def test_inherit_clearance_cuts_only_for_matching_map_source_count_and_provenance(tmp_path):
+    grid=tmp_path/'map.pgm';grid.write_bytes(b'fixture map')
+    folder=tmp_path/'solve';folder.mkdir()
+    seed=folder/'witness.npz';seed.write_bytes(b'primal bytes fixture')
+    report=dict(source_plant_sha256='fixture',trial_lap_s=1.,
+        map_sha256=hashlib.sha256(grid.read_bytes()).hexdigest(),
+        source_clearance_cuts=[[1,7],[1,7],[2,13],[0,6],[40,3],[3,26],[1.5,7]])
+    (folder/'report.json').write_text(json.dumps(report))
+    assert command_ocp.inherited_clearance_cuts(seed,grid,'fixture',40)==[(1,7),(2,13)]
+    assert command_ocp.inherited_clearance_cuts(seed,grid,'wrong',40)==[]
+    assert command_ocp.inherited_clearance_cuts(seed,grid,'fixture',39)==[]
+    phase=folder/'phase_seed.npz';phase.write_bytes(seed.read_bytes())
+    assert command_ocp.inherited_clearance_cuts(phase,grid,'fixture',40)==[]
+    certified=tmp_path/'certified';certified.mkdir()
+    linked=certified/'witness.npz';linked.write_bytes(b'certified fixture')
+    provenance=dict(source_plant_sha256='fixture',trial_lap_s=1.,
+        original_witness=str(seed),original_witness_sha256=hashlib.sha256(seed.read_bytes()).hexdigest())
+    (certified/'report.json').write_text(json.dumps(provenance))
+    assert command_ocp.inherited_clearance_cuts(linked,grid,'fixture',40)==[(1,7),(2,13)]
+    seed.write_bytes(b'changed predecessor')
+    assert command_ocp.inherited_clearance_cuts(linked,grid,'fixture',40)==[]
+    grid.write_bytes(b'different map')
+    assert command_ocp.inherited_clearance_cuts(seed,grid,'fixture',40)==[]
 
 
 @pytest.fixture(scope='module')
@@ -169,7 +195,9 @@ def test_real_ipopt_callback_stops_on_new_tick_and_recovers_durable_cut(
         opti.set_initial(u,initial_u)
         opti.subject_to(x==initial_x)
         opti.subject_to(u==initial_u)
-        opti.minimize(ca.sumsqr(x-initial_x)+ca.sumsqr(u-initial_u))
+        free=opti.variable()
+        opti.set_initial(free,0.)
+        opti.minimize(ca.sumsqr(x-initial_x)+ca.sumsqr(u-initial_u)+(free-1.)**2)
         return opti,x,u,None
     replays=[]
     def replay(_function,x,u,_grid,_margin,**_kwargs):
@@ -226,7 +254,9 @@ def test_predictor_skips_invalid_trial_and_terminal_timing_without_losing_checkp
         # Deliberately force an out-of-domain timing iterate. It must not be
         # clipped into a valid proposal or terminate the surrounding campaign.
         opti.subject_to(fraction==terminal_fraction)
-        opti.minimize(ca.sumsqr(fraction-terminal_fraction))
+        free=opti.variable()
+        opti.set_initial(free,0.)
+        opti.minimize(ca.sumsqr(fraction-terminal_fraction)+(free-1.)**2)
         return opti,x,u,fraction
     monkeypatch.setattr(command_ocp,'production_command_map',lambda *_:(object(),'fixture'))
     monkeypatch.setattr(command_ocp.MapGrid,'load',lambda *_:object())
@@ -389,6 +419,7 @@ def test_raw_time_relaxation_is_never_a_source_witness(tmp_path):
     (-5.e-7,'source_witness_passed'),(-2.e-6,'no_validated_witness'),
     (-.000172,'no_validated_witness'),(-.00109,'no_validated_witness')])
 def test_certification_uses_and_reports_explicit_required_margin(tmp_path, monkeypatch,slack,expected):
+    (tmp_path/'map.pgm').write_bytes(b'mocked map; no vehicle performance claim')
     count = 3
     witness = tmp_path/'witness.npz'
     states = np.zeros((21, count+1))

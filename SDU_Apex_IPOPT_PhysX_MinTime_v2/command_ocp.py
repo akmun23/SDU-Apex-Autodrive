@@ -27,6 +27,7 @@ from map_track import (MapGrid, _FOOTPRINT_LOCAL, _FOOTPRINT_UNSAMPLED_CORRECTIO
 from path_frame import path_frame_numpy
 from sector_time import periodic_sector_weights, resample_source_time_initialization, predictor_timing
 from physics import SourcePlant
+from optimizer_solver import solve_with_controlled_stop
 
 
 STATE_SCALES = np.array([1., 1., 1., 2., 1., 2., *([150.]*4),
@@ -489,6 +490,46 @@ def export_reference(trace_path, grid, output):
     return result
 
 
+def inherited_clearance_cuts(seed, map_path, digest, count):
+    """Reuse known literal-tick constraints, never transfer a certificate.
+
+    A changed command count/phase must not inherit interval indices blindly.
+    Older independent reports retain a hash-linked original-witness reference;
+    follow that provenance to recover same-map/source/count cuts. All retained
+    cuts are additional exact physical checks; every new witness is replayed.
+    """
+    if seed is None:
+        return []
+    expected_map = hashlib.sha256(Path(map_path).read_bytes()).hexdigest()
+    current, visited, cuts = Path(seed), set(), set()
+    for _ in range(8):
+        if current.resolve() in visited or current.name not in ('witness.npz', 'best_iterate.npz'):
+            break
+        visited.add(current.resolve())
+        report_path = current.with_name('report.json')
+        if not report_path.exists():
+            break
+        report = json.loads(report_path.read_text())
+        if (report.get('source_plant_sha256') != digest or
+                abs(float(report.get('trial_lap_s', 0.))-count*.025) > 1.e-9):
+            break
+        if report.get('map_sha256') == expected_map:
+            for cut in report.get('source_clearance_cuts', []):
+                if (isinstance(cut, list) and len(cut) == 2 and
+                        all(type(v) is int for v in cut) and 0 <= cut[0] < count and
+                        1 <= cut[1] <= 25 and cut[1] not in (6, 12, 18, 24, 25)):
+                    cuts.add(tuple(cut))
+        original = report.get('original_witness')
+        if not original:
+            break
+        original = Path(original)
+        if (not original.is_file() or report.get('original_witness_sha256') !=
+                hashlib.sha256(original.read_bytes()).hexdigest()):
+            break
+        current = original
+    return sorted(cuts)
+
+
 def certify_witness(repo, path, map_path, output, margin=.05):
     """Recheck a stored witness using this build; no solve or certificate transfer."""
     margin = validate_margin(margin)
@@ -516,6 +557,9 @@ def certify_witness(repo, path, map_path, output, margin=.05):
         and rollout['full_lap_xy_max_m'] <= .05 and clearance_passes(rollout['minimum_1ms_footprint_slack_m']))
     report = dict(schema=1, status='source_witness_passed' if passed else 'no_validated_witness',
         source_plant_sha256=digest, original_witness=str(path),
+        map_sha256=hashlib.sha256(map_path.read_bytes()).hexdigest(),
+        source_clearance_cuts=[list(c) for c in inherited_clearance_cuts(
+            path, map_path, digest, controls.shape[1])],
         original_witness_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         trial_lap_s=controls.shape[1]*.025, max_local_dynamic_defect=defect,
         max_periodicity_defect=periodic_max, rollout=rollout,
@@ -683,6 +727,8 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
         initial_x, conditioning = recondition_command_seed(function, initial_x, initial_u, workers)
         print(json.dumps(dict(stage='source history initialization', **conditioning)), flush=True)
     grid = MapGrid.load(map_path)
+    inherited_cuts = inherited_clearance_cuts(command_seed, map_path, digest, count)
+    clearance_cuts = sorted({tuple(c) for c in clearance_cuts} | set(inherited_cuts))
     # A power loss between callback checkpointing and parent-loop restart must
     # not discard the newly measured constraint. Reuse only same-map/source/
     # count/margin requests attached to this exact saved-primal directory.
@@ -697,11 +743,11 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
     opti, x, u, _ = command_problem(repo, function, digest, initial_x, initial_u,
                                    winding, grid, margin, workers, clearance_cuts,
                                    objective_mode=objective_mode)
-    opti.solver('ipopt', {'expand': False, 'print_time': False}, {
+    solver_options = {
         'max_iter': iterations, 'max_cpu_time': cpu_seconds,
         'hessian_approximation': 'limited-memory', 'mu_strategy': 'adaptive',
         'bound_relax_factor': 0.,
-        'tol': 1.e-6, 'acceptable_tol': 1.e-5, 'print_level': 5})
+        'tol': 1.e-6, 'acceptable_tol': 1.e-5, 'print_level': 5}
     evaluate_g = ca.Function('command_feasibility', [opti.x], [opti.g])
     evaluate_f = ca.Function('command_objective', [opti.x], [opti.f])
     lower = np.asarray(opti.value(opti.lbg, opti.initial())).reshape(-1)
@@ -717,21 +763,22 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
         max_iterations=iterations, cpu_seconds=cpu_seconds, workers=workers,
         objective_scaling_factor=count/.001,
         source_clearance_cuts=len(clearance_cuts),
+        inherited_source_clearance_cuts=len(inherited_cuts),
+        native_variable_bounds=True,
         objective_mode=objective_mode,
         source_sha256=digest)), flush=True)
     best = [None]
     best_quality_proposal = [None]
     significant = [float('inf'), 0]
     significant_objective = [float('inf')]
-    stagnated = [False]
     early_verified = [None]
     early_refinement = [None]
     early_checked_iteration = [-40]
-    def callback(iteration):
+    def callback(iteration, getter):
         if cancel_requested is not None and cancel_requested():
-            raise RuntimeError('command campaign interruption requested')
+            return 'campaign_interrupted'
         if iteration % 5: return
-        flat = np.asarray(opti.debug.value(opti.x)).reshape(-1)
+        flat = np.asarray(getter(opti.x)).reshape(-1)
         residual = violation(flat)
         objective = float(evaluate_f(flat))
         print(json.dumps(dict(iteration=int(iteration), trial_lap_s=count*.025,
@@ -740,7 +787,7 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
         if np.isfinite(residual) and np.isfinite(objective) and (
                 best[0] is None or iterate_rank(residual, objective) <
                 iterate_rank(best[0][2], best[0][3])):
-            best[0] = (np.asarray(opti.debug.value(x)), np.asarray(opti.debug.value(u)),
+            best[0] = (np.asarray(getter(x)), np.asarray(getter(u)),
                        residual, objective)
             save_command_checkpoint(output/'best_iterate.npz', *best[0][:2],
                                     digest, residual, int(iteration))
@@ -752,8 +799,8 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
         if (iteration-early_checked_iteration[0]>=40 and
                 0. <= residual <= 1.e-5):
             early_checked_iteration[0]=int(iteration)
-            candidate_x=np.asarray(opti.debug.value(x))
-            candidate_u=np.asarray(opti.debug.value(u))
+            candidate_x=np.asarray(getter(x))
+            candidate_u=np.asarray(getter(u))
             periodic=candidate_x[:,-1]-candidate_x[:,0]
             periodic[2]-=winding*2*math.pi
             periodic_scaled=float(np.max(np.abs(periodic/STATE_SCALES)))
@@ -790,7 +837,7 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
                     save_json_checkpoint(output/'clearance_refinement.json',early_refinement[0])
                     print(json.dumps(dict(event='source_clearance_refinement_requested',
                         **early_refinement[0])),flush=True)
-                    raise RuntimeError('source replay discovered missing clearance constraints; rebuilding NLP')
+                    return 'source_clearance_refinement'
                 if passed and early_clearance_target_m is not None:
                     # The normal solve_witness post-IPOPT report and export
                     # still reruns the full source verifier. No shortcut is a
@@ -802,13 +849,13 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
                     early_verified[0]=dict(iteration=int(iteration),
                         clearance_slack_m=slack,source_xy_error_m=
                         candidate_rollout['full_lap_xy_max_m'])
-                    raise RuntimeError('source-certified restoration checkpoint accepted')
+                    return 'early_source_checkpoint'
         if objective_mode in ('clearance', 'smooth'):
             merit = quality_proposal_merit(residual, objective, initial_objective)
             if merit is not None and (best_quality_proposal[0] is None or
                     merit < best_quality_proposal[0][0]):
-                proposal = (merit, np.asarray(opti.debug.value(x)),
-                            np.asarray(opti.debug.value(u)), residual, objective,
+                proposal = (merit, np.asarray(getter(x)),
+                            np.asarray(getter(u)), residual, objective,
                             int(iteration))
                 best_quality_proposal[0] = proposal
                 save_npz_checkpoint(output/'best_quality_proposal.npz',
@@ -825,16 +872,12 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
             significant_objective[0] = objective
             significant[1] = int(iteration)
         if stagnation_iterations and iteration-significant[1] >= stagnation_iterations:
-            stagnated[0] = True
-            raise RuntimeError('command search stagnated; durable best iterate saved')
-    opti.callback(callback)
+            return 'objective_stagnation' if residual <= 1.e-5 else 'feasibility_stagnation'
     started = time.monotonic()
-    error = None
-    try: opti.solve_limited()
-    except RuntimeError as exception: error = str(exception).splitlines()[-1]
-    # CasADi converts exceptions thrown inside a Python callback (including
-    # KeyboardInterrupt) into solver errors. Check the signal flag OUTSIDE its
-    # C++ stack so a service stop cannot be swallowed as another failed solve.
+    outcome = solve_with_controlled_stop(opti, callback, solver_options)
+    error = outcome.error
+    # Handle interruption outside CasADi's C++ stack so it cannot be swallowed
+    # as another failed solve or a normal search rotation.
     if cancel_requested is not None and cancel_requested():
         raise KeyboardInterrupt('campaign interrupted; durable primal retained')
     stats = opti.stats()
@@ -856,16 +899,17 @@ def solve_witness(*, repo, checkpoint, mesh, audit, map_path, output,
         required_margin_m=margin,
         clearance_numerical_tolerance_m=CLEARANCE_NUMERICAL_TOLERANCE_M,
         initial_residual=violation(initial), last_significant_iteration=significant[1],
-        termination_reason=('source_clearance_refinement' if early_refinement[0]
-            else 'early_source_checkpoint' if early_verified[0]
-            else (('objective_stagnation' if residual <= 1.e-5 else
-            'feasibility_stagnation') if stagnated[0] else stats.get('return_status'))),
+        termination_reason=outcome.reason or stats.get('return_status'),
         early_source_checkpoint=early_verified[0],
         source_clearance_refinement=early_refinement[0],
         requested_source_clearance_cuts=(early_refinement[0]['new_cuts']
                                         if early_refinement[0] else []),
         max_constraint_violation=residual, ipopt_status=stats.get('return_status'),
         ipopt_iterations=stats.get('iter_count'), error=error, rollout=rollout,
+        controlled_stop_reason=outcome.reason, stop_iteration=outcome.stop_iteration,
+        solver_initialization=outcome.initialization,
+        ipopt_options=outcome.options,
+        native_variable_bounds=outcome.native_bounds,
         jacobian_workers=workers, initializer=str(command_seed or checkpoint),
         objective_scaling_factor=count/.001,
         stagnation_iterations=stagnation_iterations,
@@ -954,10 +998,10 @@ def solve_time_predictor(*, repo, command_seed, map_path, output, workers=8,
             opti.set_initial(x, saved['state'])
             opti.set_initial(u, saved['controls'])
             opti.set_initial(fraction, np.asarray(saved['fraction']).reshape(-1))
-    opti.solver('ipopt', {'expand': False, 'print_time': False}, {
+    solver_options = {
         'max_iter': iterations, 'hessian_approximation': 'limited-memory',
         'mu_strategy': 'adaptive', 'bound_relax_factor': 0.,
-        'tol': 1.e-6, 'acceptable_tol': 1.e-5, 'print_level': 5})
+        'tol': 1.e-6, 'acceptable_tol': 1.e-5, 'print_level': 5}
     evaluator = ca.Function('time_predictor_constraints', [opti.x], [opti.g])
     lower = np.asarray(opti.value(opti.lbg, opti.initial())).reshape(-1)
     upper = np.asarray(opti.value(opti.ubg, opti.initial())).reshape(-1)
@@ -973,12 +1017,12 @@ def solve_time_predictor(*, repo, command_seed, map_path, output, workers=8,
             lap_time_s=candidate['lap_s'], source_sha256=digest, seed_sha256=seed_hash,
             map_sha256=map_hash, map_metadata_sha256=metadata_hash,
             max_constraint_violation=candidate['residual'], iteration=iteration, source_certified=False)
-    def observe(iteration, initial=False, terminal=False):
+    def observe(iteration, getter=None, initial=False, terminal=False):
         if cancel_requested is not None and cancel_requested():
-            raise RuntimeError('time predictor interrupted')
+            return 'campaign_interrupted'
         if not initial and not terminal and iteration % 5:
             return
-        getter = (lambda value: opti.value(value, opti.initial())) if initial else opti.debug.value
+        getter = (lambda value: opti.value(value, opti.initial())) if initial else getter or opti.debug.value
         flat = np.asarray(getter(opti.x)).reshape(-1)
         residual = violation(flat)
         theta = np.asarray(getter(fraction),dtype=float).reshape(-1)
@@ -1029,19 +1073,17 @@ def solve_time_predictor(*, repo, command_seed, map_path, output, workers=8,
             proposal_progress[0] = residual
             progress[1] = iteration
         if not initial and not terminal and stagnation_iterations and iteration-progress[1] >= stagnation_iterations:
-            raise RuntimeError('no feasible time improvement; predictor primal retained')
+            return 'time_stagnation'
     print(json.dumps(dict(stage='minimum-time predictor setup', output=str(output.resolve()), intervals=count,
         source_lap_s=lap, initial_residual=violation(
             np.asarray(opti.value(opti.x, opti.initial())).reshape(-1)),
         max_iterations=iterations, workers=workers, time_sectors=time_sectors,
+        native_variable_bounds=True,
         source_certified=False)), flush=True)
     observe(0, initial=True)
-    opti.callback(observe)
-    started, error = time.monotonic(), None
-    try:
-        opti.solve_limited()
-    except RuntimeError as exception:
-        error = str(exception).splitlines()[-1]
+    started = time.monotonic()
+    outcome = solve_with_controlled_stop(opti, observe, solver_options)
+    error = outcome.error
     if cancel_requested is not None and cancel_requested():
         raise KeyboardInterrupt('time predictor interrupted; checkpoint retained')
     # Include the terminal iterate even when it is between callback samples.
@@ -1057,6 +1099,11 @@ def solve_time_predictor(*, repo, command_seed, map_path, output, workers=8,
         source_lap_s=lap, max_constraint_violation=candidate['residual'] if candidate else None,
         ipopt_iterations=opti.stats().get('iter_count'), ipopt_status=opti.stats().get('return_status'),
         elapsed_s=time.monotonic()-started, error=error,
+        termination_reason=outcome.reason or opti.stats().get('return_status'),
+        controlled_stop_reason=outcome.reason, stop_iteration=outcome.stop_iteration,
+        solver_initialization=outcome.initialization,
+        ipopt_options=outcome.options,
+        native_variable_bounds=outcome.native_bounds,
         invalid_timing_iterates=invalid_timing['count'],
         last_invalid_timing=invalid_timing['last'],
         limitation='Interpolated transition predictor only; exact 25ms repair and certification required.')

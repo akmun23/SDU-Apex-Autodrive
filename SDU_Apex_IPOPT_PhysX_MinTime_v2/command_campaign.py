@@ -278,6 +278,12 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
             save()
             event('elite_polish_started', source_lap_s=source_count(incumbent)*.025,
                 output=str(elite_dir))
+            # Useful room before large, often rejected geometry changes. Keep
+            # an existing archive's input budget intact when resuming it.
+            margin_steps=(.002,.005,.010)[:elite_refinements]
+            if (elite_dir/'elite.json').exists():
+                saved_archive=json.loads((elite_dir/'elite.json').read_text())
+                margin_steps=tuple(saved_archive['contract']['extra_margin_m'])
             archive = (elite_polish or polish_equal_time)(
                 repo=repo, seed=incumbent, map_path=map_path,
                 output=elite_dir, workers=workers,
@@ -285,7 +291,7 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                 # primary 25 ms solves (e.g. 1200/300). Independent attempts
                 # remain sequential and independently certified.
                 iterations=iterations,
-                margin_steps=(.0001, .0005, .002)[:elite_refinements],
+                margin_steps=margin_steps,
                 quality_objectives=('clearance','smooth'),
                 # Better-conditioned, source-propagated changes before XY-only
                 # variations. Every candidate still needs original source

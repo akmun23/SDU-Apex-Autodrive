@@ -168,6 +168,11 @@ def describe_solve(solver, active, acceptance, points, checkpoint, report, itera
     elif mode == 'repair' and active.get('strategy') == 'proposal_restoration':
         label = 'Restore an improved quality proposal'
         goal = 'Restore model feasibility for an exploratory clearance or smoothness proposal.'
+    elif mode == 'repair' and active.get('strategy') == 'margin':
+        label = 'Increase verified wall clearance'
+        requested = finite(active.get('margin'))
+        goal = ('Meet a stronger full-lap wall-clearance target'+
+                (f' of {requested*1000:.3f} mm.' if requested is not None else '.'))
     fixed_duration = quality or (mode == 'repair' and 'index' in active)
     if lap is not None:
         goal = (f'Fixed lap time: {lap:.3f} s. ' if fixed_duration else
@@ -178,6 +183,9 @@ def describe_solve(solver, active, acceptance, points, checkpoint, report, itera
     if mode:
         why += (' The solve ends on convergence, configured stagnation or iteration limits, '
                 'or an explicit replay/refinement interruption.')
+    if mode == 'repair' and active.get('strategy') == 'margin':
+        why = ('This continuation step stops when the stronger target passes full source replay. '
+               'Independent certification must then confirm the extra clearance before archiving it.')
     if report:
         why = 'Solve finished. The selected result must still be independently certified and archived.'
 
@@ -273,12 +281,6 @@ class LogObserver:
         if not line:
             return
         self.lines.append(line[:2000])
-        # This specific callback exception is an INTENTIONAL IPOPT
-        # early-exit after checkpointing. Preserve the original stack trace
-        # in the raw logfile, but describe the outcome correctly to the user.
-        if line.startswith('RuntimeError: command feasibility stagnated; durable best iterate saved'):
-            self.events.append(dict(event='feasibility_stagnation',
-                                    iteration=self.live_iteration))
         try:
             item = json.loads(line, parse_constant=lambda _: None)
         except (ValueError, TypeError):
@@ -749,7 +751,8 @@ class Dashboard:
                 polishing_total=(sum(len(polish_archive.get('contract',{}).get(key,[]))
                                     for key in ('quality_objectives','control_seeds',
                                                 'extra_margin_m','geometry_seeds'))
-                                 +polish_archive.get('contract',{}).get('adaptive_regions',0)),
+                                 +polish_archive.get('contract',{}).get('adaptive_regions',0)
+                                 +len(polish_archive.get('clearance_retry_indices',[]))),
                 adaptive_regions=polish_archive.get('contract',{}).get('adaptive_regions',0),
                 adaptive_hotspots=polish_archive.get('adaptive_hotspots',[]),
                 adaptive_history=[x for x in polish_archive.get('attempts',[])

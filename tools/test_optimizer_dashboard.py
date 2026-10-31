@@ -501,13 +501,14 @@ class DashboardTest(unittest.TestCase):
     def test_intentional_stagnation_is_reported_without_claiming_optimizer_crash(self):
         self.start_log()
         with self.log.open('a') as stream:
-            stream.write('RuntimeError: command feasibility stagnated; durable best iterate saved\n')
+            stream.write(json.dumps(dict(event='solver_automatic_stop',reason='feasibility_stagnation',
+                iteration=300,message='insufficient feasibility progress; best checkpoint retained'))+'\n')
         result = self.dashboard.snapshot()
         event = next(event for event in result['events']
-                     if event.get('event')=='feasibility_stagnation')
-        self.assertEqual(event['event'], 'feasibility_stagnation')
+                     if event.get('event')=='solver_automatic_stop')
+        self.assertEqual(event['reason'], 'feasibility_stagnation')
         self.assertEqual(result['status'], 'not_running')
-        self.assertTrue(any('RuntimeError: command feasibility stagnated' in line
+        self.assertTrue(any('solver_automatic_stop' in line
                             for line in result['log_lines']))
 
     def test_raw_ipopt_history_updates_without_actual_residual_callback(self):

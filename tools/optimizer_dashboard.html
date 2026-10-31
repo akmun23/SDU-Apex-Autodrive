@@ -271,6 +271,13 @@ async function refreshTrack(key){
  catch(error){set('mapNote',`Track view: ${error.message}. Retrying automatically.`);}finally{trackFetching=false;}
 }
 function eventText(event){
+ if(event.event==='partial_clearance_certified')return {
+  title:`Useful clearance gain retained at ${num(event.lap_s,3)} s`,
+  detail:`Verified gap ${num(((event.required_margin_m??.05)+event.clearance_slack_m)*1000,3)} mm; requested ${num(event.requested_margin_m*1000,3)} mm. `+
+   (event.requested_target_met?'Requested target met.':'Partial improvement only; the stronger target was not met.')};
+ if(event.event==='solver_automatic_stop')return {
+  title:'Automatic solver stop · '+human(event.reason),
+  detail:event.message||'Checkpoint retained. This is a programmed search decision, not a manual stop.'};
  if(event.event==='source_clearance_refinement_requested')return {
   title:'Replay found missing wall constraints; stopping stale solve',
   detail:`${event.new_cuts?.length??0} source-tick constraints requested. Checked primal saved for immediate repair.`};
@@ -287,8 +294,6 @@ function eventText(event){
  if(event.event==='early_source_checkpoint_gate')
   return {title:event.accepted?'Promising source checkpoint passes gate':'Checkpoint still requires source repair',
     detail:`Extra clearance ${num(event.clearance_slack_m*1000,3)} mm · required ${num(event.target_slack_m*1000,2)} mm · full independent promotion follows`};
- if(event.event==='feasibility_stagnation')
-  return {title:'Solve stopped after progress stalled',detail:'Best intermediate states were saved. The optimizer will try another candidate; the campaign has not crashed.'};
  return {title:human(event.event||event.stage),detail:event.error||event.reason||event.key||'Optimizer stage update'};
 }
 function mpcEl(tag,cls='',value){const node=document.createElement(tag);if(cls)node.className=cls;if(value!==undefined)node.textContent=String(value);return node;}
@@ -660,7 +665,7 @@ function render(data){
   `Latest callback constraint error: ${sci(objective.latest_residual)}. This combined solver cost is not a wall gap or a certified improvement.`:
   'Objective comparison is not available yet; no improvement is inferred from iteration count.');
  set('qualitySummary',progress.roomiest_lap_s!=null?
-   `Fastest: ${num(best.lap_s,3)} s. Roomiest alternative: ${num(progress.roomiest_lap_s,3)} s with ${num(progress.roomiest_clearance_cm,2)} cm minimum planned body-to-wall gap. Both source-certified; Unity driving is a separate test.`:
+   `Fastest: ${num(best.lap_s,3)} s with ${num(progress.fastest_clearance_cm,2)} cm minimum planned body-to-wall gap. Roomiest alternative: ${num(progress.roomiest_lap_s,3)} s with ${num(progress.roomiest_clearance_cm,2)} cm. Both source-certified; Unity driving is a separate test.`:
    'No independently certified clearance alternative yet. Solver iterations alone do not count as progress.');
  set('searchIntent',`Last certified speed gain ${age(progress.last_speed_gain_age_s)} ago. Saved certificates are separate from the active solve’s verification evidence below.`);
  renderAcceptance(progress.acceptance);

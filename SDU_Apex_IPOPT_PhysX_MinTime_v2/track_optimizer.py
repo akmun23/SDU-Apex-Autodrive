@@ -114,7 +114,7 @@ def approved_search_code_update(previous, requested):
 def implementation_digest():
     root = Path(__file__).resolve().parent
     digest = hashlib.sha256()
-    for path in (Path(__file__), root/'command_ocp.py', root/'command_campaign.py',
+    for path in (Path(__file__), root/'command_ocp.py', root/'optimizer_solver.py', root/'command_campaign.py',
                  root/'elite_refinement.py', root/'sector_time.py', root/'causal_seed.py',
                  root/'rigid_pose_polish.py', root/'adaptive_regions.py',
                  root/'map_track.py', root/'min_curvature_seed.py', root/'physics.py',

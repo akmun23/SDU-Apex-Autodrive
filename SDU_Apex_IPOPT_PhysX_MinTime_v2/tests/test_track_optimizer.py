@@ -101,7 +101,7 @@ def test_orphaned_input_bundle_cannot_be_reused_for_another_map(tmp_path):
 
 def test_implementation_guard_includes_source_adapter_and_time_helpers(monkeypatch):
     original = Path.read_bytes
-    for suffix in ('physics.py', 'path_frame.py', 'command_realizability.py'):
+    for suffix in ('physics.py', 'path_frame.py', 'command_realizability.py','optimizer_solver.py'):
         before = optimizer.implementation_digest()
         with monkeypatch.context() as context:
             context.setattr(Path, 'read_bytes', lambda path: original(path)+(
