@@ -10,6 +10,10 @@ import hashlib
 import json
 import math
 from pathlib import Path
+try:
+    from .raceline_clearance import declared_tolerance
+except ImportError:
+    from raceline_clearance import declared_tolerance
 
 
 def _positive_float(number):
@@ -67,7 +71,9 @@ def certified_catalog(live_runs, *, source_sha256, margin=.05,
             j=json.loads(path.read_text())
             q=j.get('quality') or {}
             r=j.get('rollout') or {}
+            tolerance=declared_tolerance(j)
             if not (j.get('status')=='source_witness_passed'
+                    and tolerance is not None
                     and j.get('source_plant_sha256')==source_sha256
                     and abs(float(j.get('required_margin_m',-1))-margin)<1e-9
                     and r.get('source_tick_perimeter_validated') is True
@@ -83,7 +89,7 @@ def certified_catalog(live_runs, *, source_sha256, margin=.05,
                 'steering_step_max_rad':_positive_float(q.get('steering_step_max_rad')),
             }
             if (any(value is None for value in fields.values())
-                    or fields['clearance_slack_m']<0):
+                    or fields['clearance_slack_m'] < -tolerance):
                 continue
             # Never trust a path from inside the JSON; accept only structured paths.
             child=path.relative_to(live_runs).parts[0]
@@ -100,6 +106,7 @@ def certified_catalog(live_runs, *, source_sha256, margin=.05,
             record=dict(**fields,id=witness_id[:16],
                         workspace=child,relative_report=str(path.relative_to(live_runs)),
                         source_only=True,independent_source_passed=True,
+                        clearance_numerical_tolerance_m=tolerance,
                         map_fingerprint_checked=same_map,unity_validated=False,
                         mpc_validated=False)
             previous=records.get(witness_id)

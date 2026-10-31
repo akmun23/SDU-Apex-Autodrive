@@ -383,3 +383,22 @@ int mpc_model_linearize_from_known_step(
     }
     return 1;
 }
+
+/* Source derivatives are expensive, but their full-state affine offset is
+ * discarded by the reduced-state Riccati QP. Avoid preparing x, u, f and
+ * their full 24-dimensional A*x+B*u contraction; the QP computes the
+ * required affine offsets once in its own coordinates. */
+int mpc_model_linearize_sensitivities_from_known_step(
+    const MpcModelState_t *state,
+    const MpcModelControl_t *control,
+    float dt,
+    float path_curvature,
+    const MpcStageResult_t *known_step,
+    MpcStageLinearization_t *linearization)
+{
+    if (!state || !control || !known_step || !linearization) return 0;
+    MpcStageResult_t stage;
+    return mpc_vehicle_model_linearize_from_known_step(
+        state, control, dt, path_curvature, known_step, &stage,
+        linearization);
+}

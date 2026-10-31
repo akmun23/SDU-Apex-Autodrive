@@ -4,6 +4,7 @@ No surrogate physical friction/vehicle parameters are used here.
 """
 from __future__ import annotations
 import math
+import json
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,30 @@ _FOOTPRINT_UNSAMPLED_CORRECTION = .5*max(
     (_EDGE_SIDE[1]-_EDGE_SIDE[0])/6)
 _FOOTPRINT_RADIUS = float(np.max(np.linalg.norm(_FOOTPRINT_LOCAL,axis=1)))
 DEFAULT_WALL_MARGIN_M = 0.05
+_CLEARANCE_POLICY_PATH = Path(__file__).resolve().parents[1]/'config/racing/raceline_clearance_policy.json'
+_CLEARANCE_POLICY = json.loads(_CLEARANCE_POLICY_PATH.read_text())
+CLEARANCE_NUMERICAL_TOLERANCE_M = float(_CLEARANCE_POLICY['numerical_tolerance_m'])
+if (_CLEARANCE_POLICY.get('schema') != 'sdu-apex-raceline-clearance/v1' or
+        not math.isfinite(CLEARANCE_NUMERICAL_TOLERANCE_M) or
+        not 0. <= CLEARANCE_NUMERICAL_TOLERANCE_M <= 1.e-4):
+    raise ValueError('invalid raceline numerical-clearance policy')
+
+
+def clearance_passes(slack_m, target_m=0., *, tolerance_m=CLEARANCE_NUMERICAL_TOLERANCE_M):
+    """Keep raw measurements; tolerate only the explicitly declared roundoff band."""
+    return (math.isfinite(slack_m) and math.isfinite(target_m) and
+            math.isfinite(tolerance_m) and 0. <= tolerance_m <= CLEARANCE_NUMERICAL_TOLERANCE_M
+            and slack_m >= target_m-tolerance_m)
+
+
+def declared_clearance_tolerance(report):
+    value = report.get('clearance_numerical_tolerance_m',
+        (report.get('rollout') or {}).get('clearance_numerical_tolerance_m', 0.))
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and 0. <= value <= CLEARANCE_NUMERICAL_TOLERANCE_M else None
 
 @dataclass
 class MapGrid:

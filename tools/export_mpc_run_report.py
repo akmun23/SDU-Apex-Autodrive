@@ -35,7 +35,7 @@ REPORT_SCHEMA = "sdu_apex_mpc_run_report/v4"
 COMMAND_FLOAT_MATCH_TOL = 5.0e-8
 ACCEPTED_STATUSES = {
     "accepted_optimal", "accepted_feasible", "accepted_line_search",
-    "accepted_candidate_prefix", "accepted_prior_plan",
+    "accepted_candidate_prefix", "accepted_prior_plan", "accepted_viability_recovery",
 }
 
 
@@ -797,7 +797,7 @@ def _progress_bins(
                                            for row in group)),
             "full_horizon_exact_accepts": sum(
                 row.get("status") in {"accepted_optimal", "accepted_feasible",
-                                      "accepted_line_search"} for row in group),
+                                      "accepted_line_search", "accepted_viability_recovery"} for row in group),
             "short_prefix_accepts": sum(
                 row.get("status") == "accepted_candidate_prefix" for row in group),
             "gate_ms_p50": evaluator.percentile(gates, 0.50) if gates else None,
@@ -1031,7 +1031,7 @@ def make_report(
             for status, count in status_counts.items()} if scored else {},
         "full_horizon_exact_accepts": sum(
             row.get("status") in {"accepted_optimal", "accepted_feasible",
-                                  "accepted_line_search"} for row in scored),
+                                  "accepted_line_search", "accepted_viability_recovery"} for row in scored),
         "short_prefix_accepts": sum(
             row.get("status") == "accepted_candidate_prefix" for row in scored),
         "prior_plan_accepts": sum(

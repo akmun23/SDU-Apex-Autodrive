@@ -5,7 +5,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from command_campaign import phase_seed, run_campaign, trial_counts, budget_increase_only, search_starts
+from command_campaign import (phase_seed, run_campaign, trial_counts,
+                              budget_increase_only, search_starts, elite_branch_order)
 from command_ocp import load_command_seed, save_command_checkpoint
 
 
@@ -68,6 +69,22 @@ def test_source_wall_cuts_feed_exact_primal_back_to_ipopt_then_keep_faster(setup
     assert not state['runtime_promoted'] and not state['unity_validated']
 
 
+def test_early_requested_cuts_trigger_rebuild_instead_of_more_blind_iterations(setup):
+    calls=[]
+    def solve(**kwargs):
+        calls.append(kwargs)
+        report=solver_report(kwargs,passed=len(calls)>1,cuts=((1,12),))
+        if len(calls)==1:
+            report.update(termination_reason='source_clearance_refinement',
+                          requested_source_clearance_cuts=[[1,11]])
+        return report
+    state=run_campaign(**setup,solve=solve,certify=checked)
+    assert state['status']=='target_reached'
+    assert len(calls)==2 and calls[1]['clearance_cuts']==[(1,11)]
+    assert calls[1]['command_seed']==calls[0]['output']/'witness.npz'
+    assert calls[1]['iterations']==calls[0]['iterations']
+
+
 def test_padded_margin_reaches_baseline_predictor_shortening_and_certification(setup):
     margin = .12
     solves, predictions, certifications = [], [], []
@@ -120,6 +137,66 @@ def test_failed_multistarts_plateau_without_repeating_or_losing_baseline(setup):
     assert len(calls) == 4
     resumed = run_campaign(**setup, solve=solve, certify=checked, resume=True)
     assert resumed['attempts'] == state['attempts'] and len(calls) == 4
+
+
+def test_duration_attempt_slice_yields_and_resumes_without_repeating(setup):
+    calls=[]
+    def solve(**kw):
+        calls.append(kw)
+        return solver_report(kw,passed=False,residual=.1)
+    state=run_campaign(**setup,solve=solve,certify=checked,attempt_slice=2)
+    assert state['status']=='yielded' and len(calls)==2
+    state=run_campaign(**setup,solve=solve,certify=checked,attempt_slice=2,resume=True)
+    assert state['status']=='yielded' and len(calls)==4
+    state=run_campaign(**setup,solve=solve,certify=checked,attempt_slice=2,resume=True)
+    assert state['status']=='plateau' and len(calls)==4
+    assert len({str(call['output']) for call in calls})==4
+    assert all(call['iterations']==setup['iterations'] for call in calls)
+
+
+def test_roomier_distinct_branch_precedes_first_tiny_smoothing_gain():
+    candidates=[dict(sha256='tiny',clearance_slack_m=0.,geometry_diversity_m=.001),
+                dict(sha256='roomy',clearance_slack_m=.03,geometry_diversity_m=.075)]
+    assert [c['sha256'] for c in elite_branch_order(candidates)]==['roomy','tiny']
+
+
+def test_elite_branches_rotate_instead_of_exhausting_first_basin(setup, tmp_path):
+    branches=[]
+    for name,slack in [('tiny',0.),('roomy',.03)]:
+        folder=tmp_path/name
+        folder.mkdir()
+        fixture_witness(folder/'witness.npz',40)
+        branches.append(dict(witness=str(folder/'witness.npz'), sha256=name,
+                             clearance_slack_m=slack,lap_s=1.))
+    order=[]
+    def solve(**kw):
+        if 'elite_campaigns' in kw['output'].parts:
+            parts=kw['output'].parts
+            order.append(parts[parts.index('elite_campaigns')+1])
+        return solver_report(kw,passed=False,residual=.1)
+    state=run_campaign(**setup,solve=solve,certify=checked,
+        elite_refinements=1,elite_polish=lambda **kw:dict(accepted=branches))
+    assert state['status']=='plateau'
+    assert order==['roomy','roomy','tiny','tiny']*2
+    assert state['elite_schedule']['queue']==[]
+    assert all(v>=2 for v in state['elite_schedule']['visits'].values())
+
+
+def test_child_improvement_survives_interruption_before_child_returns(setup):
+    def callback(path,lap):
+        if lap < 1.:
+            raise KeyboardInterrupt
+    settings=dict(setup,target_seconds=.95,elite_first=True,elite_refinements=1,
+        elite_polish=lambda **kw:dict(accepted=[dict(witness=str(setup['seed']),
+            sha256='roomy',clearance_slack_m=.03,lap_s=1.)]),
+        on_improvement=callback)
+    with pytest.raises(KeyboardInterrupt):
+        run_campaign(**settings,solve=lambda **kw:solver_report(kw,passed=True),
+                     certify=checked)
+    saved=json.loads((setup['output']/'campaign.json').read_text())
+    assert saved['status']=='interrupted'
+    assert saved['best_lap_s']==pytest.approx(.975)
+    assert Path(saved['best_witness']).is_file()
 
 
 def test_interruption_resumes_saved_primal_not_original_bad_seed(setup):

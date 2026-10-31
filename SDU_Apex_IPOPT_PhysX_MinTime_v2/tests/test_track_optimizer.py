@@ -1,5 +1,6 @@
 """Map-only orchestration tests; mocks below do NOT certify vehicle accuracy."""
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +9,27 @@ import yaml
 
 import track_optimizer as optimizer
 from command_ocp import save_command_checkpoint
+
+
+def test_restart_waits_for_live_runtime_owner_but_not_reused_pid(tmp_path,monkeypatch):
+    directory=tmp_path/'mpc_validation'
+    directory.mkdir()
+    path=directory/'optimizer_pause.json'
+    start=Path(f'/proc/{os.getpid()}/stat').read_text().rpartition(')')[2].split()[19]
+    path.write_text(json.dumps(dict(owner_pid=os.getpid(),owner_start_ticks=start)))
+    sleeps=[]
+    def release(seconds):
+        sleeps.append(seconds)
+        path.unlink()
+    monkeypatch.setattr(optimizer.time,'sleep',release)
+    optimizer.wait_for_runtime_pause(tmp_path,lambda:False)
+    assert sleeps==[.5]
+    path.write_text(json.dumps(dict(owner_pid=os.getpid(),owner_start_ticks='wrong-start')))
+    optimizer.wait_for_runtime_pause(tmp_path,lambda:False)
+    assert sleeps==[.5]
+    path.write_text(json.dumps(dict(owner_pid=os.getpid(),owner_start_ticks=start)))
+    with pytest.raises(KeyboardInterrupt):
+        optimizer.wait_for_runtime_pause(tmp_path,lambda:True)
 
 
 def input_map(tmp_path):
@@ -96,11 +118,40 @@ def test_atomic_export_never_replaces_best_with_slower_or_uncertified(tmp_path):
     state = dict(best_lap_s=None)
     optimizer.publish_best(tmp_path, result/'witness.npz', 1., state, source_digest='fixture')
     first = (tmp_path/'best.json').read_bytes()
-    optimizer.publish_best(tmp_path, result/'witness.npz', 2., state, source_digest='fixture')
+    with pytest.raises(ValueError, match='differs from independent certificate'):
+        optimizer.publish_best(tmp_path, result/'witness.npz', 2., state, source_digest='fixture')
     assert (tmp_path/'best.json').read_bytes() == first
     with pytest.raises(ValueError, match='stale-source'):
         optimizer.publish_best(tmp_path, result/'witness.npz', .9, state, source_digest='changed')
     assert (tmp_path/'best.json').read_bytes() == first
+
+
+def test_slower_roomier_line_exported_without_replacing_fastest(tmp_path):
+    original=tmp_path/'source'
+    original.mkdir()
+    witness(original/'seed.npz')
+    fast=tmp_path/'fast'
+    report=certification(tmp_path,original/'seed.npz',tmp_path/'map',fast)
+    report['rollout']=dict(minimum_1ms_footprint_slack_m=0.)
+    (fast/'report.json').write_text(json.dumps(report))
+    state=dict(best_lap_s=None)
+    optimizer.publish_best(tmp_path,fast/'witness.npz',1.,state,source_digest='fixture')
+    first=(tmp_path/'best.json').read_bytes()
+    stamp=Path(state['best_manifest']).stat().st_mtime_ns
+    optimizer.publish_best(tmp_path,fast/'witness.npz',1.,state,source_digest='fixture')
+    assert Path(state['best_manifest']).stat().st_mtime_ns==stamp
+    witness(original/'longer.npz', count=41)
+    room=tmp_path/'room'
+    report=certification(tmp_path,original/'longer.npz',tmp_path/'map',room)
+    report['rollout']=dict(minimum_1ms_footprint_slack_m=.03)
+    (room/'report.json').write_text(json.dumps(report))
+    optimizer.publish_best(tmp_path,room/'witness.npz',1.025,state,source_digest='fixture')
+    portfolio=json.loads((tmp_path/'portfolio.json').read_text())
+    assert (tmp_path/'best.json').read_bytes()==first
+    assert len(list((tmp_path/'exports').glob('*/manifest.json')))==2
+    assert portfolio['certified_count']==2 and len(portfolio['pareto'])==2
+    assert portfolio['roomiest']['lap_s']==pytest.approx(1.025)
+    assert portfolio['roomiest']['clearance_slack_m']==pytest.approx(.03)
 
 
 def test_equal_time_clearer_candidate_exports_and_replaces_best(tmp_path):

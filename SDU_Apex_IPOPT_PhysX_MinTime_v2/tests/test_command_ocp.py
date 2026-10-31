@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import casadi as ca
 import numpy as np
@@ -10,6 +11,7 @@ from command_ocp import shorten_seed_by_packet
 from command_ocp import time_prediction_seed, certify_witness, save_npz_checkpoint
 from command_ocp import recondition_command_seed
 from command_ocp import command_problem, STATE_SCALES
+from command_ocp import source_clearance_refinement, reported_clearance_cuts, clearance_interpolant
 import command_ocp
 from physics import SourcePlant
 
@@ -81,6 +83,169 @@ def test_fixed_prefix_matches_composed_production_ticks_and_derivatives():
     for bad in (0, 26, 12.5, ca.MX.sym('not_a_decision')):
         with pytest.raises(ValueError):
             production_fixed_prefix(root, build, digest, z, bad)
+
+
+def test_all_literal_prefixes_match_independent_one_ms_production_steps(maps):
+    _, _, plant, digest = maps
+    root=Path(__file__).resolve().parents[2]
+    for speed,rack,q in ((3.,-.25,.08),(8.,.35,.12)):
+        plant.reset(1.,-2.,.7,speed)
+        plant.step(rack,q)
+        packed=np.r_[plant.state.x,plant.state.y,plant.state.yaw,
+                     np.asarray(plant.input.state[:18]),-.1,q]
+        for tick in range(1,26):
+            actual=plant.step(-.1,q,duration_s=.001)
+            expected=np.r_[actual.x,actual.y,actual.yaw,plant.input.state[:18]]
+            prefix=production_fixed_prefix(root,root/'build_task/command_ocp',digest,
+                                            ca.DM(packed),tick)
+            np.testing.assert_allclose(np.asarray(prefix).reshape(-1),expected,
+                                       atol=1.e-10,rtol=1.e-10)
+
+
+def test_refinement_selects_worst_unconstrained_tick_not_duplicate_base_prefix():
+    report=dict(full_lap_xy_max_m=.0001,violating_source_samples=[
+        dict(interval=1,tick=12,slack_m=-.003),
+        dict(interval=1,tick=11,slack_m=-.002),
+        dict(interval=1,tick=10,slack_m=-.001),
+        dict(interval=2,tick=7,slack_m=-.001),
+        dict(interval=2,tick=8,slack_m=-.002)])
+    assert source_clearance_refinement(report,[(1,11)],3)==[(1,10),(2,8)]
+    report['full_lap_xy_max_m']=.051
+    assert source_clearance_refinement(report,[],3)==[]
+    report['full_lap_xy_max_m']=float('nan')
+    assert source_clearance_refinement(report,[],3)==[]
+
+
+def test_reported_missing_ticks_take_precedence_over_already_constrained_worst():
+    report=dict(requested_source_clearance_cuts=[[2,11]],
+        rollout=dict(violating_source_ticks=[dict(interval=2,tick=12)]))
+    assert reported_clearance_cuts(report)=={(2,11)}
+    del report['requested_source_clearance_cuts']
+    assert reported_clearance_cuts(report)=={(2,12)}
+
+
+@pytest.mark.parametrize('yaw',[0.,.37])
+def test_optimizer_map_interpolation_matches_independent_footprint_checker(yaw):
+    from map_track import MapGrid, _FOOTPRINT_LOCAL, _FOOTPRINT_UNSAMPLED_CORRECTION
+    rows,cols=90,100
+    rr,cc=np.indices((rows,cols))
+    grid=MapGrid(np.zeros((rows,cols),np.uint8),np.ones((rows,cols),bool),
+                 .025,np.array([1.2,-3.]),yaw,.2+.001*cc+.002*rr+.00001*rr*cc)
+    wall=clearance_interpolant(grid)
+    c,s=np.cos(yaw),np.sin(yaw)
+    for heading in (-.7,.4,1.2):
+        x,y=grid.origin+np.array([c*1.2-s*1.1,s*1.2+c*1.1])
+        ch,sh=np.cos(heading),np.sin(heading)
+        along,side=_FOOTPRINT_LOCAL.T
+        wx=x+ch*along-sh*side-grid.origin[0]
+        wy=y+sh*along+ch*side-grid.origin[1]
+        local=np.vstack([c*wx+s*wy,-s*wx+c*wy])
+        nlp=float(np.min(np.asarray(wall.map(len(along),'serial')(local))))- \
+            _FOOTPRINT_UNSAMPLED_CORRECTION-.05
+        assert nlp==pytest.approx(grid.footprint_clearance(x,y,heading,margin=.05),abs=1.e-12)
+
+
+@pytest.mark.parametrize('objective',['repair','smooth'])
+def test_real_ipopt_callback_stops_on_new_tick_and_recovers_durable_cut(
+        tmp_path,monkeypatch,capsys,objective):
+    """Tiny orchestration NLP, not a synthetic claim about vehicle dynamics."""
+    count=3
+    states=np.zeros((21,count+1))
+    states[2]=np.linspace(0.,2*np.pi,count+1)
+    controls=np.full((2,count),.1)
+    seed=tmp_path/'seed.npz'
+    save_npz_checkpoint(seed,schema='production-command-ocp/v1',state=states,
+                        controls=controls,dt_s=.025)
+    grid=tmp_path/'map.pgm'
+    grid.write_bytes(b'fixture map never used for physics')
+    calls=[]
+    def problem(_repo,_function,_digest,initial_x,initial_u,_winding,_grid,_margin,
+                _workers,cuts,**_kwargs):
+        calls.append(list(cuts))
+        opti=ca.Opti()
+        x=opti.variable(*initial_x.shape)
+        u=opti.variable(*initial_u.shape)
+        opti.set_initial(x,initial_x)
+        opti.set_initial(u,initial_u)
+        opti.subject_to(x==initial_x)
+        opti.subject_to(u==initial_u)
+        opti.minimize(ca.sumsqr(x-initial_x)+ca.sumsqr(u-initial_u))
+        return opti,x,u,None
+    replays=[]
+    def replay(_function,x,u,_grid,_margin,**_kwargs):
+        replays.append((x.copy(),u.copy()))
+        return dict(full_lap_xy_max_m=0.,minimum_1ms_footprint_slack_m=-.001,
+                    violating_source_ticks=[dict(interval=1,tick=7,slack_m=-.001)])
+    monkeypatch.setattr(command_ocp,'production_command_map',lambda *_:(object(),'fixture'))
+    monkeypatch.setattr(command_ocp.MapGrid,'load',lambda *_:object())
+    monkeypatch.setattr(command_ocp,'command_problem',problem)
+    monkeypatch.setattr(command_ocp,'check_full_witness',replay)
+    first=command_ocp.solve_witness(repo=tmp_path,checkpoint=None,mesh=None,audit=None,
+        map_path=grid,output=tmp_path/'first',count=count,command_seed=seed,
+        workers=1,iterations=20,objective_mode=objective)
+    assert first['termination_reason']=='source_clearance_refinement'
+    assert first['requested_source_clearance_cuts']==[[1,7]]
+    assert first['ipopt_iterations']<20
+    with np.load(tmp_path/'first/best_iterate.npz') as checkpoint:
+        np.testing.assert_array_equal(checkpoint['state'],replays[0][0])
+        np.testing.assert_array_equal(checkpoint['controls'],replays[0][1])
+    command_ocp.solve_witness(repo=tmp_path,checkpoint=None,mesh=None,audit=None,
+        map_path=grid,output=tmp_path/'second',count=count,
+        command_seed=tmp_path/'first/best_iterate.npz',workers=1,iterations=20,
+        objective_mode=objective)
+    assert calls==[[],[(1,7)]]
+    headers=[json.loads(line) for line in capsys.readouterr().out.splitlines()
+             if line.startswith('{"stage": "production-command witness"')]
+    assert [h['output'] for h in headers]==[
+        str((tmp_path/'first').resolve()), str((tmp_path/'second').resolve())]
+
+
+@pytest.mark.parametrize('terminal_fraction',[-.1,1.1])
+def test_predictor_skips_invalid_trial_and_terminal_timing_without_losing_checkpoint(
+        tmp_path,monkeypatch,capsys,terminal_fraction):
+    """Real callback/terminal path on a tiny NLP, not vehicle performance data."""
+    count,sectors=40,4
+    states=np.zeros((21,count+1))
+    states[2]=np.linspace(0.,2*np.pi,count+1)
+    controls=np.full((2,count),.1)
+    seed=tmp_path/'seed.npz'
+    save_npz_checkpoint(seed,schema='production-command-ocp/v1',state=states,
+                        controls=controls,dt_s=.025)
+    grid=tmp_path/'map.pgm'
+    grid.write_bytes(b'fixture, never used as a physical map')
+    def problem(_repo,_function,_digest,initial_x,initial_u,*_args,**_kwargs):
+        opti=ca.Opti()
+        x=opti.variable(*initial_x.shape)
+        u=opti.variable(*initial_u.shape)
+        fraction=opti.variable(sectors)
+        opti.set_initial(x,initial_x)
+        opti.set_initial(u,initial_u)
+        opti.set_initial(fraction,1.)
+        opti.subject_to(x==initial_x)
+        opti.subject_to(u==initial_u)
+        # Deliberately force an out-of-domain timing iterate. It must not be
+        # clipped into a valid proposal or terminate the surrounding campaign.
+        opti.subject_to(fraction==terminal_fraction)
+        opti.minimize(ca.sumsqr(fraction-terminal_fraction))
+        return opti,x,u,fraction
+    monkeypatch.setattr(command_ocp,'production_command_map',lambda *_:(object(),'fixture'))
+    monkeypatch.setattr(command_ocp.MapGrid,'load',lambda *_:object())
+    monkeypatch.setattr(command_ocp,'command_problem',problem)
+    output=tmp_path/'predictor'
+    report=command_ocp.solve_time_predictor(repo=tmp_path,command_seed=seed,
+        map_path=grid,output=output,time_sectors=sectors,workers=1,iterations=20)
+    assert report['status']=='no_time_proposal'
+    assert report['source_certified'] is False
+    assert report['retained_shorter_proposals']==0
+    assert report['invalid_timing_iterates']>=1
+    np.testing.assert_allclose(report['last_invalid_timing']['sector_fractions'],terminal_fraction)
+    with np.load(output/'best_predictor.npz') as saved:
+        np.testing.assert_array_equal(saved['fraction'],np.ones(sectors))
+    assert (output/'report.json').exists()
+    events=[json.loads(line) for line in capsys.readouterr().out.splitlines()
+            if line.startswith('{"event": "time_predictor_iterate_skipped"')]
+    assert any(e['terminal'] for e in events)
+    assert not (output/'proposed_seed.npz').exists()
 
 
 def test_threaded_maps_preserve_values_and_derivatives_bitwise(maps):
@@ -220,7 +385,10 @@ def test_raw_time_relaxation_is_never_a_source_witness(tmp_path):
         certify_witness(tmp_path, path, tmp_path/'unused.pgm', tmp_path/'certified')
 
 
-def test_certification_uses_and_reports_explicit_required_margin(tmp_path, monkeypatch):
+@pytest.mark.parametrize('slack,expected',[(0.,'source_witness_passed'),
+    (-5.e-7,'source_witness_passed'),(-2.e-6,'no_validated_witness'),
+    (-.000172,'no_validated_witness'),(-.00109,'no_validated_witness')])
+def test_certification_uses_and_reports_explicit_required_margin(tmp_path, monkeypatch,slack,expected):
     count = 3
     witness = tmp_path/'witness.npz'
     states = np.zeros((21, count+1))
@@ -242,7 +410,7 @@ def test_certification_uses_and_reports_explicit_required_margin(tmp_path, monke
     checked_margins = []
     def check(_function, _states, _controls, _grid, margin, **_kwargs):
         checked_margins.append(margin)
-        return dict(full_lap_xy_max_m=0., minimum_1ms_footprint_slack_m=0.)
+        return dict(full_lap_xy_max_m=0., minimum_1ms_footprint_slack_m=slack)
 
     monkeypatch.setattr(command_ocp, 'production_command_map', lambda *_: (Mapped(), 'source'))
     monkeypatch.setattr(command_ocp, 'MapGrid', Grid)
@@ -252,9 +420,31 @@ def test_certification_uses_and_reports_explicit_required_margin(tmp_path, monke
     report = certify_witness(tmp_path, witness, tmp_path/'map.pgm',
                              tmp_path/'certification', margin=.125)
 
-    assert report['status'] == 'source_witness_passed'
+    assert report['status'] == expected
     assert report['required_margin_m'] == .125
     assert checked_margins == [.125]
+    assert report['clearance_numerical_tolerance_m']==1.e-6
+    assert report['rollout']['minimum_1ms_footprint_slack_m']==slack
+
+
+def test_clearance_tolerance_is_absolute_and_never_hides_real_misses():
+    from map_track import clearance_passes, CLEARANCE_NUMERICAL_TOLERANCE_M
+    assert CLEARANCE_NUMERICAL_TOLERANCE_M==1.e-6
+    for value in (0.,-1.3e-10,-5.e-7,-1.e-6):
+        assert clearance_passes(value)
+    for value in (-1.00001e-6,-.000172,-.00109,float('nan'),float('inf')):
+        assert not clearance_passes(value)
+    assert not clearance_passes(-5.e-7,tolerance_m=0.)
+    assert not clearance_passes(0.,tolerance_m=.01)
+    assert clearance_passes(.002-5.e-7,.002)
+    assert not clearance_passes(.002-2.e-6,.002)
+
+
+def test_refinement_ignores_only_tolerance_size_clearance_deficits():
+    report=dict(full_lap_xy_max_m=0.,violating_source_samples=[
+        dict(interval=0,tick=7,slack_m=-5.e-7),
+        dict(interval=1,tick=7,slack_m=-2.e-6)])
+    assert source_clearance_refinement(report,[],2)==[(1,7)]
 
 
 @pytest.mark.parametrize('margin', [-.01, float('nan'), float('inf')])

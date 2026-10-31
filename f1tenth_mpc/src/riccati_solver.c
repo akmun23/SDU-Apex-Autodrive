@@ -511,6 +511,14 @@ static int riccati_solver_factorize_diagonal(
             }
         }
 
+#ifdef MPC_ENABLE_RICCATI_FIXED_QP_AFFINE_CACHE
+        /* Both this QP's affine dynamics d[k] and the rho-dependent P
+         * matrix stay fixed until this factorization is invalidated. */
+        for (int i = 0; i < nx; ++i)
+            for (int j = 0; j < nx; ++j)
+                factor->affine_state_shift[k][i] +=
+                    factor->P[k + 1][i][j] * sd->d[j];
+#endif
         for (int i = 0; i < nx; ++i) {
             for (int s = 0; s < nx; ++s) {
                 for (int j = 0; j < nx; ++j)
@@ -603,8 +611,14 @@ int riccati_solver_pass_factored(
 
         for (int i = 0; i < nx; ++i) {
             p_shift[i] = p[k + 1][i];
-            for (int s = 0; s < nx; ++s)
-                p_shift[i] += factor->P[k + 1][i][s] * sd->d[s];
+            if (factor->private_fixed_qp_affine_cache_enabled) {
+                p_shift[i] += factor->affine_state_shift[k][i];
+            } else {
+                /* Public factored API permits new affine d[k] while
+                 * reusing unchanged quadratic factors. */
+                for (int j = 0; j < nx; ++j)
+                    p_shift[i] += factor->P[k + 1][i][j] * sd->d[j];
+            }
             q_aug_linear[i] = sd->q[i] -
                 (factor->x_is_constrained[k][i]
                     ? factor->rho_state[k][i] *
@@ -691,6 +705,13 @@ static int riccati_solver_primal_pass(
         if (!riccati_solver_factorize_diagonal(step_data, terminal_Q,
                 terminal_x_lb, terminal_x_ub, rho_state, rho_input,
                 factorization)) return 0;
+        /* This factorization belongs to one fixed MPC QP and cannot be
+         * used through the public RHS reuse contract. Subsequent ADMM
+         * iterations only update duals and penalty matrices; a penalty
+         * change forces a new factorization (and new P*d cache). */
+#ifdef MPC_ENABLE_RICCATI_FIXED_QP_AFFINE_CACHE
+        factorization->private_fixed_qp_affine_cache_enabled=1;
+#endif
 #ifdef MPC_ENABLE_RICCATI_PROFILE
         const uint64_t finish_ns = riccati_profile_now_ns();
         if (finish_ns >= start_ns)

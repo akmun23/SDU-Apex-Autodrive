@@ -27,7 +27,8 @@ from scipy.interpolate import CubicSpline
 
 from command_campaign import run_campaign, unused_directory, budget_increase_only
 from command_ocp import (certify_witness, production_command_map, save_command_checkpoint,
-                         save_json_checkpoint, solve_witness, witness_quality, quality_key)
+                         save_json_checkpoint, solve_witness, witness_quality, quality_key,
+                         reported_clearance_cuts)
 from physics import SourcePlant
 
 REPO = Path(__file__).resolve().parents[1]
@@ -36,6 +37,33 @@ DT = .025
 
 def file_hash(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def wait_for_runtime_pause(output, cancel):
+    """Honor an existing driving-test lease even across optimizer restarts.
+
+    The test owner normally freezes this service. Restarting must not launch a
+    new CPU-heavy solve before that still-live owner releases its lease.
+    """
+    announced = False
+    while True:
+        try:
+            lease = json.loads((output/'mpc_validation/optimizer_pause.json').read_text())
+            pid = lease.get('owner_pid')
+            if type(pid) is not int or pid <= 0:
+                return
+            start = Path(f'/proc/{pid}/stat').read_text().rpartition(')')[2].split()[19]
+            if start != lease.get('owner_start_ticks'):
+                return
+        except (OSError, ValueError, IndexError):
+            return
+        if cancel():
+            raise KeyboardInterrupt('optimizer restart waiting for supervised runtime test')
+        if not announced:
+            print(json.dumps(dict(event='optimizer_waiting_for_runtime_pause',
+                                  reason=lease.get('reason'), owner_pid=pid)),flush=True)
+            announced = True
+        time.sleep(.5)
 
 
 def resolve_map(path, metadata=None):
@@ -91,7 +119,8 @@ def implementation_digest():
                  root/'rigid_pose_polish.py', root/'adaptive_regions.py',
                  root/'map_track.py', root/'min_curvature_seed.py', root/'physics.py',
                  root/'path_frame.py', root/'command_realizability.py',
-                 root.parent/'tools/build_mapped_raceline.py'):
+                 root.parent/'tools/build_mapped_raceline.py',
+                 root.parent/'config/racing/raceline_clearance_policy.json'):
         digest.update(path.name.encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
@@ -235,6 +264,40 @@ def geometric_seed(reference, destination, repo, speed_scale=1.):
     return count
 
 
+def update_portfolio(output, source_digest):
+    """Keep speed/clearance/smoothness tradeoffs separate from fastest pointer."""
+    entries = []
+    for manifest in sorted((output/'exports').glob('*/manifest.json')):
+        item = json.loads(manifest.read_text())
+        quality = item.get('quality') or {}
+        metrics = [quality.get(k) for k in (
+            'clearance_slack_m', 'steering_step_rms_rad', 'throttle_step_rms')]
+        if item.get('source_plant_sha256') != source_digest or not all(
+                value is not None and math.isfinite(float(value)) for value in metrics):
+            continue
+        entries.append(dict(id=manifest.parent.name, manifest=str(manifest),
+            lap_s=item['lap_s'], required_margin_m=item.get('required_margin_m', .05),
+            **{key: quality[key] for key in (
+                'clearance_slack_m', 'steering_step_rms_rad', 'throttle_step_rms')}))
+
+    def dominates(a, b):
+        av = (a['lap_s'], -a['clearance_slack_m'],
+              a['steering_step_rms_rad'], a['throttle_step_rms'])
+        bv = (b['lap_s'], -b['clearance_slack_m'],
+              b['steering_step_rms_rad'], b['throttle_step_rms'])
+        return all(x <= y+1.e-9 for x, y in zip(av, bv)) and any(
+            x < y-1.e-9 for x, y in zip(av, bv))
+
+    front = [a for a in entries if not any(dominates(b, a) for b in entries)]
+    front.sort(key=lambda a: (a['lap_s'], -a['clearance_slack_m']))
+    save_json_checkpoint(output/'portfolio.json', dict(
+        schema='source-raceline-portfolio/v1', source_plant_sha256=source_digest,
+        source_only=True, unity_validated=False, certified_count=len(entries),
+        pareto=front,
+        roomiest=max(entries, key=lambda a: a['clearance_slack_m'], default=None),
+        smoothest=min(entries, key=lambda a: a['steering_step_rms_rad'], default=None)))
+
+
 def publish_best(output, witness, lap_s, state, *, source_digest,
                  verified_direction=None):
     """Publish only independently certified immutable bundles; atomic pointer."""
@@ -246,8 +309,8 @@ def publish_best(output, witness, lap_s, state, *, source_digest,
     require_travel_orientation(witness,
         verified_direction['winding'] if verified_direction else -1,
         verified=verified_direction is not None)
-    if state.get('best_lap_s') is not None and lap_s > state['best_lap_s']+1.e-9:
-        return
+    if abs(float(checked['trial_lap_s'])-lap_s) > 1.e-8:
+        raise ValueError('published lap time differs from independent certificate')
     quality = witness_quality(witness, checked)
     directory = output/'exports'/file_hash(witness)[:16]
     directory.mkdir(parents=True, exist_ok=True)
@@ -275,11 +338,19 @@ def publish_best(output, witness, lap_s, state, *, source_digest,
     summary = dict(lap_s=lap_s, files=published, witness_sha256=file_hash(witness),
                    quality=quality,
                    source_plant_sha256=source_digest,
+                   required_margin_m=checked.get('required_margin_m', .05),
+                   clearance_numerical_tolerance_m=checked.get('clearance_numerical_tolerance_m',0.),
                    direction='unity_verified' if verified_direction else 'clockwise',
                    direction_reference_sha256=(verified_direction['sha256'] if verified_direction else None),
                    source_only=True,
                    unity_validated=False, mpc_validated=False, runtime_promoted=False)
-    save_json_checkpoint(directory/'manifest.json', summary)
+    if not (directory/'manifest.json').exists():
+        save_json_checkpoint(directory/'manifest.json', summary)
+    update_portfolio(output, source_digest)
+    # A slower but roomier/smoother line remains an exported, testable option.
+    # It must never silently displace the fastest certified line in best.json.
+    if state.get('best_lap_s') is not None and lap_s > state['best_lap_s']+1.e-9:
+        return
     # Equal-time geometry/control alternatives are still exported: the Unity
     # validator must be able to compare them, and their shortening searches
     # must not be forced back to the first witness with this packet count.
@@ -418,6 +489,7 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
         save()
     try:
         save(status='running')
+        wait_for_runtime_pause(output, cancel)
         # Bundle metric metadata as well as pixels; another track's origin or
         # resolution must never be silently paired with a saved shooting state.
         bundled_image, bundled_yaml = bundle_map(image, config, output/'input')
@@ -498,8 +570,8 @@ def run_track(*, image, metadata, config, output, workers=8, iterations=1500,
                                 current['witness'] = str(checked_dir/'witness.npz')
                                 promote(Path(current['witness']), checked['trial_lap_s'])
                                 break
-                        discovered = {(int(c['interval']), int(c['tick'])) for c in
-                                      report['rollout']['violating_source_ticks']}
+                        cuts.update(tuple(c) for c in report.get('source_clearance_cuts', []))
+                        discovered = reported_clearance_cuts(report)
                         has_cuts = bool(discovered-cuts) and residual <= 1.e-3
                         cuts.update(discovered if has_cuts else ())
                         if not has_cuts and residual >= best_residual*.98:

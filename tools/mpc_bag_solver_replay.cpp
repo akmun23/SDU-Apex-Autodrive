@@ -183,12 +183,124 @@ void configure(MpcRtiCycleConfiguration_t *config,
     config->max_cycle_time_us = 0.0;
 }
 
+void audit_objective_gradient(const MpcRtiState_t &initial, double progress,
+    const std::vector<MpcTrajectorySample_t> &trajectory,double length,
+    const MpcRtiCycleConfiguration_t &configuration,const MpcRtiMemory_t &memory)
+{
+    MpcRtiNominal_t nominal{};
+    MpcRtiReference_t references[PREDICTION_HORIZON+1]{};
+    if (!mpc_rti_build_nominal_with_warm_start(&initial,progress,&memory.nominal,
+        memory.warm_start_controls,memory.warm_start_control_count,
+        trajectory.data(),trajectory.size(),length,PREDICTION_DT_SECONDS,
+        PREDICTION_HORIZON,&configuration.model,&nominal,references))
+        throw std::runtime_error("gradient audit could not build nominal");
+    MpcRtiProblem_t problem{};
+    if (!mpc_rti_build_ltv_qp(nominal.states,nominal.controls,references,
+        PREDICTION_HORIZON,PREDICTION_DT_SECONDS,&configuration.model,&problem))
+        throw std::runtime_error("gradient audit could not build QP");
+    MpcRtiObjectiveSchedule_t schedule{};
+    if (!mpc_rti_build_objective_schedule(&nominal,references,&configuration.model,&schedule))
+        throw std::runtime_error("gradient audit could not build objective");
+    auto config=configuration;
+    config.objective_schedule=&schedule;
+    auto wide=trajectory;
+    // Offline derivative diagnostic only: remove wall rejection while retaining
+    // the original geometry, dynamics and frozen objective. Never publishes.
+    for (auto &p:wide) p.left_bound=p.right_bound=100.;
+    for (int input:{0,1}) for (int changed:{0,8,20}) {
+        double x[RICCATI_MAX_NX],dx[RICCATI_MAX_NX]{};
+        std::copy_n(problem.x0,RICCATI_MAX_NX,x);
+        double derivative=0.;
+        for (int k=0;k<RICCATI_HORIZON;++k) {
+            const auto &stage=problem.steps[k];
+            const double u[2]={nominal.controls[k].steering_target_rad,
+                               nominal.controls[k].throttle_command};
+            double du[2]{};if(k==changed)du[input]=1.;
+            for(int i=0;i<RICCATI_MAX_NX;++i) {
+                double gx=stage.Q_diag[i]*x[i]+stage.q[i];
+                for(int a=0;a<2;++a)gx+=stage.N[i][a]*u[a];
+                derivative+=gx*dx[i];
+            }
+            for(int a=0;a<2;++a) {
+                double gu=stage.R_diag[a]*u[a]+stage.r[a];
+                for(int i=0;i<RICCATI_MAX_NX;++i)gu+=stage.N[i][a]*x[i];
+                derivative+=gu*du[a];
+            }
+            double next[RICCATI_MAX_NX]{},dnext[RICCATI_MAX_NX]{};
+            for(int i=0;i<RICCATI_MAX_NX;++i) {
+                next[i]=stage.d[i];
+                for(int j=0;j<RICCATI_MAX_NX;++j) {
+                    next[i]+=stage.A[i][j]*x[j];dnext[i]+=stage.A[i][j]*dx[j];
+                }
+                for(int a=0;a<2;++a) {
+                    next[i]+=stage.B[i][a]*u[a];dnext[i]+=stage.B[i][a]*du[a];
+                }
+            }
+            std::copy_n(next,RICCATI_MAX_NX,x);std::copy_n(dnext,RICCATI_MAX_NX,dx);
+        }
+        for(int i=0;i<RICCATI_MAX_NX;++i)
+            derivative+=(problem.terminal_Q[i]*x[i]+problem.terminal_q[i])*dx[i];
+        for(float epsilon:{.0001f,.00003f}) {
+            double cost[2]{};bool valid=true;
+            for(int side=0;side<2;++side) {
+                MpcModelControl_t controls[PREDICTION_HORIZON];
+                std::copy_n(nominal.controls,PREDICTION_HORIZON,controls);
+                float &v=input==0?controls[changed].steering_target_rad:
+                                  controls[changed].throttle_command;
+                v+=(side?epsilon:-epsilon);
+                MpcRtiNominal_t exact{};int failure=-1;
+                if(mpc_rti_validate_candidate_plan(&initial,progress,controls,
+                    wide.data(),wide.size(),length,PREDICTION_HORIZON,
+                    PREDICTION_DT_SECONDS,&config,&exact,&failure)!=MPC_RTI_ROLLOUT_OK) {
+                    valid=false;break;
+                }
+                cost[side]=exact.validation_objective;
+            }
+            if(valid) std::cerr<<"GRADIENT progress="<<progress<<" input="<<input
+                <<" stage="<<changed<<" epsilon="<<epsilon<<" qp="<<derivative
+                <<" exact="<<(cost[1]-cost[0])/(2.*epsilon)
+                <<" walls_relaxed_for_derivative_only=1\n";
+        }
+    }
+}
+
+void audit_candidate_merit(const MpcRtiState_t &initial,double progress,
+    const std::vector<MpcTrajectorySample_t> &trajectory,double length,
+    MpcRtiCycleConfiguration_t config,const MpcRtiCycleResult_t &result)
+{
+    if(result.candidate_control_count!=PREDICTION_HORIZON ||
+       !result.comparison_objective.valid)return;
+    config.objective_schedule=&result.comparison_objective;
+    auto wide=trajectory;
+    for(auto &p:wide)p.left_bound=p.right_bound=100.;
+    for(float alpha:{0.f,1.f,.5f,.25f,.125f,.0625f,.03125f,.015625f,.0078125f}) {
+        MpcModelControl_t controls[PREDICTION_HORIZON];
+        for(int k=0;k<PREDICTION_HORIZON;++k) {
+            const auto &a=result.nominal_controls[k],&b=result.candidate_controls[k];
+            controls[k].steering_target_rad=a.steering_target_rad+
+                alpha*(b.steering_target_rad-a.steering_target_rad);
+            controls[k].throttle_command=a.throttle_command+
+                alpha*(b.throttle_command-a.throttle_command);
+        }
+        MpcRtiNominal_t exact{};int failure=-1;
+        auto status=mpc_rti_validate_candidate_plan(&initial,progress,controls,
+            wide.data(),wide.size(),length,PREDICTION_HORIZON,
+            PREDICTION_DT_SECONDS,&config,&exact,&failure);
+        const double objective=status==MPC_RTI_ROLLOUT_OK?exact.validation_objective:NAN;
+        status=mpc_rti_validate_candidate_plan(&initial,progress,controls,
+            trajectory.data(),trajectory.size(),length,PREDICTION_HORIZON,
+            PREDICTION_DT_SECONDS,&config,&exact,&failure);
+        std::cerr<<"MERIT progress="<<progress<<" alpha="<<alpha<<" objective="
+            <<objective<<" exact_status="<<status<<" failure_stage="<<failure<<'\n';
+    }
+}
+
 }  // namespace
 
 int main(int argc, char **argv)
 {
     if (argc < 8 || (argc > 31 && argc != 43 && argc != 44 &&
-                     argc != 45 && argc != 46 && argc != 47 && argc != 49 && argc != 50 && argc != 51)) {
+                     argc != 45 && argc != 46 && argc != 47 && argc != 49 && argc != 50 && argc != 51 && argc != 52)) {
         std::cerr << "usage: mpc_bag_solver_replay TRAJECTORY INPUT_CSV "
                      "RHO RHO_STEER RHO_THROTTLE ALPHA COST_SCALE "
                      "[RHO_EY RHO_U_STATE RHO_STEER_STATE "
@@ -209,7 +321,7 @@ int main(int argc, char **argv)
                      "[OVERSPEED_CURVATURE_GAIN_M: 0..10 "
                      "[UNDERSPEED_CURVATURE_GAIN_M: 0..10 "
                      "[SLIP_CURVATURE_GAIN_M: 0..10]]]]]]]]]]]]]]]]]]]] "
-                     "(MAX_ITERATIONS: 1..200; optional final arguments after "
+                     "(MAX_ITERATIONS: 1..300; optional final arguments after "
                      "both trust radii: FEEDBACK_ROLLOUT [REFERENCE_CLEARANCE_RESERVE_M])\n";
         return 2;
     }
@@ -272,7 +384,7 @@ int main(int argc, char **argv)
              solver_start != "dual-cold") ||
             jacobian_threads < 0 ||
                 jacobian_threads > MPC_RTI_MAX_JACOBIAN_THREADS ||
-            max_iterations < 1 || max_iterations > 200 ||
+            max_iterations < 1 || max_iterations > MAX_ITERATIONS ||
             startup_seed < 0.0 || startup_seed > 1.0 ||
             !(ey_weight_multiplier > 0.0) || ey_weight_multiplier > 100.0 ||
             !(epsi_weight_multiplier > 0.0) ||
@@ -392,6 +504,12 @@ int main(int argc, char **argv)
                 throw std::runtime_error("reference clearance reserve must be finite and nonnegative");
             config.model.reference_clearance_reserve_m = static_cast<float>(reserve);
         }
+        if (argc >= 52) {
+            const double tolerance = number_arg(argv, 51, .005);
+            if (!std::isfinite(tolerance) || tolerance < 0. || tolerance > .02)
+                throw std::runtime_error("invalid nonlinear corridor tolerance");
+            config.model.nonlinear_corridor_tolerance_m = static_cast<float>(tolerance);
+        }
         config.enable_nonlinear_line_search = line_search_backtracks > 0;
         config.line_search_max_backtracks = line_search_backtracks;
         /* This executable is an offline fixed-state evaluator; it has no
@@ -403,6 +521,8 @@ int main(int argc, char **argv)
         const char *diagnostic_row_text = std::getenv("MPC_REPLAY_DIAG_ROW");
         const long diagnostic_row = diagnostic_row_text
             ? std::strtol(diagnostic_row_text, nullptr, 10) : -1;
+        const char *gradient_row_text=std::getenv("MPC_REPLAY_GRADIENT_AUDIT_ROW");
+        const long gradient_row=gradient_row_text?std::strtol(gradient_row_text,nullptr,10):-1;
         const char *qp_capture_dir_text =
             std::getenv("MPC_REPLAY_QP_CAPTURE_DIR");
         const char *qp_capture_row_text =
@@ -473,6 +593,8 @@ int main(int argc, char **argv)
                      "first_steering,first_throttle,"
                      "max_plan_steering_delta,max_plan_throttle_delta,"
                      "frenet_geometry_closure_max_m,frenet_geometry_closure_max_rad,"
+                     "predicted_cross_track_rms_m,predicted_heading_rms_rad,"
+                     "predicted_speed_rms_mps,predicted_terminal_cross_track_m,"
                      "nominal_seed_injected\n";
 
         std::string line;
@@ -588,10 +710,36 @@ int main(int argc, char **argv)
                 memory.warm_start_controls_valid = 1;
                 consumed_nominal_seed_rows.insert(row_index);
             }
+            // Offline-only independent same-state source plant comparison.
+            // This exact production C rollout is necessary to verify the
+            // Python source-audit's claimed geometric feasibility before
+            // reasoning about rescue search order or objective weights.
+            if(nominal_seed_injected &&
+               std::getenv("MPC_REPLAY_VALIDATE_NOMINAL_SEED")) {
+                MpcRtiNominal_t validated{};
+                int failing_stage=-1;
+                const auto exact=mpc_rti_validate_candidate_plan(
+                    &state,row[1],seed_it->second.data(),
+                    trajectory.data(),trajectory.size(),lap_length,
+                    PREDICTION_HORIZON,PREDICTION_DT_SECONDS,
+                    &config,&validated,&failing_stage);
+                std::cerr<<"SOURCE_VALIDATION row="<<row_index
+                    <<" status="<<static_cast<int>(exact)
+                    <<" failure_stage="<<failing_stage
+                    <<" min_slack="<<validated.validation_minimum_corridor_slack_m
+                    <<" terminal_u="<<validated.states[PREDICTION_HORIZON].plant.u
+                    <<" terminal_epsi="<<validated.states[PREDICTION_HORIZON].plant.e_psi
+                    <<" terminal_v="<<validated.states[PREDICTION_HORIZON].plant.v
+                    <<'\n';
+            }
+            if(static_cast<long>(row_index)==gradient_row)
+                audit_objective_gradient(state,row[1],trajectory,lap_length,config,memory);
             const MpcRtiCycleStatus_t status = mpc_rti_solve_cycle(
                 &state, row[1], trajectory.data(), trajectory.size(),
                 lap_length, PREDICTION_DT_SECONDS, PREDICTION_HORIZON,
                 &config, &memory, &result);
+            if(static_cast<long>(row_index)==gradient_row)
+                audit_candidate_merit(state,row[1],trajectory,lap_length,config,result);
             if (capture_this_qp && g_qp_capture.valid) {
                 char filename[32];
                 std::snprintf(filename, sizeof(filename), "qp_%06zu.fqp",
@@ -609,10 +757,27 @@ int main(int argc, char **argv)
             float max_plan_throttle_delta = 0.0f;
             double geometry_closure_m = NAN;
             double geometry_closure_rad = NAN;
+            double predicted_ey_rms=NAN,predicted_heading_rms=NAN,
+                predicted_speed_rms=NAN,predicted_terminal_ey=NAN;
             if ((status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
                  status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE ||
                  status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH) &&
                 memory.nominal.valid && memory.nominal.horizon > 0) {
+                const int horizon=memory.nominal.horizon;
+                double ey_sum=0.,heading_sum=0.,speed_sum=0.;
+                for (int k=1;k<=horizon;++k) {
+                    const auto &predicted=memory.nominal.states[k].plant;
+                    const auto &reference=result.comparison_objective.references[k];
+                    const double ey=predicted.e_y-reference.e_y;
+                    const double heading=predicted.e_psi-reference.e_psi;
+                    const double speed=predicted.u-reference.u;
+                    ey_sum+=ey*ey;heading_sum+=heading*heading;speed_sum+=speed*speed;
+                }
+                predicted_ey_rms=std::sqrt(ey_sum/horizon);
+                predicted_heading_rms=std::sqrt(heading_sum/horizon);
+                predicted_speed_rms=std::sqrt(speed_sum/horizon);
+                predicted_terminal_ey=memory.nominal.states[horizon].plant.e_y-
+                    result.comparison_objective.references[horizon].e_y;
                 float previous_steering = state.plant.delayed_steering_command_2;
                 float previous_throttle = state.plant.delayed_throttle_command_2;
                 for (int k = 0; k < memory.nominal.horizon; ++k) {
@@ -836,6 +1001,8 @@ int main(int argc, char **argv)
                       << max_plan_throttle_delta << ','
                       << geometry_closure_m << ','
                       << geometry_closure_rad << ','
+                      << predicted_ey_rms << ',' << predicted_heading_rms << ','
+                      << predicted_speed_rms << ',' << predicted_terminal_ey << ','
                       << (nominal_seed_injected ? 1 : 0) << '\n';
             ++row_index;
         }

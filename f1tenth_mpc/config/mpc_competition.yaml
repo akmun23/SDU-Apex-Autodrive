@@ -123,14 +123,30 @@
     # otherwise useful short retained prefixes too often.
     prefer_full_validated_prior_plan_on_rejection: false
     # On a rejected solve, compare candidate and retained-plan actions over
-    # the same 75 ms using exact source-plant rollout. If both pass, prefer the
-    # candidate when it adds >=2 cm slack and the prior has <5 cm slack, even
-    # if ADMM residuals are poor: exact validation certifies this prefix and
-    # stale-plan replay otherwise erodes clearance. Else use cost/residual
-    # ordering. Hard nonlinear wall clearance is unchanged.
+    # the same 75 ms using exact source-plant rollout. The hard corridor already
+    # includes the required 5 cm body-to-wall buffer; do not require another
+    # 5 cm of clearance for a bounded stale-plan refresh.
     quality_aware_prefix_selection_on_rejection: true
-    quality_prefix_clearance_reserve_m: 0.05
-    quality_prefix_minimum_clearance_gain_m: 0.02
+    # Opt-in map-independent 750 ms feasibility restoration, validated against
+    # the same source-plant/body corridor and the 20 ms publication gate.
+    # Keep disabled until repeated independent closed-loop trials pass.
+    viability_recovery_enabled: false
+    # Steady-command experimental bridge can improve high-speed feasibility
+    # but regressed some independent practice laps; isolate it from the
+    # proven tapered-only controller until comprehensive cross-map validation.
+    viability_steady_bridge_enabled: false
+    viability_recovery_max_trials: 16
+    # Trigger a search when the remaining 750ms predicted physical envelope
+    # slack falls under 5cm; it is an early-warning threshold, not a hard
+    # extra clearance constraint or an enforced raceline padding.
+    viability_lookahead_reserve_m: 0.02
+    quality_prefix_clearance_reserve_m: 0.0
+    # At IROS progress 161.46 m an exact-valid candidate improved 75 ms
+    # corridor slack by 13.95 mm while the retained prefix had only 19.08 mm
+    # reserve. The 20 mm threshold kept replaying the worse prefix; a 10 mm
+    # threshold selects the safer candidate. The hard 5 cm vehicle-wall
+    # validation margin is unchanged.
+    quality_prefix_minimum_clearance_gain_m: 0.01
     # An iteration-limited candidate normally needs residuals within 2x solver
     # tolerance and a material exact-objective gain. A poor-residual iterate
     # cannot replace a prior for a small cost/clearance change: on the
@@ -138,14 +154,12 @@
     # losing corridor validity on the next cycle.
     quality_prefix_iteration_limited_relative_gain: 0.02
     # After 3 consecutive retained-plan actions, allow an exactly validated
-    # 75 ms candidate prefix to refresh when it improves corridor slack by at
-    # least 5 mm. Both prefixes must retain >=5 cm slack; its exact objective
-    # may worsen by at most 30%. This specifically prevents stale-plan chains
-    # from persisting only because an iteration-limited QP has higher cost.
+    # 75 ms candidate prefix to refresh when its exact objective is within 30%
+    # and clearance loss is <=2 cm. Both must still pass the hard corridor;
+    # exact rollout is authoritative, not ADMM residual alone.
     quality_prefix_stale_prior_refresh_after_actions: 3
     quality_prefix_stale_prior_max_clearance_loss_m: 0.02
-    quality_prefix_stale_prior_clearance_gain_objective_loss_fraction: 0.30
-    quality_prefix_stale_prior_minimum_clearance_gain_m: 0.005
+    quality_prefix_stale_prior_objective_loss_fraction: 0.30
     rti_cycle_budget_ms: 20.0
     # Eight persistent workers were exercised by full-speed ten-lap repeats.
     # One earlier repeat deferred a 20.656 ms cycle; no WCET guarantee claimed.

@@ -55,10 +55,24 @@ typedef struct
     float source_throttle;
 } MpcRtiReference_t;
 
+/* Tracking targets and nominal speed-weight branches held fixed for one SQP
+ * objective. Physical rollout and wall bounds still use candidate progress. */
+typedef struct
+{
+    MpcRtiReference_t references[PREDICTION_HORIZON + 1];
+    float speed_weights[PREDICTION_HORIZON + 1];
+    int horizon;
+    int valid;
+} MpcRtiObjectiveSchedule_t;
+
 typedef struct
 {
     float weight_e_y;
     float weight_e_psi;
+    /* Optional loss dead-zones; zero exactly preserves the original objective.
+     * Hard wall/footprint constraints are NOT relaxed by these tolerances. */
+    float tracking_lateral_tolerance_m;
+    float tracking_heading_tolerance_rad;
     float weight_u;
     /* Used only while the nominal state is above the raceline speed. */
     float weight_u_overspeed;
@@ -81,10 +95,9 @@ typedef struct
      * zero-effort regularization for geometry-only references. */
     float weight_steering_target;
     float weight_throttle_command;
-    /* Steering penalizes command-increment error relative to path feedforward
-     * (the native target for source witnesses, not their physical rack angle).
-     * A source witness anchors the first command to its target; later stages
-     * penalize changes of command-tracking error. Throttle uses raw increments. */
+    /* Steering changes relative to the loaded rack/feedforward increment;
+     * throttle changes remain zero-centered. Anchor the previous input to
+     * the command actually issued, not an unexecuted optimizer proposal. */
     float weight_steering_slew;
     float weight_throttle_slew;
     /* Local SQP decision radius about each nominal input. Zero disables the
@@ -114,6 +127,20 @@ typedef struct
      * Moves the lateral target away from a tight wall when space permits;
      * does not tighten/relax constraints or change the loaded path/speeds. */
     float reference_clearance_reserve_m;
+    /* Experimental authoritative swept-world-body check using loaded map,
+     * not an extra polygon QP constraint. Fail closed when map unavailable.
+     * Callback inputs are two successive source-plant derived rear-axle poses
+     * in map frame. Return 1 on physical sweep pass, 0 on rejection.
+     * NOTE: interpolation between source step endpoints is checked, not
+     * continuous Unity/PhysX substep motion. Supply uncertainty margin. */
+    int (*world_sweep_check)(void *ctx,
+        double x0,double y0,double yaw0,double x1,double y1,double yaw1,
+        double margin_m,float *minimum_slack_m);
+    void *world_sweep_context;
+    /* When true, preserve original conservative Frenet validation on all
+     * admitted stages and only ask map authority to rescue a false reject.
+     * Never skip the map on a stage that Frenet considers invalid. */
+    int world_map_rejection_only;
 } MpcRtiConfiguration_t;
 
 typedef enum
@@ -152,7 +179,7 @@ typedef struct
     int speed_reference_valid;
     int valid;
     /* Filled by exact command-sequence validation, not by nominal building. */
-    float validation_objective;
+    double validation_objective;
     float validation_minimum_corridor_slack_m;
     /* Per-cycle benchmark instrumentation; microseconds from CLOCK_MONOTONIC. */
     double reference_seed_us;
@@ -216,6 +243,14 @@ typedef struct
     int linearization_failure_reason;
     int linearization_failure_index;
 } MpcRtiProblem_t;
+
+/* Testable QP-only feasibility-biased restoration transformation. This may
+ * relax a LINEARIZED subproblem, but never the exact native source-plant
+ * rollout, the physical footprint, or the command publication gate. */
+int mpc_rti_prepare_feasibility_restoration_qp(
+    MpcRtiProblem_t *problem, const MpcRtiNominal_t *nominal,
+    float relaxation_m, float wall_weight,
+    const MpcRtiConfiguration_t *model);
 
 /* Offline replay only. When non-NULL, solve_rti_pass copies the exact QP,
  * effective solver configuration, pre-solve ADMM memory, and raw solver result
@@ -289,11 +324,30 @@ typedef struct
     /* Zero/one preserves the single RTI pass. Two enables one deadline-gated
      * relinearization after a rejected corridor step or alpha=0 no-op. */
     int max_sqp_iterations;
+    /* Optional fast path: a first-pass exact-valid full horizon is already
+     * safe. Reserve a second SQP for rejected nonlinear horizons instead of
+     * spending Jacobian + ADMM on accepted damped solutions. The ordinary
+     * full physical/safety validations remain unchanged. */
+    int skip_sqp_refinement_after_first_valid_horizon;
+    /* Optional one extra Phase-I ADMM solve on the SAME 30-stage Jacobians
+     * after a rejected full nonlinear corridor rollout. QP constraints may
+     * be softened; a published action MUST pass the untouched source-plant
+     * 750ms physical footprint and terminal checks. Off by default. */
+    int enable_feasibility_restoration;
+    /* Controller sets this ONLY inside an active fallback episode. Reuse
+     * the first freshly built 30-stage Jacobian for the safety-first QP,
+     * instead of first burning ADMM budget on the racing objective. */
+    int prefer_feasibility_first;
+    float feasibility_restoration_qp_relaxation_m;
+    float feasibility_restoration_wall_weight;
     /* Capture already-computed source-output samples for runtime diagnostics.
      * When false, exact rollouts do not retain or copy this debug data. */
     int capture_diagnostic_outputs;
     /* Optional offline-only POD sink. Must remain NULL in production. */
     MpcRtiQpCapture_t *qp_capture;
+    /* Optional shared comparison objective for independently validated plans.
+     * solve_rti_pass builds its own schedule for its QP and line search. */
+    const MpcRtiObjectiveSchedule_t *objective_schedule;
 } MpcRtiCycleConfiguration_t;
 
 typedef struct
@@ -331,7 +385,9 @@ typedef enum
     MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH,
     /* The command missed its end-to-end deadline. No late output was sent;
      * the next cycle will revalidate the next action of the prior plan. */
-    MPC_RTI_CYCLE_DEFERRED_DEADLINE
+    MPC_RTI_CYCLE_DEFERRED_DEADLINE,
+    /* Experimental: full-horizon source-certified deterministic rescue. */
+    MPC_RTI_CYCLE_ACCEPTED_VIABILITY_RECOVERY
 } MpcRtiCycleStatus_t;
 
 typedef enum
@@ -360,6 +416,11 @@ typedef struct
     /* Controller discarded stale ADMM iterates after publishing an exactly
      * revalidated recovery action, preserving its nominal/control seed. */
     int admm_state_reset_for_recovery;
+    int feasibility_restoration_attempted;
+    int feasibility_restoration_accepted;
+    int feasibility_restoration_iterations;
+    float feasibility_restoration_primal_residual;
+    double feasibility_restoration_us;
     int sqp_iterations_attempted;
     int sqp_iterations_completed;
     int sqp_iterations_accepted;
@@ -367,8 +428,8 @@ typedef struct
      * This selects a proposal for the controller's independent prefix gate;
      * it never certifies the rejected tail. 0=not compared, 1=first, 2=second. */
     int refinement_prefix_selected_pass;
-    float refinement_first_prefix_objective;
-    float refinement_second_prefix_objective;
+    double refinement_first_prefix_objective;
+    double refinement_second_prefix_objective;
     double refinement_prefix_validation_us;
     int admm_status;
     float primal_residual;
@@ -402,7 +463,7 @@ typedef struct
     int line_search_last_failure_stage;
     int line_search_merit_triggered;
     int line_search_nominal_exact_valid;
-    float line_search_nominal_objective;
+    double line_search_nominal_objective;
     float line_search_selected_alpha;
     double line_search_us;
     int diagnostic_output_count;
@@ -460,12 +521,28 @@ typedef struct
     double progress_reference_resampling_us;
     double nominal_rollout_b_us;
     double admm_us;
+    /* Actual thread CPU spent in ADMM, excluding OS descheduling, per solve. */
+    double admm_thread_cpu_us;
     double exact_rollout_us;
     double nonlinear_validation_us;
     double total_solve_us;
     double total_cycle_us;
-    float nonlinear_objective;
+    double nonlinear_objective;
+    /* Common cycle objective for cross-pass and candidate/prior comparisons. */
+    MpcRtiObjectiveSchedule_t comparison_objective;
 } MpcRtiCycleResult_t;
+
+int mpc_rti_build_objective_schedule(
+    const MpcRtiNominal_t *nominal,
+    const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
+    const MpcRtiConfiguration_t *configuration,
+    MpcRtiObjectiveSchedule_t *schedule);
+
+/* Score an already propagated plan without rerunning the physical plant. */
+int mpc_rti_score_candidate_plan(
+    MpcRtiNominal_t *candidate,
+    const MpcTrajectorySample_t *trajectory, size_t trajectory_count,
+    double lap_length, const MpcRtiCycleConfiguration_t *configuration);
 
 /* Build an absolute-state/input affine LTV QP from a nonlinear nominal. */
 int mpc_rti_build_ltv_qp(
@@ -574,8 +651,8 @@ int mpc_rti_should_keep_first_pass_after_refinement_deadline_skip(
     int refinement_skipped_for_deadline);
 /* Compare exact-valid actions evaluated with the same speed targets. */
 int mpc_rti_refinement_improves_action(
-    int first_valid, float first_objective,
-    int refined_valid, float refined_objective);
+    int first_valid, double first_objective,
+    int refined_valid, double refined_objective);
 
 /* True when the cycle has enough time remaining to attempt one nonlinear
  * backtracking rollout without bypassing the final publication deadline. */

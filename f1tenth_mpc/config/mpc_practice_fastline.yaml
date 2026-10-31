@@ -7,3 +7,16 @@
     weight_e_y: 6000.0
     weight_e_psi: 2000.0
     weight_steering_slew: 1500.0
+    # These are PHYSICAL / prediction-model margins, not the raceline's own
+    # 5 cm geometry-planning allowance. The MPC can use that planning buffer
+    # when its exact source-plant body corridor remains clear.
+    corridor_margin_m: 0.02
+    first_prediction_corridor_margin_m: 0.02
+    nonlinear_corridor_tolerance_m: 0.0
+    reference_clearance_reserve_m: 0.0
+    # Tested 750 ms full-source-rollout tapered recovery; no map-indexed rules.
+    viability_recovery_enabled: true
+    viability_recovery_max_trials: 16
+    viability_lookahead_reserve_m: 0.02
+    # A steady-control bridge was not repeatable on practice; experimental only.
+    viability_steady_bridge_enabled: false

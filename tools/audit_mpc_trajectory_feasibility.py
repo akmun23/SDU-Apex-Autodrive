@@ -71,6 +71,7 @@ def source_rollout_command(control: list[float]) -> tuple[float, float]:
     return float(control[0]), float(control[1])
 MPC_FULL_HORIZON_STATUSES = {
     "accepted_optimal", "accepted_feasible", "accepted_line_search",
+    "accepted_viability_recovery",
 }
 PUBLISHED_CONTROL_STATUSES = {
     "accepted_candidate_prefix", "accepted_prior_plan",

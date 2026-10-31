@@ -70,3 +70,20 @@ def test_catalog_deduplicates_identical_witness_export_bytes(tmp_path):
     result=certified_catalog(tmp_path,source_sha256='source',
         map_sha256=hashlib.sha256(b'map').hexdigest())
     assert result['total']==1
+
+
+def test_catalog_retains_tolerance_accepted_certificate_without_clamping_raw_value(tmp_path):
+    path=tmp_path/'optimizer_one/exports/tolerated'
+    certificate(path,'source',7.,-5.e-7,.04,.06)
+    report_path=path/'report.json'
+    report=json.loads(report_path.read_text())
+    # Negative unannotated certificates remain invalid.
+    assert certified_catalog(tmp_path,source_sha256='source')['total']==0
+    report['clearance_numerical_tolerance_m']=1.e-6
+    report_path.write_text(json.dumps(report))
+    result=certified_catalog(tmp_path,source_sha256='source')
+    assert result['total']==1
+    assert result['best_speed']['clearance_slack_m']==-5.e-7
+    report['clearance_numerical_tolerance_m']=.01
+    report_path.write_text(json.dumps(report))
+    assert certified_catalog(tmp_path,source_sha256='source')['total']==0

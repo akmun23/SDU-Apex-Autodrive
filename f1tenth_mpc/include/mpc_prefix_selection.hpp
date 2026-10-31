@@ -9,7 +9,34 @@ struct PrefixSelection {
     bool choose_candidate{};
     bool clearance_override{};
     bool stale_prior_refresh{};
+    bool near_boundary_override{};
 };
+
+template <typename Control>
+inline bool prefix_control_changes_bounded(
+    const Control *candidate, const Control *prior, int count,
+    double maximum_steering_delta_rad, double maximum_throttle_delta)
+{
+    if (!candidate || !prior || count < 1 ||
+        !std::isfinite(maximum_steering_delta_rad) ||
+        !std::isfinite(maximum_throttle_delta) ||
+        maximum_steering_delta_rad < 0.0 || maximum_throttle_delta < 0.0)
+        return false;
+    for (int i = 0; i < count; ++i) {
+        if (!std::isfinite(candidate[i].steering_target_rad) ||
+            !std::isfinite(prior[i].steering_target_rad) ||
+            !std::isfinite(candidate[i].throttle_command) ||
+            !std::isfinite(prior[i].throttle_command) ||
+            std::abs(candidate[i].steering_target_rad -
+                     prior[i].steering_target_rad) >
+                maximum_steering_delta_rad ||
+            std::abs(candidate[i].throttle_command -
+                     prior[i].throttle_command) >
+                maximum_throttle_delta)
+            return false;
+    }
+    return true;
+}
 
 /* A short exact-valid prefix can still leave the plant rotating away from a
  * strong turn. If the retained prefix has the correct yaw direction, do not
@@ -172,8 +199,10 @@ inline PrefixSelection select_validated_recovery_prefix(
     int consecutive_prior_plan_actions = 0,
     int stale_prior_refresh_after_actions = 0,
     double stale_prior_max_clearance_loss_m = 0.0,
-    double stale_prior_clearance_gain_objective_loss_fraction = 0.0,
-    double stale_prior_minimum_clearance_gain_m = 0.0)
+    double stale_prior_objective_loss_fraction = 0.0,
+    double near_boundary_minimum_clearance_gain_m = 0.0,
+    double near_boundary_max_objective_ratio = 0.0,
+    bool near_boundary_control_changes_bounded = false)
 {
     if (!candidate_valid) return {false, false};
     if (!prior_valid) {
@@ -189,12 +218,6 @@ inline PrefixSelection select_validated_recovery_prefix(
             std::isfinite(candidate_slack_m) && candidate_slack_m >= 0.0;
         return {standalone_prefix_is_well_formed, false};
     }
-    if (candidate_solver_converged) {
-        return select_validated_prefix(candidate_valid, candidate_objective,
-            candidate_slack_m, prior_valid, prior_objective, prior_slack_m,
-            clearance_reserve_m, minimum_clearance_gain_m);
-    }
-
     /* Exact nonlinear validation establishes that both prefixes are safe
      * through the command-effect horizon. If the retained prefix is already
      * below the configured clearance reserve, prefer a materially safer
@@ -209,13 +232,39 @@ inline PrefixSelection select_validated_recovery_prefix(
         candidate_slack_m > prior_slack_m + minimum_clearance_gain_m;
     if (clearance_override) return {true, true};
 
-    /* Do not refresh from an iteration-limited candidate solely because its
-     * 75 ms rollout stays inside the corridor. A captured practice failure
-     * showed such candidates can have a much worse exact objective and
-     * reverse steering abruptly while barely preserving clearance. After
-     * the configured retained-plan chain, refresh only if both prefixes keep
-     * their reserve, clearance loss is bounded, and the candidate objective
-     * is no worse over the same exact-validated horizon. */
+    /* Near a hard wall, a small but real increase in exact-validated reserve
+     * can matter more than the short-horizon objective. Permit this only when
+     * the prior is already below its reserve, the candidate is better by the
+     * configured minimum, the objective penalty is bounded, and the first
+     * validated controls do not introduce a steering/throttle discontinuity.
+     * The hard nonlinear corridor check remains authoritative. */
+    const bool near_boundary_override =
+        std::isfinite(prior_slack_m) && std::isfinite(candidate_slack_m) &&
+        std::isfinite(clearance_reserve_m) &&
+        std::isfinite(near_boundary_minimum_clearance_gain_m) &&
+        std::isfinite(near_boundary_max_objective_ratio) &&
+        prior_slack_m < clearance_reserve_m &&
+        near_boundary_minimum_clearance_gain_m > 0.0 &&
+        near_boundary_max_objective_ratio >= 1.0 &&
+        near_boundary_control_changes_bounded &&
+        candidate_slack_m >= prior_slack_m +
+            near_boundary_minimum_clearance_gain_m &&
+        candidate_objective <= near_boundary_max_objective_ratio *
+            std::max(std::abs(prior_objective), 1.e-9);
+    if (near_boundary_override) return {true, true, false, true};
+
+    if (candidate_solver_converged) {
+        return select_validated_prefix(candidate_valid, candidate_objective,
+            candidate_slack_m, prior_valid, prior_objective, prior_slack_m,
+            clearance_reserve_m, minimum_clearance_gain_m);
+    }
+
+    /* Stale-plan refresh is restricted to iteration-limited candidates. A
+     * converged candidate uses ordinary exact-objective ordering above. For
+     * an iteration-limited solve, refresh only after a retained-plan chain
+     * when both prefixes preserve reserve, clearance loss and objective cost
+     * are bounded, and the first validated controls remain within configured
+     * change limits. */
     const bool stale_chain_ready = stale_prior_refresh_after_actions > 0 &&
         consecutive_prior_plan_actions >= stale_prior_refresh_after_actions &&
         std::isfinite(candidate_slack_m) && std::isfinite(prior_slack_m) &&
@@ -225,19 +274,21 @@ inline PrefixSelection select_validated_recovery_prefix(
         prior_slack_m >= clearance_reserve_m;
     const bool stale_prior_refresh = stale_chain_ready &&
         std::isfinite(candidate_objective) && std::isfinite(prior_objective) &&
-        ((candidate_objective <= prior_objective &&
-          candidate_slack_m >= prior_slack_m -
-              stale_prior_max_clearance_loss_m) ||
-         (std::isfinite(stale_prior_minimum_clearance_gain_m) &&
-          std::isfinite(stale_prior_clearance_gain_objective_loss_fraction) &&
-          stale_prior_clearance_gain_objective_loss_fraction >= 0.0 &&
-          stale_prior_minimum_clearance_gain_m >= 0.0 &&
-          candidate_slack_m >= prior_slack_m +
-              stale_prior_minimum_clearance_gain_m &&
-          candidate_objective <= prior_objective +
-              stale_prior_clearance_gain_objective_loss_fraction *
-                  std::max(std::abs(prior_objective), 1.e-9)));
+        std::isfinite(stale_prior_objective_loss_fraction) &&
+        stale_prior_objective_loss_fraction >= 0.0 &&
+        candidate_objective <= prior_objective +
+            stale_prior_objective_loss_fraction *
+                std::max(std::abs(prior_objective), 1.e-9) &&
+        candidate_slack_m >= prior_slack_m -
+            stale_prior_max_clearance_loss_m &&
+        near_boundary_control_changes_bounded;
     if (stale_prior_refresh) return {true, false, true};
+
+    if (candidate_solver_converged) {
+        return select_validated_prefix(candidate_valid, candidate_objective,
+            candidate_slack_m, prior_valid, prior_objective, prior_slack_m,
+            clearance_reserve_m, minimum_clearance_gain_m);
+    }
 
     if (!candidate_residual_quality_acceptable) {
         constexpr double kPoorResidualMinimumObjectiveGain = 0.10;

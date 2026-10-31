@@ -37,6 +37,16 @@ def test_quality_requires_independently_passed_positive_clearance():
         rollout=dict(minimum_1ms_footprint_slack_m=.003)))==pytest.approx(.003)
 
 
+def test_quality_reader_accepts_only_explicitly_declared_numerical_tolerance():
+    report=dict(status='source_witness_passed',clearance_numerical_tolerance_m=1.e-6,
+                rollout=dict(minimum_1ms_footprint_slack_m=-5.e-7))
+    assert quality_of_certificate(report)==-5.e-7
+    report['rollout']['minimum_1ms_footprint_slack_m']=-2.e-6
+    assert quality_of_certificate(report) is None
+    report['clearance_numerical_tolerance_m']=.01
+    assert quality_of_certificate(report) is None
+
+
 def test_equal_time_alternatives_archived_and_restored(tmp_path):
     baseline=tmp_path/'baseline'
     certificate(baseline,slack=.00001)
@@ -69,6 +79,31 @@ def test_equal_time_alternatives_archived_and_restored(tmp_path):
     grid.write_bytes(b'changed map')
     with pytest.raises(ValueError,match='contract'):
         polish_equal_time(**kwargs)
+
+
+@pytest.mark.parametrize('slack,accepted',[(.002,1),(.0005,0)])
+def test_nondefault_margin_and_extra_target_are_independently_checked(tmp_path,slack,accepted):
+    baseline=tmp_path/'baseline'
+    certificate(baseline)
+    grid=tmp_path/'map.pgm'
+    grid.write_bytes(b'mocked grid, no physics claim')
+    calls=[]
+    def solve(**kw):
+        calls.append(kw)
+        return certificate(kw['output'],marker=.03)
+    certifications=[]
+    def certify(repo,seed,map_path,out,margin):
+        certifications.append(margin)
+        return certificate(out,slack=slack,marker=.03)
+    result=polish_equal_time(repo=tmp_path,seed=baseline/'witness.npz',map_path=grid,
+        output=tmp_path/'elite',margin=.12,margin_steps=(.001,),
+        solve=solve,certify=certify)
+    assert calls[0]['margin']==pytest.approx(.121)
+    assert certifications==[.12]
+    assert len(result['accepted'])==accepted
+    if accepted:
+        assert result['accepted'][0]['required_margin_m']==.12
+        assert result['accepted'][0]['requested_margin_m']==pytest.approx(.121)
 
 
 def test_failed_or_rejected_polish_is_never_promoted(tmp_path):

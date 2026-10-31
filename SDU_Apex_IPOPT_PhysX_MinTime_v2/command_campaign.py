@@ -21,7 +21,7 @@ import numpy as np
 
 from command_ocp import (certify_witness, load_command_seed, production_command_map,
                          save_command_checkpoint, save_json_checkpoint, solve_witness,
-                         solve_time_predictor, validate_margin)
+                         solve_time_predictor, validate_margin, reported_clearance_cuts)
 
 
 def unused_directory(path):
@@ -90,6 +90,18 @@ def search_starts(counts, rotations, old_count, include_packet_starts):
                 if include_packet_starts and count==old_count-1 else ('resample',))]
 
 
+def elite_branch_order(candidates):
+    """Roomiest seed first, then distinct geometry, without discarding any seed.
+
+    Archive insertion order reflects which local solve finished first, not its
+    value as a new basin. A tiny smoothing improvement must not monopolize the
+    search before a centimetres-wide geometry/clearance alternative is tried.
+    """
+    return sorted(candidates, key=lambda item: (
+        -float(item.get('clearance_slack_m', 0.)),
+        -float(item.get('geometry_diversity_m', 0.)), item['sha256']))
+
+
 def budget_increase_only(previous, requested):
     """Changing patience/iteration ceilings cannot transfer a physics certificate."""
     keys = ('iterations', 'stagnation_iterations')
@@ -135,9 +147,13 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                  cancel_requested=None, coarse_fraction=0., on_improvement=None,
                  hybrid_time=False, predict=solve_time_predictor,
                  elite_refinements=0, elite_polish=None, elite_first=False,
-                 margin=.05, time_sectors=1, adaptive_regions=0):
+                 margin=.05, time_sectors=1, adaptive_regions=0,
+                 attempt_slice=None):
     repo, seed, map_path, output = [Path(p).resolve() for p in (repo, seed, map_path, output)]
     margin = validate_margin(margin)
+    if attempt_slice is not None and (type(attempt_slice) is not int or attempt_slice < 1):
+        raise ValueError('attempt slice must be a positive integer')
+    completed_this_visit = 0
     if not isinstance(time_sectors,int) or not 1 <= time_sectors <= 32:
         raise ValueError('invalid time predictor sector count')
     if ((target_seconds is not None and
@@ -187,11 +203,16 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
     # nondefault campaign margin must be explicit at every physics gate.
     margin_kwargs = {} if margin == .05 else {'margin': margin}
 
-    def certify_with_margin(*args):
-        return certify(*args, **margin_kwargs)
+    def certify_with_margin(*args, **kwargs):
+        if margin != .05 or 'margin' in kwargs:
+            kwargs['margin'] = max(margin, kwargs.get('margin', margin))
+        return certify(*args, **kwargs)
 
     def solve_with_margin(**kwargs):
-        kwargs.update(margin_kwargs)
+        # Equal-time polishing may deliberately request MORE clearance. Never
+        # overwrite that request with the campaign's smaller baseline margin.
+        if margin != .05 or 'margin' in kwargs:
+            kwargs['margin'] = max(margin, kwargs.get('margin', margin))
         return solve(**kwargs)
 
     def time_prediction(incumbent, old_count):
@@ -233,7 +254,8 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
         save()
         event('time_prediction_finished', status=report['status'],
               predicted_lap_s=report.get('predicted_lap_s'),
-              trial_lap_s=report.get('trial_lap_s'), source_certified=False)
+              trial_lap_s=report.get('trial_lap_s'),
+              reason=report.get('proposal_selection_reason'), source_certified=False)
         return report
 
     def explore_elites(incumbent):
@@ -270,6 +292,7 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                 # feasibility and independent 1 ms footprint certification.
                 control_seeds=((.002,1),(-.002,1),(.004,2),(-.004,2),(.008,1)),
                 adaptive_regions=adaptive_regions,
+                margin=margin,
                 on_candidate=on_improvement,
                 # Explore other local geometry basins at exactly the
                 # incumbent duration, in addition to improving clearance.
@@ -285,18 +308,40 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                 elite_dir/'elite.json')
             state.pop('active_elite_polish',None)
             save()
-            for candidate in archive['accepted']:
+            # Cooperative round-robin: finish each source repair/certification,
+            # then yield after two duration starts. Iteration budgets inside a
+            # useful solve are unchanged; no parallel optimizers are launched.
+            queue = elite_branch_order(archive['accepted'])
+            schedule = state.setdefault('elite_schedule', {})
+            schedule.update(policy='clearance-first-round-robin/v1',
+                            attempts_per_visit=2, queue=[c['sha256'] for c in queue])
+            visits = schedule.setdefault('visits', {})
+            save()
+            while queue:
+                candidate = queue.pop(0)
                 if cancel_requested is not None and cancel_requested():
                     raise KeyboardInterrupt
                 child_dir = output/'elite_campaigns'/candidate['sha256'][:16]
                 state['active_elite'] = dict(
                     seed=candidate['witness'], sha256=candidate['sha256'],
                     lap_s=candidate['lap_s'], clearance_slack_m=candidate['clearance_slack_m'],
+                    required_margin_m=margin,
                     output=str(child_dir))
                 save()
                 event('elite_branch_started', seed=candidate['witness'],
                       lap_s=candidate['lap_s'], output=str(child_dir),
                       clearance_slack_m=candidate['clearance_slack_m'])
+
+                def child_improvement(path, lap_s):
+                    # Persist the actual incumbent immediately, even if this
+                    # child is interrupted or explores for many more hours.
+                    if lap_s < state['best_lap_s']-1.e-9:
+                        state.update(best_lap_s=lap_s, best_witness=str(path))
+                        save()
+                    if on_improvement is not None:
+                        on_improvement(path, lap_s)
+
+                prior_best = state['best_lap_s']
                 child = run_campaign(
                     repo=repo, seed=Path(candidate['witness']),
                     map_path=map_path, output=child_dir,
@@ -310,11 +355,12 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                     solve=solve, certify=certify, digest=digest,
                     cancel_requested=cancel_requested,
                     coarse_fraction=coarse_fraction,
-                    on_improvement=on_improvement,
+                    on_improvement=child_improvement,
                     hybrid_time=hybrid_time, predict=predict,
                     elite_refinements=0, elite_first=False, margin=margin,
-                    time_sectors=time_sectors, adaptive_regions=0)
-                if child['best_lap_s'] < state['best_lap_s']-1.e-9:
+                    time_sectors=time_sectors, adaptive_regions=0,
+                    attempt_slice=2)
+                if child['best_lap_s'] < prior_best-1.e-9:
                     state['best_lap_s'] = child['best_lap_s']
                     state['best_witness'] = child['best_witness']
                     improved = True
@@ -323,6 +369,12 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                           lap_s=state['best_lap_s'],
                           seed=candidate['witness'],
                           witness=state['best_witness'])
+                visits[candidate['sha256']] = visits.get(candidate['sha256'], 0)+1
+                if child['status'] == 'yielded':
+                    queue.append(candidate)
+                schedule['queue'] = [c['sha256'] for c in queue]
+                schedule['last_status'] = child['status']
+                save()
             state.pop('active_elite',None)
             explored.append(exploration_key)
             save()
@@ -470,6 +522,7 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                             early_clearance_target_m=0.,
                             **margin_kwargs)
                         start = destination/'witness.npz'
+                    cuts.update(tuple(c) for c in report.get('source_clearance_cuts', []))
                     if report['status'] != 'source_witness_passed':
                         # A source-correct, single-picometre wall shortfall is
                         # a numerical boundary issue, NOT evidence of a
@@ -505,13 +558,16 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                             event('faster_source_witness', lap_s=state['best_lap_s'],
                                   witness=state['best_witness'], unity_validated=False)
                         break
-                    discovered = {(int(c['interval']), int(c['tick'])) for c in
-                                  report['rollout']['violating_source_ticks']}
+                    discovered = reported_clearance_cuts(report)
                     if (report['max_constraint_violation'] <= 1.e-3 and
                             report['rollout']['full_lap_xy_max_m'] <= .05 and
                             refinement < refinements and discovered-cuts):
                         cuts.update(discovered)
                         refinement += 1
+                        event('source_clearance_constraints_added', key=key,
+                              new_cuts=sorted(discovered),total_cuts=len(cuts),
+                              refinement=refinement,
+                              reason=report.get('termination_reason'))
                         report = None
                         continue
                     # A close dynamic residual can need repair even when
@@ -530,6 +586,13 @@ def run_campaign(*, repo, seed, map_path, output, target_seconds=4.7,
                 state['active'] = None
                 state.get('retry_starts', {}).pop(key, None)
                 save()
+                completed_this_visit += 1
+                if attempt_slice is not None and completed_this_visit >= attempt_slice:
+                    state.update(status='yielded', active=None)
+                    save()
+                    event('branch_yielded', completed_starts=completed_this_visit,
+                          best_lap_s=state['best_lap_s'])
+                    return state
                 if improved: break
                 if hybrid_time and prediction is None:
                     prediction = time_prediction(incumbent, old_count)

@@ -1,6 +1,9 @@
 #include "mpc_qp_fixture_format.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <vector>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -257,6 +260,10 @@ int main(int argc, char **argv) {
     select_seed(argv[2], capture, &config, &state);
     const std::string rho_policy = argc == 4 ? argv[3] : "recorded";
     select_rho_policy(rho_policy, &config);
+    const char *period_text = std::getenv("MPC_QP_BENCH_RHO_PERIOD");
+    const int bench_period = period_text ? std::atoi(period_text) : 0;
+    if (bench_period > 0 && bench_period <= 150)
+      config.adaptive_rho_update_period = bench_period;
     RiccatiSolution_t solution{};
     float primal_u[RICCATI_HORIZON][RICCATI_MAX_NU]{};
     const RiccatiStatus_t status = riccati_admm_solve_with_primal_controls(
@@ -264,6 +271,47 @@ int main(int argc, char **argv) {
         capture.problem.terminal_q, capture.problem.terminal_x_lb,
         capture.problem.terminal_x_ub, capture.problem.x0, &config, &state,
         &solution, primal_u);
+    // Opt-in reproducible solver-kernel microbenchmark for recorded QPs:
+    // reset ADMM warm state for each measurement; do not include fixture
+    // I/O or startup in solve duration. Parity check below still applies to
+    // the original recorded single solve.
+    const char *bench_text = std::getenv("MPC_QP_BENCH_REPEATS");
+    const int bench_repeats = bench_text ? std::max(0, std::min(1000,
+        std::atoi(bench_text))) : 0;
+    std::vector<double> bench_us;
+    bench_us.reserve(bench_repeats);
+    for (int rep = 0; rep < bench_repeats; ++rep) {
+      RiccatiAdmmState_t test_state{};
+      RiccatiAdmmConfig_t test_config = capture.solver_config;
+      select_seed(argv[2], capture, &test_config, &test_state);
+      select_rho_policy(rho_policy, &test_config);
+      if (bench_period > 0 && bench_period <= 150)
+        test_config.adaptive_rho_update_period = bench_period;
+      RiccatiSolution_t test_solution{};
+      float test_u[RICCATI_HORIZON][RICCATI_MAX_NU]{};
+      const auto begin = std::chrono::steady_clock::now();
+      const RiccatiStatus_t test_status =
+          riccati_admm_solve_with_primal_controls(
+              capture.problem.steps, capture.problem.terminal_Q,
+              capture.problem.terminal_q, capture.problem.terminal_x_lb,
+              capture.problem.terminal_x_ub, capture.problem.x0, &test_config,
+              &test_state, &test_solution, test_u);
+      const auto end = std::chrono::steady_clock::now();
+      if (test_status != status || test_solution.iterations != solution.iterations ||
+          max_abs_difference(test_solution, solution) > 1.e-6f)
+        throw std::runtime_error("benchmark solve differed from parity baseline");
+      const auto microseconds =
+          std::chrono::duration<double, std::micro>(end-begin).count();
+      bench_us.push_back(microseconds);
+    }
+    std::sort(bench_us.begin(), bench_us.end());
+    const auto bench_at = [&bench_us](double quantile) -> double {
+      if (bench_us.empty()) return 0.;
+      return bench_us[std::min(bench_us.size()-1, static_cast<std::size_t>(
+          quantile*(bench_us.size()-1)))];
+    };
+    RiccatiDebugInfo_t profile{};
+    riccati_debug_get_last(&profile);
     const Metrics metrics = evaluate(capture.problem, solution,
         primal_u, state);
     const float parity_delta = max_abs_difference(solution,
@@ -297,6 +345,17 @@ int main(int argc, char **argv) {
               << "\"max_primal_vs_projected_input\":"
               << metrics.max_primal_projected_u_delta << ','
               << "\"recorded_result_max_abs_delta\":" << parity_delta << ','
+              << "\"factorization_count\":" << profile.quadratic_factorization_count << ','
+              << "\"factorization_ns\":" << profile.quadratic_factorization_time_ns << ','
+              << "\"rhs_ns\":" << profile.quadratic_rhs_time_ns << ','
+              << "\"projection_ns\":" << profile.projection_residual_time_ns << ','
+              << "\"rho_update_ns\":" << profile.rho_update_time_ns << ','
+              << "\"scaling_ns\":" << profile.scaling_transform_time_ns << ','
+              << "\"output_unscale_ns\":" << profile.output_unscale_time_ns << ','
+              << "\"bench_repeats\":" << bench_repeats << ','
+              << "\"bench_p50_us\":" << bench_at(.50) << ','
+              << "\"bench_p95_us\":" << bench_at(.95) << ','
+              << "\"bench_max_us\":" << bench_at(1.) << ','
               << "\"recorded_result_exact_parity\":"
               << (parity ? "true" : "false") << "}\n";
     return status == RICCATI_STATUS_ERROR ? 1 : 0;

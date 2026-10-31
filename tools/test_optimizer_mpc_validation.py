@@ -10,7 +10,7 @@ from tools.optimizer_mpc_validation import (
     certified_exports, initialize, discover, classification, summary_from_report,
     request_retry, consume_retries, safe_file, start_orientation_conflict,
     analysis_command,
-    yield_optimizer, recover_optimizer,
+    yield_optimizer, recover_optimizer, is_owned_optimizer_unit_name,
 )
 
 
@@ -46,6 +46,25 @@ def test_source_validation_and_first_queue_only_contains_current(tmp_path):
     discover(workspace, state)
     assert state["pending"] == [digest[:16]]
     assert state["policy"]["scored_laps"] == 10
+
+
+def test_retargeted_watcher_imports_history_without_replaying_incumbent(tmp_path):
+    workspace, _, digest = fixture(tmp_path)
+    old_state = tmp_path/"old_workspace/mpc_validation/state.json"
+    old_state.parent.mkdir(parents=True)
+    old_state.write_text(json.dumps(dict(
+        schema="sdu-apex-mpc-validation/v1",
+        seen=[digest[:16]], pending=[digest[:16]],
+        attempts=[dict(id=digest[:16], status="mpc_rejected", attempt=3)],
+        worker=dict(status="idle"),
+        policy=dict(warmup_laps=1, scored_laps=10))))
+    state = initialize(workspace, workspace/"mpc_validation/state.json", old_state)
+    assert state["pending"] == []
+    assert state["seen"] == [digest[:16]]
+    assert state["attempts"][0]["status"] == "mpc_rejected"
+    assert state["history_import"]["imported_attempts"] == 1
+    discover(workspace, state)
+    assert state["pending"] == []
 
 
 @pytest.mark.parametrize("edit", [
@@ -185,6 +204,13 @@ def test_no_optimizer_means_no_freeze_or_thaw(tmp_path, monkeypatch):
     monkeypatch.setattr(validation.subprocess, 'run', lambda *_, **__: pytest.fail('unexpected process control'))
     with yield_optimizer(tmp_path):
         pass
+
+
+def test_optimizer_freeze_allows_verified_campaign_service_not_login_scope():
+    assert is_owned_optimizer_unit_name('sdu-iros-multi-budget1200-all-20261029.service')
+    assert is_owned_optimizer_unit_name('sdu-track-optimizer-2a79aeaea99f.service')
+    assert not is_owned_optimizer_unit_name('user@1000.service')
+    assert not is_owned_optimizer_unit_name('session-3.scope')
 
 
 def test_never_steal_an_existing_pause(tmp_path, monkeypatch):

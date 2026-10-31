@@ -102,11 +102,37 @@ def certified_exports(workspace: Path) -> list[dict]:
     return sorted(result, key=lambda item: (item["certified_epoch_s"], item["id"]))
 
 
-def initialize(workspace: Path, state_path: Path) -> dict:
+def initialize(workspace: Path, state_path: Path,
+               history_state_path: Path | None = None) -> dict:
     exports = certified_exports(workspace)
     state = load_json(state_path, None)
     if state:
         return state
+    if history_state_path is not None:
+        history = load_json(history_state_path, None)
+        if history and history.get("schema") == "sdu-apex-mpc-validation/v1":
+            # Retargeting the watcher to the live optimizer must not discard
+            # completed MPC evidence or replay an already-failed incumbent.
+            # Mark every export already present in the new workspace as seen;
+            # only future certified exports are auto-queued.
+            seen = set(str(value) for value in history.get("seen", []))
+            seen.update(item["id"] for item in exports)
+            state = dict(
+                schema="sdu-apex-mpc-validation/v1",
+                created_epoch_s=time.time(),
+                seen=sorted(seen), pending=[],
+                attempts=history.get("attempts", []),
+                worker=dict(status="idle"),
+                policy=history.get("policy", dict(
+                    warmup_laps=1, scored_laps=SCORING_LAPS,
+                    track="iros", stop_on_mpc_rejection=True,
+                    collision_abort=True)),
+                history_import=dict(
+                    source_workspace=str(history_state_path.resolve().parent.parent),
+                    imported_attempts=len(history.get("attempts", [])),
+                    imported_epoch_s=time.time()))
+            atomic_json(state_path, state)
+            return state
     # Avoid an automatic storm of historic runs: queue the latest valid best
     # and watch *future* exports; historic exports are marked seen.
     best = load_json(workspace / "best.json")
@@ -330,6 +356,12 @@ def simulation_busy() -> bool:
                for name in names)
 
 
+def is_owned_optimizer_unit_name(cgroup: str) -> bool:
+    """Allow only the two named optimizer service families, never login scope."""
+    return bool(re.fullmatch(
+        r'sdu-(?:track-optimizer-[a-f0-9]+|iros-[a-z0-9-]+)\.service', cgroup))
+
+
 def optimizer_unit(workspace: Path) -> str | None:
     """Resolve only this workspace's live optimizer; never freeze a login scope."""
     pid = load_json(workspace / 'optimizer.json').get('pid')
@@ -349,7 +381,10 @@ def optimizer_unit(workspace: Path) -> str | None:
         return None
     except (ValueError, IndexError) as exc:
         raise RuntimeError('Cannot verify optimizer process identity') from exc
-    if not re.fullmatch(r'sdu-track-optimizer-[a-f0-9]+\.service', cgroup):
+    # The optimizer can be launched by the validated campaign unit as well as
+    # the per-run unit. Both are safe to freeze only after the PID, script,
+    # workspace output path, and systemd MainPID checks above/below agree.
+    if not is_owned_optimizer_unit_name(cgroup):
         raise RuntimeError('Optimizer must run in its own systemd service before automatic trials')
     result = subprocess.run(['systemctl', '--user', 'show', cgroup, '-p', 'MainPID', '--value'],
                             capture_output=True, text=True, timeout=10, check=True)
@@ -538,7 +573,8 @@ def consume_retries(workspace: Path, state: dict, exports: list[dict]) -> None:
         path.unlink()
 
 
-def loop(workspace: Path, *, once=False, dry_run=False) -> None:
+def loop(workspace: Path, *, once=False, dry_run=False,
+         history_state_path: Path | None = None) -> None:
     workspace = workspace.resolve(strict=True)
     if not (workspace / "optimizer.json").is_file():
         raise ValueError("Missing optimizer.json")
@@ -549,7 +585,7 @@ def loop(workspace: Path, *, once=False, dry_run=False) -> None:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         recover_optimizer(workspace)
         state_path = data_dir / "state.json"
-        state = initialize(workspace, state_path)
+        state = initialize(workspace, state_path, history_state_path)
         # Reacquiring the exclusive worker lock proves no old worker remains.
         # Preserve partial logs but never silently mark an interrupted run OK.
         for old in state["attempts"]:
@@ -627,12 +663,15 @@ def main() -> None:
     group.add_argument("--once", action="store_true")
     group.add_argument("--retry", metavar="WITNESS_HASH")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--history-from", type=Path,
+                        help="import completed validation history when attaching this watcher to a new optimizer workspace")
     args = parser.parse_args()
     if args.retry:
         print("Retry requested:", request_retry(args.workspace.resolve(), args.retry))
     else:
         try:
-            loop(args.workspace, once=not args.watch, dry_run=args.dry_run)
+            loop(args.workspace, once=not args.watch, dry_run=args.dry_run,
+                 history_state_path=args.history_from)
         except KeyboardInterrupt:
             print('Validation supervisor stopped; optimizer released', flush=True)
 

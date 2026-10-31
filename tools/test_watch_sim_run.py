@@ -1,6 +1,21 @@
 import unittest
+from pathlib import Path
 
 from tools.watch_sim_run import lap_target_satisfied, stall_watch_armed
+
+
+class MpcViabilityStatusTest(unittest.TestCase):
+    def test_new_full_horizon_recovery_is_accepted_by_supervisor(self):
+        import json
+        from types import SimpleNamespace
+        from tools.watch_sim_run import SimRunWatcher
+        watcher = SimpleNamespace(mpc_fault_reason=None, mpc_active=False,
+                                  last_progress_time=0.0)
+        message = SimpleNamespace(data=json.dumps(
+            {"status": "accepted_viability_recovery"}))
+        SimRunWatcher._mpc_diagnostics_callback(watcher, message)
+        self.assertIsNone(watcher.mpc_fault_reason)
+        self.assertTrue(watcher.mpc_active)
 
 
 class LapTargetDistanceGuardTest(unittest.TestCase):

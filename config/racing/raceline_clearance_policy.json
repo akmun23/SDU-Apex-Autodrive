@@ -1,0 +1,4 @@
+{
+  "schema": "sdu-apex-raceline-clearance/v1",
+  "numerical_tolerance_m": 0.000001
+}

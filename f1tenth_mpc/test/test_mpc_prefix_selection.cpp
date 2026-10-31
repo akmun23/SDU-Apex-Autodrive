@@ -10,9 +10,12 @@ using f1tenth_mpc::iteration_limited_prefix_meets_residual_quality;
 using f1tenth_mpc::compose_candidate_prefix_warm_start;
 using f1tenth_mpc::copy_retained_plan_warm_start;
 using f1tenth_mpc::candidate_prefix_yaw_direction_conflicts;
+using f1tenth_mpc::prefix_control_changes_bounded;
 
 struct TestControl {
   int id{};
+  double steering_target_rad{};
+  double throttle_command{};
 };
 
 TEST(MpcPrefixSelection, MaterialImprovementSupportsSignedObjectives)
@@ -62,6 +65,29 @@ TEST(MpcPrefixSelection, CandidatePrefixWithoutCertifiedTailIsPrefixOnly)
   EXPECT_EQ(next[0].id, 100);
   EXPECT_EQ(next[1].id, 101);
   EXPECT_EQ(next[2].id, 102);
+}
+
+TEST(MpcPrefixSelection, SingleExactValidatedActionCanSeedNextReplan)
+{
+  const TestControl candidate[] = {{100}};
+  TestControl next[6]{};
+
+  const int count = compose_candidate_prefix_warm_start(
+      candidate, 1, static_cast<const TestControl *>(nullptr), 0, 0, 6, next);
+
+  ASSERT_EQ(count, 1);
+  EXPECT_EQ(next[0].id, 100);
+}
+
+TEST(MpcPrefixSelection, ExactValidatedShortCandidateCanRecoverWithoutPrior)
+{
+  /* A finite one-step source-plant-valid action may be issued after both
+   * longer candidate and retained prefixes fail. The next control tick must
+   * replan; this does not certify the rejected horizon tail. */
+  const auto choice = select_validated_recovery_prefix(
+      true, 4.0, 0.012, false, false,
+      false, 0.0, 0.0, 0.02, 0.05, 0.005);
+  EXPECT_TRUE(choice.choose_candidate);
 }
 
 TEST(MpcPrefixSelection, RetainedSuffixIncludesIssuedActionWithoutPadding)
@@ -221,6 +247,18 @@ TEST(MpcPrefixSelection, ExactValidatedCandidateCanStandAloneWhenPriorIsInvalid)
       false, 0.0, 0.0, 0.02, 0.05, 0.005).choose_candidate);
 }
 
+TEST(MpcPrefixSelection, InvalidCandidateLeavesValidatedPriorEligible)
+{
+  /* A rejected/poor-residual iterate is not a reason to discard a retained
+   * plan. The controller must exact-revalidate that prior prefix separately;
+   * selector=false means keep the prior when prior_valid is true. */
+  const auto choice = select_validated_recovery_prefix(
+      false, NAN, NAN, false, false,
+      true, 100.0, 0.04, 0.02, 0.05, 0.005);
+  EXPECT_FALSE(choice.choose_candidate);
+  EXPECT_FALSE(choice.clearance_override);
+}
+
 TEST(MpcPrefixSelection, StandaloneExactPrefixRequiresFiniteCostAndSlack)
 {
   EXPECT_FALSE(select_validated_recovery_prefix(
@@ -263,6 +301,128 @@ TEST(MpcPrefixSelection, PoorResidualCannotReplacePriorOnSmallClearanceGain)
   EXPECT_FALSE(choice.clearance_override);
 }
 
+TEST(MpcPrefixSelection, NearBoundaryAcceptsSmallExactGainWithSmoothControls)
+{
+  const TestControl candidate[] = {
+      {0, 0.13904, 0.05504}, {1, 0.14406, 0.24890},
+      {2, 0.15997, 0.33613}};
+  const TestControl prior[] = {
+      {3, 0.13904, 0.23879}, {4, 0.14406, 0.25629},
+      {5, 0.16171, 0.24159}};
+  ASSERT_TRUE(prefix_control_changes_bounded(
+      candidate, prior, 3, 0.10, 0.20));
+
+  /* Captured at IROS s=76.534 m in a17: both exact prefixes were valid, but
+   * the prior had only 0.25 mm extra corridor while the candidate had 5.91 mm.
+   * Candidate cost was 1.45x the retained prefix; its steering sequence was
+   * essentially unchanged and it reduced throttle rather than reversing rack.
+   */
+  const auto choice = select_validated_recovery_prefix(
+      true, 19.1675014, 0.00590585172, false, false,
+      true, 13.2032776, 0.000246345997, 0.02, 0.05, 0.02,
+      0, 3, 0.02, 0.30, 0.005, 1.50, true);
+  EXPECT_TRUE(choice.choose_candidate);
+  EXPECT_TRUE(choice.clearance_override);
+  EXPECT_TRUE(choice.near_boundary_override);
+}
+
+TEST(MpcPrefixSelection, ExactSaferPrefixAllowsMeasuredThrottleDifference)
+{
+  /* IROS a63 at s=204.286 m: both 75 ms prefixes passed exact nonlinear
+   * validation. The candidate improved slack by 14.3 mm and objective by
+   * 8.4%, but its throttle differed by 0.2145, just above the old 0.20
+   * selector-only cap. A 0.22 cap admits this measured deceleration while
+   * retaining the exact corridor gate and a bounded command-change check. */
+  const TestControl candidate[] = {
+      {0, 0.185937822, 0.125826895},
+      {1, 0.175750256, 0.143172622},
+      {2, 0.0990049466, 0.207327500}};
+  const TestControl prior[] = {
+      {3, 0.145937830, 0.340312451},
+      {4, 0.0957502648, 0.343172610},
+      {5, 0.139004946, 0.283786476}};
+  EXPECT_FALSE(prefix_control_changes_bounded(
+      candidate, prior, 3, 0.10, 0.20));
+  ASSERT_TRUE(prefix_control_changes_bounded(
+      candidate, prior, 3, 0.10, 0.22));
+
+  const auto choice = select_validated_recovery_prefix(
+      true, 66.9457474, 0.0371378511, false, false,
+      true, 73.1083221, 0.0228424817, 0.02, 0.10, 0.02,
+      0, 3, 0.02, 0.30, 0.002, 1.50, true);
+  EXPECT_TRUE(choice.choose_candidate);
+  EXPECT_TRUE(choice.near_boundary_override);
+}
+
+TEST(MpcPrefixSelection, NearBoundaryOverrideAlsoAppliesToConvergedSolve)
+{
+  /* The a17 capture was a converged SQP/ADMM result. The former early return
+   * for converged candidates bypassed this policy, silently disabling the
+   * configured near-boundary reserve for the normal case. */
+  const auto choice = select_validated_recovery_prefix(
+      true, 19.1675014, 0.00590585172, true, true,
+      true, 13.2032776, 0.000246345997, 0.02, 0.05, 0.02,
+      0, 3, 0.02, 0.30, 0.005, 1.50, true);
+  EXPECT_TRUE(choice.choose_candidate);
+  EXPECT_TRUE(choice.near_boundary_override);
+  EXPECT_FALSE(choice.stale_prior_refresh);
+}
+
+TEST(MpcPrefixSelection, A65SoftReserveEnablesExactValidatedSaferPrefix)
+{
+  /* Captured at IROS progress 209.062 m in a65. Both three-command prefixes
+   * passed exact plant/corridor validation. The candidate reduced exact
+   * rollout cost (94.81 vs 96.73), gained 12.5 mm of corridor slack
+   * (127.9 vs 115.4 mm), and its first controls stayed within configured
+   * bounds. With the selector reserve accidentally set to zero, the
+   * near-boundary override could never activate and the controller retained
+   * the less-safe plan. A 0.15 m soft selector reserve enables this measured
+   * choice; the hard nonlinear corridor gate remains unchanged. */
+  const auto choice = select_validated_recovery_prefix(
+      true, 94.8087387, 0.127883807, false, false,
+      true, 96.726799, 0.115420997, 0.02, 0.15, 0.02,
+      3, 3, 0.02, 0.30, 0.002, 1.50, true);
+  EXPECT_TRUE(choice.choose_candidate);
+  EXPECT_TRUE(choice.near_boundary_override);
+  EXPECT_TRUE(choice.clearance_override);
+}
+
+TEST(MpcPrefixSelection, A69SoftReserveRefreshesDriftingExactPrior)
+{
+  /* At IROS progress 117.876 m in a69, both 75 ms prefixes were exact-valid
+   * and their first three controls stayed within the selector's change box.
+   * The fresh candidate cost 19.496 vs 17.014 for the retained plan, but
+   * improved minimum wall slack from 0.2414 to 0.2499 m. The 0.15 m reserve
+   * did not activate because the retained prefix still had >0.15 m slack;
+   * increasing the validation-only reserve to 0.30 m should prefer this
+   * modestly higher-cost, safer replan before the retained-plan chain grows.
+   * Exact hard-corridor checks remain mandatory for both choices. */
+  const auto choice = select_validated_recovery_prefix(
+      true, 19.4965038, 0.249897897, false, false,
+      true, 17.014307, 0.241380274, 0.02, 0.30, 0.02,
+      4, 3, 0.02, 0.30, 0.002, 1.50, true);
+  EXPECT_TRUE(choice.choose_candidate);
+  EXPECT_TRUE(choice.near_boundary_override);
+  EXPECT_TRUE(choice.clearance_override);
+}
+
+TEST(MpcPrefixSelection, NearBoundaryDoesNotAuthorizeSteeringReversal)
+{
+  const TestControl candidate[] = {
+      {0, -0.524, 0.30}, {1, -0.400, 0.32}, {2, -0.300, 0.35}};
+  const TestControl prior[] = {
+      {3, -0.050, 0.30}, {4, -0.060, 0.31}, {5, -0.070, 0.32}};
+  EXPECT_FALSE(prefix_control_changes_bounded(
+      candidate, prior, 3, 0.10, 0.20));
+
+  const auto choice = select_validated_recovery_prefix(
+      true, 7121.38916, 0.0262431242, false, false,
+      true, 7732.78662, 0.0163606443, 0.02, 0.05, 0.02,
+      0, 3, 0.02, 0.30, 0.005, 1.50, false);
+  EXPECT_FALSE(choice.choose_candidate);
+  EXPECT_FALSE(choice.near_boundary_override);
+}
+
 TEST(MpcPrefixSelection, PoorResidualMayRefreshPlanOnLargeExactCostGain)
 {
   /* Captured on the practice-track refinement-reserve run near 154.6 m:
@@ -297,33 +457,74 @@ TEST(MpcPrefixSelection, StaleRefreshAllowsNonWorseExactObjective)
   const auto choice = select_validated_recovery_prefix(
       true, 950.0, 0.30, false, false,
       true, 1000.0, 0.31, 0.02, 0.05, 0.005,
-      3, 3, 0.02);
+      3, 3, 0.02, 0.30, 0.0, 1.5, true);
   EXPECT_TRUE(choice.choose_candidate);
   EXPECT_FALSE(choice.clearance_override);
   EXPECT_TRUE(choice.stale_prior_refresh);
 }
 
-TEST(MpcPrefixSelection, StaleChainMayRefreshForLargeValidatedClearanceGain)
+TEST(MpcPrefixSelection, StaleChainMayRefreshWithBoundedCostAndClearanceLoss)
 {
-  /* IROS 7.125 s trial a06: after six prior-plan actions, both exact 75 ms
-   * prefixes passed. Candidate cost was 108.75 vs 86.96, but its clearance
-   * was 24.01 cm vs 19.79 cm. Permit this bounded cost trade only after
-   * the stale chain and only while both retain the 5 cm reserve. */
+  /* a10 at 117.27 m: after 8 retained actions, exact prefixes had near-equal
+   * clearance and cost (2.32 vs 2.26). This selector may refresh and break
+   * the chain without needing a large clearance gain. */
   const auto choice = select_validated_recovery_prefix(
-      true, 108.75, 0.2401, false, false,
-      true, 86.96, 0.1979, 0.02, 0.05, 0.02,
-      6, 3, 0.02, 0.30, 0.005);
+      true, 2.32, 0.076, false, false,
+      true, 2.26, 0.076, 0.02, 0.05, 0.02,
+      8, 3, 0.02, 0.30, 0.0, 1.5, true);
   EXPECT_TRUE(choice.choose_candidate);
   EXPECT_FALSE(choice.clearance_override);
   EXPECT_TRUE(choice.stale_prior_refresh);
 }
 
-TEST(MpcPrefixSelection, ClearanceRefreshRejectsLargeObjectiveRegression)
+TEST(MpcPrefixSelection, StaleChainCanTradeClearanceWithinBoundedLoss)
 {
   const auto choice = select_validated_recovery_prefix(
-      true, 180.0, 0.2401, false, false,
-      true, 86.96, 0.1979, 0.02, 0.05, 0.02,
-      6, 3, 0.02, 0.30, 0.005);
+      true, 42.43, 0.321, false, false,
+      true, 33.56, 0.337, 0.02, 0.05, 0.02,
+      17, 3, 0.02, 0.30, 0.0, 1.5, true);
+  EXPECT_TRUE(choice.choose_candidate);
+  EXPECT_TRUE(choice.stale_prior_refresh);
+}
+
+TEST(MpcPrefixSelection, ExactValidatedStaleRefreshUsesOnlyHardCorridorReserve)
+{
+  /* IROS 7.125 s run a50 at 289.751 m: candidate/prior slack was
+   * 6.77/13.63 mm, objective 50.33/41.70, and the retained-plan chain was 15.
+   * Both exact prefixes remained valid under the hard corridor, which already
+   * includes the mandated 5 cm vehicle-to-wall margin. Requiring an additional
+   * 5 cm quality reserve retained the old sequence until it became invalid. */
+  const auto choice = select_validated_recovery_prefix(
+      true, 50.3341484, 0.0067718327, false, false,
+      true, 41.696476, 0.0136312544, 0.02, 0.0, 0.002,
+      15, 3, 0.02, 0.30, 0.002, 1.5, true);
+  EXPECT_TRUE(choice.choose_candidate);
+  EXPECT_TRUE(choice.stale_prior_refresh);
+  EXPECT_FALSE(choice.clearance_override);
+}
+
+TEST(MpcPrefixSelection, IrosNearWallCandidateWithFourteenMillimeterGainWins)
+{
+  /* IROS 2026-10-30, witness 7a9e6afbf50d666f at 161.46 m:
+   * candidate/prior 75 ms slacks were 33.03/19.08 mm, with exact objectives
+   * 44.93/49.24 and six prior-plan actions. Both prefixes passed the hard
+   * nonlinear corridor check, but the 20 mm preference threshold retained
+   * the less-safe plan; it then became invalid on the next cycle. */
+  const auto choice = select_validated_recovery_prefix(
+      true, 44.933342, 0.0330274552, false, false,
+      true, 49.2412224, 0.0190804303, 0.02, 0.05, 0.01,
+      6, 3, 0.02, 0.30);
+  EXPECT_TRUE(choice.choose_candidate);
+  EXPECT_TRUE(choice.clearance_override);
+  EXPECT_FALSE(choice.stale_prior_refresh);
+}
+
+TEST(MpcPrefixSelection, StaleChainRejectsLargeCostIncrease)
+{
+  const auto choice = select_validated_recovery_prefix(
+      true, 4949.40918, 0.334675789, false, false,
+      true, 1048.42334, 0.347337842, 0.02, 0.05, 0.02,
+      8, 3, 0.02, 0.30);
   EXPECT_FALSE(choice.choose_candidate);
   EXPECT_FALSE(choice.stale_prior_refresh);
 }
@@ -331,14 +532,27 @@ TEST(MpcPrefixSelection, ClearanceRefreshRejectsLargeObjectiveRegression)
 TEST(MpcPrefixSelection, StaleChainRefreshesForFiveMillimeterGain)
 {
   /* a08 accumulated 9 prior actions before an exact-valid candidate improved
-   * 75 ms slack by 7.5 mm at a 29.8% exact-cost increase. A stale-chain-only
-   * 5 mm threshold catches it; the normal near-wall override remains 2 cm. */
+   * 75 ms slack by 7.5 mm at a 29.8% exact-cost increase. */
   const auto choice = select_validated_recovery_prefix(
       true, 16.3531685, 0.203892231, false, false,
       true, 12.6028471, 0.196427286, 0.02, 0.05, 0.02,
-      9, 3, 0.02, 0.30, 0.005);
+      9, 3, 0.02, 0.30, 0.0, 1.5, true);
   EXPECT_TRUE(choice.choose_candidate);
   EXPECT_TRUE(choice.stale_prior_refresh);
+}
+
+TEST(MpcPrefixSelection, ConvergedSolveUsesNormalExactObjectiveOrdering)
+{
+  /* A converged candidate is compared by its exact-prefix objective and
+   * corridor rule; the stale-plan allowance is only for iteration-limited
+   * candidates, whose solver result did not converge. */
+  const auto choice = select_validated_recovery_prefix(
+      true, 8.37733459, 0.500848472, true, true,
+      true, 7.99494505, 0.490914971, 0.02, 0.05, 0.02,
+      4, 3, 0.02, 0.30, 0.0, 1.5, true);
+  EXPECT_FALSE(choice.choose_candidate);
+  EXPECT_FALSE(choice.clearance_override);
+  EXPECT_FALSE(choice.stale_prior_refresh);
 }
 
 TEST(MpcPrefixSelection, StalePriorRefreshRequiresChainAndClearance)

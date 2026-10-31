@@ -14,15 +14,17 @@ import numpy as np
 from pathlib import Path
 
 from command_ocp import (save_json_checkpoint, save_command_checkpoint,
-                         witness_quality, quality_key)
+                         witness_quality, quality_key, validate_margin, reported_clearance_cuts)
 from command_campaign import source_count
+from map_track import clearance_passes, declared_clearance_tolerance
 
 
 def quality_of_certificate(report):
     if report.get('status') != 'source_witness_passed':
         return None
     margin = (report.get('rollout') or {}).get('minimum_1ms_footprint_slack_m')
-    if margin is None or not math.isfinite(float(margin)) or float(margin) < 0.:
+    tolerance = declared_clearance_tolerance(report)
+    if margin is None or tolerance is None or not clearance_passes(float(margin),tolerance_m=tolerance):
         return None
     return float(margin)
 
@@ -71,13 +73,15 @@ def polish_equal_time(*, repo, seed, map_path, output, iterations=300, workers=4
                       diversity_threshold_m=.015,
                       max_elites=6, solve=None,
                       certify=None, stagnation_iterations=90,
-                      cancel_requested=None, quality_objectives=(), on_candidate=None):
+                      cancel_requested=None, quality_objectives=(), on_candidate=None,
+                      margin=.05):
     """Search at unchanged duration for higher-clearance certified seeds."""
     if solve is None or certify is None:
         from command_ocp import solve_witness, certify_witness
         solve = solve or solve_witness
         certify = certify or certify_witness
     repo, seed, map_path, output = map(Path, (repo, seed, map_path, output))
+    margin = validate_margin(margin)
     if not margin_steps and not geometry_seeds and not quality_objectives and not control_seeds and not adaptive_regions:
         raise ValueError('at least one elite-search strategy required')
     if any(mode not in ('clearance', 'smooth') for mode in quality_objectives):
@@ -109,6 +113,9 @@ def polish_equal_time(*, repo, seed, map_path, output, iterations=300, workers=4
                     adaptive_regions=adaptive_regions,
                     adaptive_strategy='interleaved-cyclic-regions-v2',
                     diversity_threshold_m=diversity_threshold_m,max_elites=max_elites)
+    # Preserve resumability for existing default-margin archives.
+    if margin != .05:
+        contract['required_margin_m'] = margin
     if path.exists():
         state = json.loads(path.read_text())
         if state['contract'] != contract:
@@ -148,7 +155,7 @@ def polish_equal_time(*, repo, seed, map_path, output, iterations=300, workers=4
             continue
         if len(state['accepted'])>=max_elites:
             break
-        target=.05+value if strategy=='margin' else .05
+        target=margin+value if strategy=='margin' else margin
         objective_mode=value if strategy=='objective' else 'repair'
         directory=output/f'polish_{index:02d}'
         if directory.exists() and not (directory/'report.json').exists():
@@ -277,8 +284,8 @@ def polish_equal_time(*, repo, seed, map_path, output, iterations=300, workers=4
             if report['status']=='source_witness_passed':
                 break
             rollout=report.get('rollout') or {}
-            discovered={(int(c['interval']),int(c['tick'])) for c in
-                        rollout.get('violating_source_ticks', [])}
+            cuts.update(tuple(c) for c in report.get('source_clearance_cuts', []))
+            discovered=reported_clearance_cuts(report)
             if (not discovered-cuts or report.get('max_constraint_violation',1.)>1.e-3
                     or rollout.get('full_lap_xy_max_m',1.)>.05):
                 break
@@ -331,12 +338,12 @@ def polish_equal_time(*, repo, seed, map_path, output, iterations=300, workers=4
                     restore_report_path=restore_directory/'report.json'
                 state['active_attempt']=dict(index=index,strategy='proposal_restoration',
                     output=str(restore_directory),proposal=str(proposal),
-                    trial_lap_s=count*.025,margin=.05,
+                    trial_lap_s=count*.025,margin=margin,
                     source_clearance_cuts=sorted(restore_cuts))
                 save_json_checkpoint(path,state)
                 restore_report=solve(repo=repo,checkpoint=None,mesh=None,audit=None,
                     map_path=map_path,output=restore_directory,count=count,
-                    iterations=iterations,cpu_seconds=1.e20,margin=.05,
+                    iterations=iterations,cpu_seconds=1.e20,margin=margin,
                     command_seed=restore_seed,workers=workers,
                     clearance_cuts=sorted(restore_cuts),
                     stagnation_iterations=stagnation_iterations,
@@ -346,8 +353,8 @@ def polish_equal_time(*, repo, seed, map_path, output, iterations=300, workers=4
                 if restore_report['status']=='source_witness_passed':
                     break
                 rollout=restore_report.get('rollout') or {}
-                discovered={(int(c['interval']),int(c['tick'])) for c in
-                            rollout.get('violating_source_ticks', [])}
+                restore_cuts.update(tuple(c) for c in restore_report.get('source_clearance_cuts', []))
+                discovered=reported_clearance_cuts(restore_report)
                 if (not discovered-restore_cuts or
                         restore_report.get('max_constraint_violation',1.)>1.e-3 or
                         rollout.get('full_lap_xy_max_m',1.)>.05):
@@ -369,12 +376,12 @@ def polish_equal_time(*, repo, seed, map_path, output, iterations=300, workers=4
                 restore_directory=next_directory
                 state['active_attempt']=dict(index=index,strategy='proposal_restoration',
                     output=str(restore_directory),proposal=str(proposal),
-                    trial_lap_s=count*.025,margin=.05,
+                    trial_lap_s=count*.025,margin=margin,
                     source_clearance_cuts=sorted(restore_cuts))
                 save_json_checkpoint(path,state)
                 restore_report=solve(repo=repo,checkpoint=None,mesh=None,audit=None,
                     map_path=map_path,output=restore_directory,count=count,
-                    iterations=iterations,cpu_seconds=1.e20,margin=.05,
+                    iterations=iterations,cpu_seconds=1.e20,margin=margin,
                     command_seed=restore_seed,workers=workers,
                     clearance_cuts=sorted(restore_cuts),
                     stagnation_iterations=stagnation_iterations,
@@ -402,8 +409,14 @@ def polish_equal_time(*, repo, seed, map_path, output, iterations=300, workers=4
                 if certificate_dir.exists():
                     from command_campaign import unused_directory
                     certificate_dir=unused_directory(certificate_dir)
-                checked=certify(repo, directory/'witness.npz',map_path,certificate_dir)
+                checked=certify(repo, directory/'witness.npz',map_path,certificate_dir,
+                                **({'margin': margin} if margin != .05 else {}))
             score=quality_of_certificate(checked)
+            if score is not None and not clearance_passes(score,target-margin,
+                    tolerance_m=declared_clearance_tolerance(checked)):
+                # Certification at the baseline margin must also demonstrate
+                # the extra clearance requested by this particular trial.
+                score=None
             if abs(float(checked.get('trial_lap_s',float('inf')))-count*.025)>1.e-8:
                 score=None
             attempt['independent_status']=checked['status']
@@ -423,7 +436,8 @@ def polish_equal_time(*, repo, seed, map_path, output, iterations=300, workers=4
                         sha256=hashlib.sha256(alternative.read_bytes()).hexdigest(),
                         clearance_slack_m=score, lap_s=count*.025,
                         geometry_diversity_m=diversity,
-                        required_margin_m=target,strategy=strategy,quality=quality)
+                        required_margin_m=margin,requested_margin_m=target,
+                        strategy=strategy,quality=quality)
                     state['accepted'].append(record)
                     if adaptive_spec is not None:
                         attempt['accepted']=True

@@ -6,14 +6,20 @@
 #include "mpc_drive_command.hpp"
 #include "mpc_publication_deadline.hpp"
 #include "mpc_prefix_selection.hpp"
+#include "mpc_fallback_episode.hpp"
+#include "mpc_fallback_seed.hpp"
+#include "mpc_viability_recovery.hpp"
 #include "mpc_state_synchronizer.hpp"
 #include "mpc_trajectory_io.hpp"
+#include "mpc_speed_envelope.hpp"
+#include "mpc_world_footprint.hpp"
 #include "unity_source_plant.hpp"
 #include "vehicle_model.h"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/executors/single_threaded_executor.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
@@ -416,6 +422,77 @@ public:
         prefer_full_validated_prior_plan_on_rejection_ =
             declare_parameter<bool>(
                 "prefer_full_validated_prior_plan_on_rejection", false);
+        // Optional recovery-episode guard. Zero retains existing behavior.
+        // It counts both retained and candidate short prefixes as one episode.
+        // At the limit, a new command needs full 750ms native certification.
+        fallback_retain_validated_seed_enabled_ = declare_parameter<bool>(
+            "fallback_retain_validated_seed_enabled", false);
+        fallback_max_short_prefix_actions_ = std::clamp<int>(
+            declare_parameter<int>("fallback_max_short_prefix_actions", 0),
+            0, 10);
+        rti_config_.enable_feasibility_restoration =
+            declare_parameter<bool>("enable_feasibility_restoration", false);
+        rti_config_.feasibility_restoration_qp_relaxation_m =
+            static_cast<float>(std::clamp(
+                declare_parameter<double>(
+                    "feasibility_restoration_qp_relaxation_m", 0.18),
+                0.0, 0.50));
+        rti_config_.feasibility_restoration_wall_weight =
+            static_cast<float>(std::clamp(
+                declare_parameter<double>(
+                    "feasibility_restoration_wall_weight", 8000.0),
+                1.0, 30000.0));
+        // Optional load-time curvature/braking speed envelope. Zero disables;
+        // this does not override any full-horizon physical collision limits.
+        curvature_speed_envelope_lateral_accel_mps2_ =
+            declare_parameter<double>("curvature_speed_envelope_lateral_accel_mps2", 0.0);
+        curvature_speed_envelope_braking_mps2_ =
+            declare_parameter<double>("curvature_speed_envelope_braking_mps2", 5.0);
+        if (!std::isfinite(curvature_speed_envelope_lateral_accel_mps2_) ||
+            curvature_speed_envelope_lateral_accel_mps2_ < 0.0 ||
+            curvature_speed_envelope_lateral_accel_mps2_ > 40.0 ||
+            !std::isfinite(curvature_speed_envelope_braking_mps2_) ||
+            curvature_speed_envelope_braking_mps2_ <= 0.0 ||
+            curvature_speed_envelope_braking_mps2_ > 30.0)
+            throw std::runtime_error("invalid curvature speed envelope limits");
+        viability_recovery_enabled_ = declare_parameter<bool>(
+            "viability_recovery_enabled", false);
+        // Optional: leave successful, fully source-validated racing decisions
+        // untouched; search full-horizon rescue only after solver rejection.
+        viability_recovery_on_rejection_only_ = declare_parameter<bool>(
+            "viability_recovery_on_rejection_only", false);
+        viability_steady_bridge_enabled_ = declare_parameter<bool>(
+            "viability_steady_bridge_enabled", false);
+        viability_minimal_nearwall_recovery_enabled_ = declare_parameter<bool>(
+            "viability_minimal_nearwall_recovery_enabled", false);
+        // Optional stage-aware exact-source candidate search. It does not
+        // loosen the production collision envelope or issue short prefixes.
+        viability_stage_targeted_recovery_enabled_ = declare_parameter<bool>(
+            "viability_stage_targeted_recovery_enabled", false);
+        viability_early_hazard_recovery_enabled_ = declare_parameter<bool>(
+            "viability_early_hazard_recovery_enabled", false);
+        viability_line_search_wall_warning_enabled_ = declare_parameter<bool>(
+            "viability_line_search_wall_warning_enabled", false);
+        viability_terminal_extension_select_enabled_ = declare_parameter<bool>(
+            "viability_terminal_extension_select_enabled", false);
+        viability_geometric_feasibility_seed_enabled_ = declare_parameter<bool>(
+            "viability_geometric_feasibility_seed_enabled", false);
+        viability_braking_aware_geometric_enabled_ = declare_parameter<bool>(
+            "viability_braking_aware_geometric_enabled", false);
+        viability_geometric_anticipatory_enabled_ = declare_parameter<bool>(
+            "viability_geometric_anticipatory_enabled", false);
+        viability_blended_geometric_recovery_enabled_ = declare_parameter<bool>(
+            "viability_blended_geometric_recovery_enabled", false);
+        // Opt-in: spend the more expensive proactive 750 ms search only if
+        // a previous bounded short action has revealed a convergence episode.
+        // This preserves the normal racing objective on successful cycles.
+        viability_proactive_after_fallback_only_ = declare_parameter<bool>(
+            "viability_proactive_after_fallback_only", false);
+        viability_recovery_max_trials_ = std::clamp<int>(
+            declare_parameter<int>("viability_recovery_max_trials", 16), 1, 16);
+        viability_lookahead_reserve_m_ = std::clamp(
+            declare_parameter<double>("viability_lookahead_reserve_m", 0.02),
+            0.01, 0.15);
         quality_aware_prefix_selection_on_rejection_ =
             declare_parameter<bool>(
                 "quality_aware_prefix_selection_on_rejection", false);
@@ -438,15 +515,38 @@ public:
             declare_parameter<double>(
                 "quality_prefix_stale_prior_max_clearance_loss_m", 0.02),
             0.0, 1.0);
-        quality_prefix_stale_prior_clearance_gain_objective_loss_fraction_ =
-            clamp(declare_parameter<double>(
-                "quality_prefix_stale_prior_clearance_gain_objective_loss_fraction",
-                0.0), 0.0, 2.0);
-        quality_prefix_stale_prior_minimum_clearance_gain_m_ = clamp(
+        quality_prefix_stale_prior_objective_loss_fraction_ = clamp(
             declare_parameter<double>(
-                "quality_prefix_stale_prior_minimum_clearance_gain_m", 0.005),
+                "quality_prefix_stale_prior_objective_loss_fraction", 0.0),
+            0.0, 2.0);
+        quality_prefix_near_boundary_minimum_gain_m_ = clamp(
+            declare_parameter<double>(
+                "quality_prefix_near_boundary_minimum_gain_m", 0.0),
+            0.0, 1.0);
+        quality_prefix_near_boundary_max_objective_ratio_ = clamp(
+            declare_parameter<double>(
+                "quality_prefix_near_boundary_max_objective_ratio", 0.0),
+            0.0, 3.0);
+        quality_prefix_near_boundary_max_steering_delta_rad_ = clamp(
+            declare_parameter<double>(
+                "quality_prefix_near_boundary_max_steering_delta_rad", 0.10),
+            0.0, 1.0);
+        quality_prefix_near_boundary_max_throttle_delta_ = clamp(
+            declare_parameter<double>(
+                "quality_prefix_near_boundary_max_throttle_delta", 0.22),
             0.0, 1.0);
         path_frame_ = declare_parameter<std::string>("path_frame", "map");
+        // Experimental physical map authority. Disabled by default. Unknown
+        // cells and a missing/invalid occupancy map never authorize driving.
+        world_map_authority_enabled_ = declare_parameter<bool>(
+            "world_map_authority_enabled", false);
+        world_map_rejection_only_ = declare_parameter<bool>(
+            "world_map_rejection_only", false);
+        world_map_additional_uncertainty_m_ = std::clamp(
+            declare_parameter<double>(
+                "world_map_additional_uncertainty_m", 0.005), 0.0, 0.10);
+        world_map_topic_ = declare_parameter<std::string>(
+            "world_map_topic", "/map");
         command_frame_ = declare_parameter<std::string>("command_frame", "base_link");
         trajectory_file_ = declare_parameter<std::string>("trajectory_file", "");
         max_speed_mps_ = clamp(declare_parameter<double>("max_speed_mps", 16.0), 0.0, 16.0);
@@ -522,6 +622,14 @@ public:
                 unity_plant_state_topic_, latest_state_qos,
                 std::bind(&MpcControllerNode::unity_plant_state_callback, this,
                           std::placeholders::_1));
+        if (world_map_authority_enabled_) {
+            // Nav2 publishes a transient-local map; only the subscriber
+            // callback builds EDT. Never allocate or recompute it in MPC.
+            world_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+                world_map_topic_,rclcpp::QoS(1).reliable().transient_local(),
+                std::bind(&MpcControllerNode::world_map_callback,this,
+                          std::placeholders::_1));
+        }
         auto declare_weight = [this](const char * name, float fallback) {
             return static_cast<float>(declare_parameter<double>(name, fallback));
         };
@@ -530,6 +638,10 @@ public:
          * steering/yaw objective than saved-state replay and production. */
         rti_config_.model.weight_e_y = declare_weight("weight_e_y", 4000.0f);
         rti_config_.model.weight_e_psi = declare_weight("weight_e_psi", 1500.0f);
+        rti_config_.model.tracking_lateral_tolerance_m =
+            declare_weight("tracking_lateral_tolerance_m", 0.0f);
+        rti_config_.model.tracking_heading_tolerance_rad =
+            declare_weight("tracking_heading_tolerance_rad", 0.0f);
         rti_config_.model.weight_u = declare_weight("weight_u", 35.0f);
         rti_config_.model.weight_u_overspeed = declare_weight(
             "weight_u_overspeed", 20.0f);
@@ -573,6 +685,9 @@ public:
             std::clamp<long>(
                 declare_parameter<int>("max_sqp_iterations", 2),
                 1L, 2L));
+        rti_config_.skip_sqp_refinement_after_first_valid_horizon =
+            declare_parameter<bool>(
+                "skip_sqp_refinement_after_first_valid_horizon", false) ? 1:0;
         rti_config_.model.max_speed_mps = static_cast<float>(max_speed_mps_);
         rti_config_.model.active_speed_ceiling_mps =
             static_cast<float>(max_speed_mps_);
@@ -598,10 +713,19 @@ public:
             MPC_RTI_MAX_JACOBIAN_THREADS));
         const int configured_iterations = declare_parameter<int>(
             "max_solver_iterations", 150);
+        requested_max_solver_iterations_ = configured_iterations;
         // Keep the ROS parameter consistent with the solver's compile-time
         // storage bound. The production node caps the runtime request here.
         rti_config_.solver.max_iterations = static_cast<uint16_t>(
             std::clamp(configured_iterations, 1, MAX_ITERATIONS));
+        if (configured_iterations != rti_config_.solver.max_iterations) {
+            RCLCPP_WARN(get_logger(),
+                "max_solver_iterations requested=%d but runtime cap=%u "
+                "(compiled MAX_ITERATIONS=%d); using the clamped value",
+                configured_iterations,
+                static_cast<unsigned>(rti_config_.solver.max_iterations),
+                MAX_ITERATIONS);
+        }
         const double rti_cycle_budget_ms = declare_parameter<double>(
             "rti_cycle_budget_ms", 20.0);
         if (!std::isfinite(rti_cycle_budget_ms) || rti_cycle_budget_ms < 0.0) {
@@ -690,7 +814,8 @@ public:
             "Jacobian workers=%d, RTI budget=%.1f ms, end-to-end="
             "%.1f ms, max command-start lateness=%.1f ms, "
             "initial publication lead=%.1f ms, "
-            "decision state=%d, plant state=%d, horizon=%d",
+            "decision state=%d, plant state=%d, horizon=%d, "
+            "steering trust=%.3f rad",
             static_cast<unsigned>(rti_config_.solver.max_iterations),
             rti_config_.solver.adaptive_rho ? "on" : "off",
             rti_config_.solver.adaptive_rho_update_period,
@@ -705,14 +830,23 @@ public:
             rti_config_.max_cycle_time_us / 1000.0,
             end_to_end_cycle_budget_ms_, max_command_start_lateness_ms_,
             initial_command_publication_lead_ms,
-            MPC_OPTIMIZER_NX, MPC_OPT_PHYSICAL_NX, PREDICTION_HORIZON);
+            MPC_OPTIMIZER_NX, MPC_OPT_PHYSICAL_NX, PREDICTION_HORIZON,
+            rti_config_.model.sqp_steering_trust_region_rad);
         mpc_rti_memory_reset(&rti_memory_);
+        if (world_map_authority_enabled_) {
+            rti_config_.model.world_sweep_check =
+                &MpcControllerNode::world_map_sweep_check;
+            rti_config_.model.world_sweep_context=this;
+            rti_config_.model.world_map_rejection_only=
+                world_map_rejection_only_?1:0;
+        }
         trajectory_loaded_ = load_trajectory(trajectory_file_);
         if (!trajectory_loaded_) {
             RCLCPP_ERROR(get_logger(),
                 "MPC has no valid trajectory; controller remains inhibited");
         }
         certified_plan_ = {};
+        fallback_episode_.reset();
         clear_validated_recovery_prefix();
         if (!enabled_) {
             RCLCPP_WARN(get_logger(),
@@ -758,6 +892,21 @@ private:
 
         try {
             trajectory_ = read_mpc_trajectory(input, &track_length_m_);
+            if (curvature_speed_envelope_lateral_accel_mps2_ > 0.0) {
+                const auto summary = apply_curvature_speed_envelope(
+                    trajectory_, track_length_m_,
+                    curvature_speed_envelope_lateral_accel_mps2_,
+                    curvature_speed_envelope_braking_mps2_);
+                RCLCPP_INFO(get_logger(),
+                    "Curvature speed envelope ay=%.2f m/s2 brake=%.2f m/s2: "
+                    "reduced %zu/%zu knots; range [%.2f, %.2f] m/s; "
+                    "source witness invalidated=%s",
+                    curvature_speed_envelope_lateral_accel_mps2_,
+                    curvature_speed_envelope_braking_mps2_,
+                    summary.reduced_points, trajectory_.size(),
+                    summary.minimum_speed_mps, summary.maximum_speed_mps,
+                    summary.witness_invalidated ? "true" : "false");
+            }
         } catch (const std::exception &error) {
             RCLCPP_ERROR(get_logger(), "Invalid MPC trajectory '%s': %s",
                          path.c_str(), error.what());
@@ -913,6 +1062,14 @@ private:
         bool validate_full_remaining_suffix = false)
     {
         if (fault_reason) *fault_reason = nullptr;
+        if (fallback_episode_.requires_full_horizon(
+                fallback_max_short_prefix_actions_) &&
+            !validate_full_remaining_suffix) {
+            if (fault_reason) *fault_reason =
+                "retained short prefix exhausted; require full-horizon "
+                "reacquisition or newly solved MPC plan";
+            return false;
+        }
         prior_plan_revalidation_attempted_ = true;
         if (validate_full_remaining_suffix) {
             full_prior_suffix_revalidation_attempted_ = true;
@@ -940,6 +1097,13 @@ private:
             if (fault_reason)
                 *fault_reason = "accepted MPC plan has insufficient actions "
                     "to validate through the delayed command effect";
+            return false;
+        }
+        if (fallback_episode_.requires_full_horizon(
+                fallback_max_short_prefix_actions_) &&
+            remaining_controls < PREDICTION_HORIZON) {
+            if (fault_reason) *fault_reason =
+                "expired retained plan cannot supply a full 750ms certificate";
             return false;
         }
         const int validation_horizon = validate_full_remaining_suffix
@@ -1167,6 +1331,882 @@ private:
         return true;
     }
 
+    // Deterministic feasibility restoration: preserve the optimized reference,
+    // but search a small set of transient steering/throttle repairs whenever
+    // the current full-horizon nominal is infeasible or predicts excessive
+    // terminal yaw/slip. Never certify merely the next 75 ms: every published
+    // repair gets the exact source-model and footprint corridor check for all
+    // 30 prediction stages. No track identity or collision-margin override.
+    // A bounded fallback episode needs a NEW, long-horizon safety certificate,
+    // not another 75ms replay of an aging plan. First try the cold native
+    // source-witness command sequence from the currently measured vehicle and
+    // its *real* actuator queues. If it passes the full 750ms source-plant and
+    // corridor/terminal checks, publish it as a certified reacquisition plan.
+    // This search does not override the ordinary fast racing command, does
+    // not reduce speed caps, and is attempted only after repeated failures.
+    bool try_publish_source_reacquisition(
+        const MpcRtiState_t &state, double progress,
+        int64_t callback_steady_ns, int64_t control_stamp_ns,
+        MpcRtiCycleResult_t *result)
+    {
+        if (!result || fallback_max_short_prefix_actions_ == 0 ||
+            !fallback_episode_.requires_full_horizon(
+                fallback_max_short_prefix_actions_)) return false;
+        const int64_t budget_ns = callback_steady_ns +
+            static_cast<int64_t>(end_to_end_cycle_budget_ms_ * 1.e6);
+        if (steady_time_ns() >= budget_ns - 3'000'000) return false;
+        MpcRtiNominal_t seed{};
+        MpcRtiReference_t refs[PREDICTION_HORIZON+1]{};
+        if (!mpc_rti_build_nominal(&state, progress, nullptr,
+                trajectory_.data(), trajectory_.size(), track_length_m_,
+                TIME_STEP_SECONDS, PREDICTION_HORIZON, &rti_config_.model,
+                &seed, refs)) return false;
+        // Native witness commands alone may be unsuitable when the vehicle
+        // has accumulated lateral/yaw deviation. Search causal steering and
+        // torque perturbations decaying back to the witness over 300-500ms;
+        // every option is source-plant checked for all 30 stages. Use the
+        // exact physical terminal state and keep the least-disruptive viable
+        // candidate, not the fastest local short prefix.
+        MpcRtiNominal_t validated{};
+        double best_risk = INFINITY;
+        bool found = false;
+        const float ey_direction = state.plant.e_y >= 0.0f ? -1.0f : 1.0f;
+        const float steering_offsets[] = {0.f, ey_direction*0.08f,
+            ey_direction*0.16f, ey_direction*0.24f,
+            -ey_direction*0.08f, -ey_direction*0.16f};
+        const float throttle_offsets[] = {0.f, -0.12f, -0.24f};
+        int trial_count = 0;
+        // Reacquisition is triggered by an episode of short certified actions.
+        // First locate the SOURCE witness's exact future wall violation from
+        // the current physical state and queued actuators. The old search
+        // changed only the beginning of the command sequence; a wall failure
+        // at a late stage may require turning earlier in that future section.
+        // Do not change source collision constraints or publish this witness
+        // unless a complete replacement passes exact 30-stage validation.
+        if (viability_stage_targeted_recovery_enabled_) {
+            MpcRtiNominal_t seed_checked{};
+            int source_failure_stage = -1;
+            const MpcRtiRolloutStatus_t seed_status =
+                mpc_rti_validate_candidate_plan(
+                    &state, progress, seed.controls, trajectory_.data(),
+                    trajectory_.size(), track_length_m_, PREDICTION_HORIZON,
+                    TIME_STEP_SECONDS, &rti_config_, &seed_checked,
+                    &source_failure_stage);
+            ++trial_count;
+            if (seed_status == MPC_RTI_ROLLOUT_OK &&
+                f1tenth_mpc::terminal_recovered(
+                    seed_checked.states[PREDICTION_HORIZON].plant)) {
+                validated = seed_checked;
+                best_risk = f1tenth_mpc::viability_score(
+                    seed_checked, seed.speed_reference[PREDICTION_HORIZON]);
+                found = true;
+            } else if (seed_status == MPC_RTI_ROLLOUT_CORRIDOR &&
+                       source_failure_stage >= 8) {
+                const int start = std::max(0, source_failure_stage - 16);
+                const int stop = std::max(start + 2, source_failure_stage - 2);
+                for (const float steering : {0.12f, -0.12f, 0.20f, -0.20f}) {
+                    if (trial_count >= 5 ||
+                        steady_time_ns() >= budget_ns - 15'000'000) break;
+                    MpcModelControl_t controls[PREDICTION_HORIZON]{};
+                    f1tenth_mpc::targeted_viability_controls(
+                        seed.controls, controls, PREDICTION_HORIZON,
+                        start, stop, steering, -0.10f,
+                        static_cast<float>(actuator_steering_limit_rad_));
+                    MpcRtiNominal_t candidate{};
+                    int failed_stage = -1;
+                    ++trial_count;
+                    if (mpc_rti_validate_candidate_plan(
+                            &state, progress, controls,
+                            trajectory_.data(), trajectory_.size(),
+                            track_length_m_, PREDICTION_HORIZON,
+                            TIME_STEP_SECONDS, &rti_config_, &candidate,
+                            &failed_stage) != MPC_RTI_ROLLOUT_OK ||
+                        !f1tenth_mpc::terminal_recovered(
+                            candidate.states[PREDICTION_HORIZON].plant))
+                        continue;
+                    const double risk = f1tenth_mpc::viability_score(
+                        candidate, seed.speed_reference[PREDICTION_HORIZON]);
+                    if (risk < best_risk) {
+                        best_risk = risk;
+                        validated = candidate;
+                        found = true;
+                    }
+                }
+            }
+        }
+        // A longer correction matters when the unsafe physical state lies
+        // near stage 22-30 rather than in the first three command intervals.
+        for (const int taper_steps : {20, 12}) {
+            for (const float steer : steering_offsets) {
+                for (const float torque : throttle_offsets) {
+                    // Do not steal the entire callback from a fresh QP solve.
+                    // Protect the core 30-stage QP solve. Earlier 24-trial
+                    // emergency search left only 5 ADMM iterations and a
+                    // 3.44 primal residual. Never consume the solver reserve
+                    // solely attempting to recreate a reference trajectory.
+                    if (trial_count >= 12 ||
+                        steady_time_ns() >= budget_ns - 15'000'000)
+                        break;
+                    MpcModelControl_t controls[PREDICTION_HORIZON]{};
+                    f1tenth_mpc::taper_viability_controls(seed.controls,
+                        controls, PREDICTION_HORIZON, taper_steps,
+                        steer, torque,
+                        static_cast<float>(actuator_steering_limit_rad_));
+                    ++trial_count;
+                    MpcRtiNominal_t candidate{};
+                    int failed_stage = -1;
+                    if (mpc_rti_validate_candidate_plan(&state, progress,
+                            controls, trajectory_.data(), trajectory_.size(),
+                            track_length_m_, PREDICTION_HORIZON,
+                            TIME_STEP_SECONDS, &rti_config_, &candidate,
+                            &failed_stage) != MPC_RTI_ROLLOUT_OK ||
+                        !f1tenth_mpc::terminal_recovered(
+                            candidate.states[PREDICTION_HORIZON].plant))
+                        continue;
+                    const float target_speed =
+                        seed.speed_reference[PREDICTION_HORIZON];
+                    const double risk = f1tenth_mpc::viability_score(
+                        candidate, target_speed) +
+                        0.10 * std::abs(steer) + 0.10 * std::abs(torque);
+                    if (risk < best_risk) {
+                        best_risk = risk;
+                        validated = candidate;
+                        found = true;
+                    }
+                }
+            }
+        }
+        if (!found) return false;
+        const char *fault_reason=nullptr;
+        if (!cycle_time_is_valid(callback_steady_ns, &fault_reason)) return false;
+        const auto first=validated.controls[0];
+        const int64_t issued_ns=publish_command(
+            first.steering_target_rad,first.throttle_command,
+            callback_steady_ns,&fault_reason);
+        if (!issued_ns) return false;
+        rti_memory_.nominal=validated;
+        mpc_rti_memory_set_warm_start_controls(&rti_memory_,
+            validated.controls,PREDICTION_HORIZON);
+        mpc_rti_memory_reset_solver_state(&rti_memory_);
+        certified_plan_=validated;
+        prior_plan_control_index_=0;
+        consecutive_prior_plan_actions_=0;
+        consecutive_candidate_prefix_actions_=0;
+        clear_validated_recovery_prefix();
+        result->status=MPC_RTI_CYCLE_ACCEPTED_VIABILITY_RECOVERY;
+        result->admm_state_reset_for_recovery=1;
+        result->first_control=first;
+        result->published_steering_command=first.steering_target_rad;
+        result->published_throttle=first.throttle_command;
+        result->minimum_predicted_corridor_slack_m=
+            validated.validation_minimum_corridor_slack_m;
+        result->nonlinear_objective=validated.validation_objective;
+        result->candidate_control_count=PREDICTION_HORIZON;
+        std::copy_n(validated.controls,PREDICTION_HORIZON,
+                    result->candidate_controls);
+        last_command_publication_lead_ns_=issued_ns>=control_stamp_ns
+            ? issued_ns-control_stamp_ns : 0;
+        RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),1000,
+            "MPC fallback episode reacquired a full 750ms source-plant plan "
+            "after %d short prefix actions (slack %.4fm)",
+            fallback_episode_.consecutive_short_actions(),
+            validated.validation_minimum_corridor_slack_m);
+        return true;
+    }
+
+    // Distinguish "safe for today's 750ms horizon" from a trajectory that
+    // can be safely continued once one more controller action becomes due.
+    // The actuator queue embedded in the exact terminal plant state is
+    // retained. Two independent, causal 75ms legal extensions are tested,
+    // without source truth from any future measured state. An unsuccessful
+    // probe is only an early warning, NEVER proof all alternatives are
+    // infeasible or permission to relax the body/corridor boundary.
+    bool source_terminal_extension_safe(const MpcRtiNominal_t &plan) const
+    {
+        if (!plan.valid || plan.horizon!=PREDICTION_HORIZON)
+            return false;
+        MpcTrajectorySample_t sample{};
+        if (!mpc_trajectory_sample(trajectory_.data(),trajectory_.size(),
+                track_length_m_,plan.progress[plan.horizon],&sample))
+            return false;
+        MpcModelControl_t source_command{};
+        source_command.steering_target_rad=static_cast<float>(
+            sample.source_witness_valid ? sample.source_steering_target :
+            vehicle_model_steering_for_curvature(
+                static_cast<float>(sample.curvature)));
+        source_command.throttle_command=static_cast<float>(
+            sample.source_witness_valid ? sample.source_throttle :
+            plan.controls[plan.horizon-1].throttle_command);
+        source_command.steering_target_rad=std::clamp(
+            source_command.steering_target_rad,
+            -rti_config_.model.max_steering_rad,
+             rti_config_.model.max_steering_rad);
+        source_command.throttle_command=std::clamp(
+            source_command.throttle_command,
+            MPC_THROTTLE_MIN_DRIVE,MPC_THROTTLE_MAX);
+        MpcRtiCycleConfiguration_t config=rti_config_;
+        config.objective_schedule=nullptr;
+        for(int option=0;option<2;++option) {
+            const MpcModelControl_t command=option==0
+                ? source_command : plan.controls[plan.horizon-1];
+            MpcModelControl_t controls[kCommandEffectValidationHorizon]{};
+            std::fill_n(controls,kCommandEffectValidationHorizon,command);
+            MpcRtiNominal_t extended{};
+            int failed=-1;
+            if (mpc_rti_validate_candidate_plan(
+                    &plan.states[plan.horizon],plan.progress[plan.horizon],
+                    controls,trajectory_.data(),trajectory_.size(),
+                    track_length_m_,kCommandEffectValidationHorizon,
+                    TIME_STEP_SECONDS,&config,&extended,&failed) ==
+                        MPC_RTI_ROLLOUT_OK &&
+                f1tenth_mpc::terminal_recovered(
+                    extended.states[kCommandEffectValidationHorizon].plant))
+                return true;
+        }
+        return false;
+    }
+
+    bool try_publish_viability_recovery(
+        const MpcRtiState_t &state, double progress,
+        int64_t callback_steady_ns, int64_t control_stamp_ns,
+        MpcRtiCycleResult_t *result)
+    {
+        if (!viability_recovery_enabled_ || !result ||
+            result->nominal_control_count != PREDICTION_HORIZON) return false;
+        const bool solver_accepted =
+            result->status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
+            result->status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE ||
+            result->status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH;
+        if (solver_accepted &&
+            (viability_recovery_on_rejection_only_ ||
+             (viability_proactive_after_fallback_only_ &&
+              fallback_episode_.recent_short_actions() == 0)))
+            return false;
+        if (!solver_accepted &&
+            result->status != MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT &&
+            !(viability_steady_bridge_enabled_ &&
+              result->status == MPC_RTI_CYCLE_REJECTED_SOLVER))
+            return false;
+        constexpr int horizon = PREDICTION_HORIZON;
+        // A rare strongly damped corridor-invalid full step is a useful
+        // predictor of next-cycle full-horizon infeasibility. Require both
+        // a small certified reserve and a physically accepted short step.
+        const bool line_search_wall_warning =
+            viability_line_search_wall_warning_enabled_ &&
+            f1tenth_mpc::line_search_wall_early_warning(
+                result->status,
+                result->line_search_full_step_failure_reason,
+                result->line_search_selected_alpha,
+                result->minimum_predicted_corridor_slack_m,
+                0.25f,0.025f);
+        const bool geometric_anticipatory_warning =
+            viability_geometric_anticipatory_enabled_ &&
+            f1tenth_mpc::line_search_wall_early_warning(
+                result->status,
+                result->line_search_full_step_failure_reason,
+                result->line_search_selected_alpha,
+                result->minimum_predicted_corridor_slack_m,
+                0.25f,0.025f);
+        const bool extension_probe =
+            viability_terminal_extension_select_enabled_ &&
+            solver_accepted && rti_memory_.nominal.valid &&
+            rti_memory_.nominal.horizon==horizon &&
+            std::isfinite(result->minimum_predicted_corridor_slack_m) &&
+            result->minimum_predicted_corridor_slack_m < 0.025f;
+        const bool terminal_extension_warning=extension_probe &&
+            !source_terminal_extension_safe(rti_memory_.nominal);
+        // When a complete 750+75ms continuation is already source-valid,
+        // preserve that high-speed accepted plan rather than overriding it
+        // just to gain a few millimetres of approximate corridor slack.
+        if(extension_probe && !terminal_extension_warning &&
+           !f1tenth_mpc::terminal_instability_predicted(
+                rti_memory_.nominal.states[horizon].plant))
+            return false;
+        // The accepted RTI candidate was ALREADY checked against all 30 exact
+        // source-plant/corridor stages. When it has both terminal stability and
+        // enough wall clearance there is no reason to repeat the expensive
+        // identical nonlinear rollout just to decide that rescue is unnecessary.
+        // On small clearance or terminal instability retain the independent
+        // command-time revalidation and full-horizon rescue logic below.
+        if (solver_accepted && rti_memory_.nominal.valid &&
+            rti_memory_.nominal.horizon == horizon &&
+            std::isfinite(result->minimum_predicted_corridor_slack_m) &&
+            result->minimum_predicted_corridor_slack_m >=
+                viability_lookahead_reserve_m_ &&
+            !f1tenth_mpc::terminal_instability_predicted(
+                rti_memory_.nominal.states[horizon].plant) &&
+            !line_search_wall_warning && !terminal_extension_warning &&
+            !geometric_anticipatory_warning)
+            return false;
+        // Leave time for the publication gate, actuator history and diagnostics.
+        const int64_t deadline_ns = callback_steady_ns +
+            static_cast<int64_t>(end_to_end_cycle_budget_ms_ * 1.0e6);
+        constexpr int64_t kPublicationReserveNs = 2'500'000;
+        if (steady_time_ns() >= deadline_ns - kPublicationReserveNs)
+            return false;
+
+        MpcRtiCycleConfiguration_t trial_configuration = rti_config_;
+        if (result->comparison_objective.valid)
+            trial_configuration.objective_schedule = &result->comparison_objective;
+        MpcModelControl_t original[horizon]{};
+        if (solver_accepted && rti_memory_.nominal.valid &&
+            rti_memory_.nominal.horizon == horizon) {
+            std::copy_n(rti_memory_.nominal.controls, horizon, original);
+        } else {
+            std::copy_n(result->nominal_controls, horizon, original);
+        }
+        // Accepted SQP passes have already performed the exact full 750 ms
+        // physical rollout. Reuse that certified plan and its minimum slack.
+        // A rejected solve still requires an independent source validation.
+        MpcRtiNominal_t original_plan;
+        const MpcRtiNominal_t *const accepted_plan =
+            solver_accepted && rti_memory_.nominal.valid &&
+            rti_memory_.nominal.horizon == horizon &&
+            std::isfinite(rti_memory_.nominal.validation_minimum_corridor_slack_m)
+                ? &rti_memory_.nominal : nullptr;
+        int stage = -1;
+        const bool base_valid = accepted_plan != nullptr ||
+            mpc_rti_validate_candidate_plan(
+                &state, progress, original, trajectory_.data(),
+                trajectory_.size(), track_length_m_, horizon,
+                TIME_STEP_SECONDS, &trial_configuration,
+                &original_plan, &stage) == MPC_RTI_ROLLOUT_OK;
+        const MpcRtiNominal_t &base_plan = accepted_plan
+            ? *accepted_plan : original_plan;
+        // A nominal can have stable terminal dynamics but skim the wall so
+        // closely that normal sensor/model uncertainty destroys feasibility at
+        // the NEXT control tick. Monitor the *whole* 750 ms rollout's minimum
+        // slack and search for a higher-reserve successor before this happens.
+        // The nominal is a speed target, not a safe terminal state: increase
+        // body-wall reserve while the full source-plant horizon is still viable.
+        const float lookahead_reserve_m =
+            static_cast<float>(viability_lookahead_reserve_m_);
+        constexpr float kUsefulClearanceGainM = 0.005f;
+        const bool nominal_instability = !base_valid ||
+            f1tenth_mpc::terminal_instability_predicted(
+                base_plan.states[horizon].plant);
+        const bool near_boundary = base_valid &&
+            (base_plan.validation_minimum_corridor_slack_m <
+                lookahead_reserve_m || line_search_wall_warning ||
+                terminal_extension_warning ||
+                geometric_anticipatory_warning);
+        if (!nominal_instability && !near_boundary) return false;
+
+        MpcTrajectorySample_t target{};
+        const float speed_reference = mpc_trajectory_sample(
+                trajectory_.data(), trajectory_.size(), track_length_m_,
+                base_valid ? base_plan.progress[horizon] : progress,
+                &target)
+            ? static_cast<float>(std::min(target.speed, static_cast<double>(
+                rti_config_.model.active_speed_ceiling_mps)))
+            : state.plant.u;
+        // On accepted SQP passes original_plan was not rolled out: the
+        // exact-validated accepted_plan is base_plan. Never score an
+        // uninitialized candidate when deciding whether recovery is better.
+        const double baseline_risk = base_valid
+            ? f1tenth_mpc::viability_score(base_plan, speed_reference)
+            : INFINITY;
+        double selected_risk = INFINITY;
+        float selected_clearance_m = -INFINITY;
+        MpcRtiNominal_t selected{};
+        int tested = 0;
+        // Leave accepted racing dynamics alone unless the 750ms physical
+        // envelope is about to become unsafe. Experimental mild early-warning
+        // recovery uses small steering-only changes; it does not add artificial
+        // speed clipping or a blanket stronger tracking cost. The historical
+        // recovery search remains exactly unchanged by default.
+        const bool mild_near_wall =
+            viability_minimal_nearwall_recovery_enabled_ &&
+            near_boundary && !nominal_instability;
+        constexpr float steer_offsets[] = {0.12f, -0.12f, 0.18f, -0.18f};
+        constexpr float mild_offsets[] = {
+            0.04f, -0.04f, 0.08f, -0.08f, 0.12f, -0.12f};
+        constexpr int taper_durations[] = {12, 16};
+        constexpr float torque_offsets[] = {-0.08f, 0.0f};
+        bool selected_blended_rescue=false;
+        bool selected_geometric_rescue=false;
+        // When a rejected SQP step has no exact-valid 750ms continuation,
+        // try a small geometric-feasibility seed bank. This recovers the
+        // solver's search outside a locally invalid command sequence without
+        // changing normal accepted racing solutions. No precomputed map
+        // control or source future truth is used: only path curvature, the
+        // current physical speed, and the two-slot actuator queue in the
+        // exact source-plant validator.
+        if (!selected_blended_rescue &&
+            ((viability_geometric_feasibility_seed_enabled_ &&
+             !solver_accepted && !base_valid &&
+             result->status==MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT) ||
+            (viability_geometric_anticipatory_enabled_ &&
+             geometric_anticipatory_warning && base_valid))) {
+            float feedforward[2][10]{};
+            bool sampled=true;
+            const double u=std::clamp(
+                static_cast<double>(state.plant.u),0.0,
+                static_cast<double>(rti_config_.model.active_speed_ceiling_mps));
+            // The native reference is indexed by travelled distance, not
+            // elapsed time. With 6-10% drive torque the source vehicle
+            // rapidly slows; extrapolating its current speed for the entire
+            // 750ms creates an early steering reversal and a terminal
+            // heading error >.6rad in the IROS hairpin. Trial both the
+            // original fast progress and a conservative expected progression.
+            const int feed_count=
+                viability_braking_aware_geometric_enabled_ ? 2 : 1;
+            for(int feed=0;feed<feed_count && sampled;++feed) {
+                const double progress_fraction=feed==0 ? 1.0 : .55;
+                for(int knot=0;knot<10;++knot) {
+                    MpcTrajectorySample_t sample{};
+                    const double predicted_progress=progress+
+                        progress_fraction*u*TIME_STEP_SECONDS*
+                        (PREDICTION_HORIZON-1)*double(knot)/9.0;
+                    if (!mpc_trajectory_sample(
+                            trajectory_.data(),trajectory_.size(),
+                            track_length_m_,predicted_progress,&sample)) {
+                        sampled=false;break;
+                    }
+                    feedforward[feed][knot]=vehicle_model_steering_for_curvature(
+                        static_cast<float>(sample.curvature));
+                    if(!std::isfinite(feedforward[feed][knot])) {
+                        sampled=false;break;
+                    }
+                }
+            }
+            if(sampled) {
+                struct GeometricArm {float gain,drive;int feed;};
+                constexpr GeometricArm normal[]={
+                    {1.20f,.12f,0},{1.20f,.06f,0},
+                    {1.00f,.06f,0},{1.45f,.12f,0}};
+                // Empirically viable from the saved 7.075s first-hairpin
+                // source state. The pure source trajectory speed remains the
+                // normal fast target; this set is searched ONLY on rejection.
+                constexpr GeometricArm braking[]={
+                    {1.00f,.08f,1},{1.20f,.08f,1},
+                    {1.00f,.06f,1},{1.20f,.06f,1},
+                    {1.20f,.12f,0},{1.20f,.06f,0},
+                    {1.45f,.12f,0}};
+                const GeometricArm *const arms=
+                    viability_braking_aware_geometric_enabled_ ?
+                    braking : normal;
+                const int arm_count=viability_braking_aware_geometric_enabled_
+                    ? int(sizeof(braking)/sizeof(braking[0]))
+                    : int(sizeof(normal)/sizeof(normal[0]));
+                for(int option=0;option<arm_count;++option) {
+                    if(tested>=viability_recovery_max_trials_ ||
+                       steady_time_ns()>=deadline_ns-
+                           (geometric_anticipatory_warning ?
+                            5'000'000 : kPublicationReserveNs))
+                        break;
+                    MpcModelControl_t candidate[horizon]{};
+                    const auto &arm=arms[option];
+                    if(!f1tenth_mpc::geometric_feasibility_controls(
+                           feedforward[arm.feed],arm.gain,arm.drive,
+                           static_cast<float>(actuator_steering_limit_rad_),
+                           candidate))
+                        break;
+                    MpcRtiNominal_t validated{};
+                    int failure=-1;
+                    ++tested;
+                    if(mpc_rti_validate_candidate_plan(
+                          &state,progress,candidate,trajectory_.data(),
+                          trajectory_.size(),track_length_m_,horizon,
+                          TIME_STEP_SECONDS,&trial_configuration,
+                          &validated,&failure)!=MPC_RTI_ROLLOUT_OK ||
+                        !f1tenth_mpc::terminal_recovered(
+                            validated.states[horizon].plant))
+                        continue;
+                    const double risk=f1tenth_mpc::viability_score(
+                        validated,speed_reference);
+                    if(geometric_anticipatory_warning &&
+                       (validated.validation_minimum_corridor_slack_m <
+                            std::max(.025f,base_plan.validation_minimum_corridor_slack_m+
+                                .010f) ||
+                        validated.states[horizon].plant.u <
+                            base_plan.states[horizon].plant.u-4.f))
+                        continue;
+                    if(risk<selected_risk) {
+                        selected_risk=risk;
+                        selected_clearance_m=
+                            validated.validation_minimum_corridor_slack_m;
+                        selected=validated;
+                        selected_geometric_rescue=true;
+                    }
+                    // Emergency rescue is not another optimizer. Stop once
+                    // a source-certified terminal-stable horizon has >20mm
+                    // extra clearance, preserving the publication budget.
+                    if(validated.validation_minimum_corridor_slack_m >=
+                        std::max(.020f,
+                          static_cast<float>(viability_lookahead_reserve_m_)))
+                        break;
+                }
+            }
+        }
+
+        // A rejected SQP may lie only a few control adjustments outside
+        // the nonlinear feasible set. Independent saved-state source-plant
+        // search showed that exact-valid convex blends between the rejected
+        // nominal and a cheap geometric seed retain much more speed than
+        // a pure low-drive geometric rescue. This bank makes no additional
+        // QP solve, uses only present-state/track curvature, and NEVER
+        // relaxes the physical wall, command queue, or actuator limits.
+        if(viability_blended_geometric_recovery_enabled_ &&
+           !solver_accepted &&
+           result->status==MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT &&
+           result->nominal_control_count==horizon) {
+            float feedforward[10]{};
+            bool sampled=true;
+            const double speed=std::clamp(
+                static_cast<double>(state.plant.u),0.0,
+                static_cast<double>(rti_config_.model.active_speed_ceiling_mps));
+            for(int knot=0;knot<10;++knot) {
+                MpcTrajectorySample_t ref{};
+                const double station=progress+
+                    speed*TIME_STEP_SECONDS*(horizon-1)*
+                    double(knot)/9.0;
+                if(!mpc_trajectory_sample(trajectory_.data(),
+                        trajectory_.size(),track_length_m_,station,&ref)) {
+                    sampled=false;break;
+                }
+                feedforward[knot]=vehicle_model_steering_for_curvature(
+                    static_cast<float>(ref.curvature));
+                if(!std::isfinite(feedforward[knot])) {
+                    sampled=false;break;
+                }
+            }
+            if(sampled) {
+                struct BlendArm {
+                    float gain,drive,original_fraction;
+                };
+                constexpr BlendArm arms[]={
+                    {1.20f,.12f,.75f},
+                    {1.20f,.12f,.50f},
+                    {1.20f,.12f,.25f},
+                    {1.20f,.06f,.75f},
+                    {1.20f,.06f,.50f},
+                    {1.20f,.06f,.25f},
+                    {1.00f,.06f,.50f},
+                    {1.45f,.12f,.50f},
+                };
+                double best_objective=selected.valid &&
+                    std::isfinite(selected.validation_objective)
+                    ? selected.validation_objective : INFINITY;
+                const int blend_trial_limit=selected.valid
+                    ? viability_recovery_max_trials_
+                    : std::max(0,viability_recovery_max_trials_-2);
+                for(const auto &arm:arms) {
+                    if(tested>=blend_trial_limit ||
+                       steady_time_ns()>=deadline_ns-kPublicationReserveNs)
+                        break;
+                    MpcModelControl_t geometry[horizon]{};
+                    MpcModelControl_t controls[horizon]{};
+                    if(!f1tenth_mpc::geometric_feasibility_controls(
+                           feedforward,arm.gain,arm.drive,
+                           static_cast<float>(actuator_steering_limit_rad_),
+                           geometry) ||
+                       !f1tenth_mpc::blended_viability_controls(
+                           geometry,original,horizon,arm.original_fraction,
+                           static_cast<float>(actuator_steering_limit_rad_),
+                           controls))
+                        continue;
+                    MpcRtiNominal_t validated{};
+                    int failure=-1;
+                    ++tested;
+                    if(mpc_rti_validate_candidate_plan(
+                           &state,progress,controls,trajectory_.data(),
+                           trajectory_.size(),track_length_m_,horizon,
+                           TIME_STEP_SECONDS,&trial_configuration,
+                           &validated,&failure)!=MPC_RTI_ROLLOUT_OK ||
+                       !f1tenth_mpc::terminal_recovered(
+                           validated.states[horizon].plant) ||
+                       validated.validation_minimum_corridor_slack_m<
+                           (selected.valid ? .010f : .005f) ||
+                       !std::isfinite(validated.validation_objective))
+                        continue;
+                    if(validated.validation_objective<best_objective) {
+                        best_objective=validated.validation_objective;
+                        selected_risk=f1tenth_mpc::viability_score(
+                            validated,speed_reference);
+                        selected_clearance_m=
+                            validated.validation_minimum_corridor_slack_m;
+                        selected=validated;
+                        selected_blended_rescue=true;
+                    }
+                    // Prefer the first physically certified, margin-bearing
+                    // fast alternative over spending the remaining callback
+                    // on tiny objective improvements.
+                    if(validated.validation_minimum_corridor_slack_m>=.015f)
+                        break;
+                }
+            }
+        }
+
+        // If the exact SQP rollout failed far in the horizon, try to repair
+        // the future maneuver rather than moving only today's steering.
+        // Full-horizon physical validation remains mandatory. Budget and
+        // candidate count are shared with the existing tapered search.
+        if (viability_early_hazard_recovery_enabled_ &&
+            !solver_accepted && result->nonlinear_failure_reason ==
+                MPC_RTI_ROLLOUT_CORRIDOR &&
+            result->nonlinear_failure.valid &&
+            result->nonlinear_failure_stage >= 8) {
+            const auto &hazard=result->nonlinear_failure;
+            const float direction=f1tenth_mpc::corridor_corrective_sign(
+                hazard.state.plant.e_y,hazard.lower_bound_m,
+                hazard.upper_bound_m);
+            if(direction!=0.0f) {
+                // First two controls reflect the existing in-flight queue.
+                // Trial controls begin at the fresh command. A correction
+                // that cannot arrest the physically unavoidable queue is
+                // rejected by the same full 750ms exact source rollout.
+                for(const float magnitude : {0.12f,0.22f,0.32f,0.42f}) {
+                    if (tested >= viability_recovery_max_trials_ ||
+                        steady_time_ns() >= deadline_ns-kPublicationReserveNs)
+                        break;
+                    MpcModelControl_t candidate[horizon]{};
+                    f1tenth_mpc::early_hazard_viability_controls(
+                        original,candidate,horizon,
+                        result->nonlinear_failure_stage,
+                        direction*magnitude,-0.12f,
+                        static_cast<float>(actuator_steering_limit_rad_));
+                    MpcRtiNominal_t validated{};
+                    int failure=-1;
+                    ++tested;
+                    if(mpc_rti_validate_candidate_plan(
+                           &state,progress,candidate,trajectory_.data(),
+                           trajectory_.size(),track_length_m_,horizon,
+                           TIME_STEP_SECONDS,&trial_configuration,
+                           &validated,&failure)!=MPC_RTI_ROLLOUT_OK ||
+                       !f1tenth_mpc::terminal_recovered(
+                           validated.states[horizon].plant)) continue;
+                    const double risk=f1tenth_mpc::viability_score(
+                        validated,speed_reference);
+                    if(risk<selected_risk) {
+                        selected_risk=risk;
+                        selected=validated;
+                    }
+                }
+            }
+        }
+        if (viability_stage_targeted_recovery_enabled_ &&
+            !selected_blended_rescue && !selected_geometric_rescue &&
+            !solver_accepted && result->nonlinear_failure_reason ==
+                MPC_RTI_ROLLOUT_CORRIDOR &&
+            result->nonlinear_failure_stage >= 8) {
+            const int failed_stage = std::clamp(
+                result->nonlinear_failure_stage, 8, horizon - 1);
+            const float directions[] = {0.12f, -0.12f, 0.20f, -0.20f};
+            for (const float correction : directions) {
+                if (tested >= viability_recovery_max_trials_ ||
+                    steady_time_ns() >= deadline_ns - kPublicationReserveNs)
+                    break;
+                MpcModelControl_t candidate[horizon]{};
+                f1tenth_mpc::targeted_viability_controls(
+                    original, candidate, horizon,
+                    std::max(0, failed_stage - 16), failed_stage - 2,
+                    correction, -0.10f,
+                    static_cast<float>(actuator_steering_limit_rad_));
+                MpcRtiNominal_t validated{};
+                int failure = -1;
+                ++tested;
+                if (mpc_rti_validate_candidate_plan(
+                        &state, progress, candidate, trajectory_.data(),
+                        trajectory_.size(), track_length_m_, horizon,
+                        TIME_STEP_SECONDS, &trial_configuration,
+                        &validated, &failure) != MPC_RTI_ROLLOUT_OK ||
+                    !f1tenth_mpc::terminal_recovered(
+                        validated.states[horizon].plant))
+                    continue;
+                const double risk = f1tenth_mpc::viability_score(
+                    validated, speed_reference);
+                if (risk < selected_risk) {
+                    selected_risk = risk;
+                    selected = validated;
+                }
+            }
+        }
+
+        const int steer_count = mild_near_wall ? 6 : 4;
+        const int torque_count = mild_near_wall ? 1 : 2;
+        for (const int steps : taper_durations) {
+            // A source-validated proactive candidate already increased the
+            // physical reserve and passed terminal checks. There is no reason
+            // to spend another bounded solver interval replacing it with a
+            // less predictable local steering taper.
+            if(selected_blended_rescue || selected_geometric_rescue ||
+               (geometric_anticipatory_warning && selected.valid)) break;
+            for (int angle_index = 0; angle_index < steer_count; ++angle_index) {
+                const float correction = mild_near_wall
+                    ? mild_offsets[angle_index] : steer_offsets[angle_index];
+                for (int torque_index = 0; torque_index < torque_count;
+                     ++torque_index) {
+                    const float torque = mild_near_wall
+                        ? 0.0f : torque_offsets[torque_index];
+                    if (tested >= viability_recovery_max_trials_ ||
+                        steady_time_ns() >= deadline_ns - kPublicationReserveNs)
+                        break;
+                    MpcModelControl_t candidate[horizon]{};
+                    f1tenth_mpc::taper_viability_controls(
+                        original, candidate, horizon, steps, correction, torque,
+                        static_cast<float>(actuator_steering_limit_rad_));
+                    MpcRtiNominal_t validated{};
+                    int failure = -1;
+                    ++tested;
+                    if (mpc_rti_validate_candidate_plan(
+                            &state, progress, candidate, trajectory_.data(),
+                            trajectory_.size(), track_length_m_, horizon,
+                            TIME_STEP_SECONDS, &trial_configuration,
+                            &validated, &failure) != MPC_RTI_ROLLOUT_OK)
+                        continue;
+                    if (!f1tenth_mpc::terminal_recovered(
+                            validated.states[horizon].plant)) continue;
+                    if (terminal_extension_warning &&
+                        !source_terminal_extension_safe(validated)) continue;
+                    const double risk = f1tenth_mpc::viability_score(
+                        validated, speed_reference);
+                    if (near_boundary && !nominal_instability) {
+                        // For a nominal whose endpoint is already well behaved,
+                        // retain its speed while prioritizing extra body-wall
+                        // reserve. A tiny numerical improvement is not reason
+                        // to override the high-speed racing plan.
+                        const float slack =
+                            validated.validation_minimum_corridor_slack_m;
+                        if (slack < base_plan.validation_minimum_corridor_slack_m +
+                                kUsefulClearanceGainM ||
+                            validated.states[horizon].plant.u <
+                                base_plan.states[horizon].plant.u - 0.5f)
+                            continue;
+                        if (mild_near_wall) {
+                            // A useful physical margin gain is mandatory, but
+                            // among safe alternatives prefer a smaller error
+                            // in terminal motion and a smaller actuator change
+                            // over maximizing clearance at any lap-time cost.
+                            const double balanced_risk = risk +
+                                0.5 * std::abs(candidate[0].steering_target_rad -
+                                                original[0].steering_target_rad);
+                            if (balanced_risk >= selected_risk) continue;
+                            selected_risk = balanced_risk;
+                        } else {
+                            if (slack < selected_clearance_m + 1.e-4f &&
+                                !(fabsf(slack - selected_clearance_m) <= 1.e-4f &&
+                                  risk < selected_risk))
+                                continue;
+                            selected_clearance_m = slack;
+                            selected_risk = risk;
+                        }
+                    } else {
+                        if (risk >= selected_risk) continue;
+                        selected_risk = risk;
+                    }
+                    selected = validated;
+                }
+            }
+        }
+        // Only if the tapered controls failed (or failed the required material
+        // improvement), try a small number of steady actuator bridges. Never
+        // displace a valid tapered racing solution with an unnecessarily
+        // constant/slow bridge. This is map-independent and still requires the
+        // same exact 750ms nonlinear body-corridor validation and deadline.
+        const bool tapered_acceptable = selected.valid &&
+            std::isfinite(selected_risk) &&
+            (!base_valid || !nominal_instability ||
+             selected_risk < 0.75 * baseline_risk);
+        if (nominal_instability && viability_steady_bridge_enabled_ &&
+            !tapered_acceptable) {
+            int steady_tested = 0;
+            MpcTrajectorySample_t local_reference{};
+            const bool have_reference = mpc_trajectory_sample(
+                trajectory_.data(), trajectory_.size(), track_length_m_,
+                progress, &local_reference);
+            const float feedforward = have_reference
+                ? vehicle_model_steering_for_curvature(
+                      static_cast<float>(local_reference.curvature))
+                : original[0].steering_target_rad;
+            const float steering_seeds[] = {
+                state.plant.actual_steering_angle,
+                feedforward,
+                original[0].steering_target_rad};
+            // At narrow high-curvature corners, 6%/10% drive alone can
+            // overshoot the full-horizon body corridor. Search smaller positive
+            // drive torques before consuming the remaining deadline on local
+            // SQP variations. This is dimensionless control, not a map rule.
+            const float throttle_seeds[] = {0.06f, 0.025f, 0.10f, 0.01f};
+            for (const float steering : steering_seeds) {
+                for (const float throttle : throttle_seeds) {
+                    if (steady_tested >= 8 ||
+                        steady_time_ns() >= deadline_ns - kPublicationReserveNs)
+                        break;
+                    MpcModelControl_t candidate[horizon]{};
+                    f1tenth_mpc::steady_viability_controls(
+                        candidate, horizon, steering, throttle,
+                        static_cast<float>(actuator_steering_limit_rad_));
+                    MpcRtiNominal_t validated{};
+                    int failed = -1;
+                    ++steady_tested;
+                    ++tested;
+                    if (mpc_rti_validate_candidate_plan(
+                            &state, progress, candidate, trajectory_.data(),
+                            trajectory_.size(), track_length_m_, horizon,
+                            TIME_STEP_SECONDS, &trial_configuration,
+                            &validated, &failed) != MPC_RTI_ROLLOUT_OK ||
+                        !f1tenth_mpc::terminal_recovered(
+                            validated.states[horizon].plant))
+                        continue;
+                    const double risk = f1tenth_mpc::viability_score(
+                        validated, speed_reference);
+                    if (risk < selected_risk) {
+                        selected_risk = risk;
+                        selected = validated;
+                    }
+                }
+            }
+        }
+        if (!selected.valid || !std::isfinite(selected_risk) ||
+            (base_valid && nominal_instability &&
+             selected_risk >= 0.75 * baseline_risk))
+            return false;
+        const char *fault_reason = nullptr;
+        if (!cycle_time_is_valid(callback_steady_ns, &fault_reason))
+            return false;
+        const MpcModelControl_t first = selected.controls[0];
+        const int64_t issued_ns = publish_command(
+            first.steering_target_rad, first.throttle_command,
+            callback_steady_ns, &fault_reason);
+        if (!issued_ns) return false;
+        // Only commit the newly validated plan AFTER the actual command was
+        // published, so a rejected alternate cannot poison the next solve.
+        rti_memory_.nominal = selected;
+        mpc_rti_memory_set_warm_start_controls(
+            &rti_memory_, selected.controls, selected.horizon);
+        mpc_rti_memory_reset_solver_state(&rti_memory_);
+        certified_plan_ = selected;
+        prior_plan_control_index_ = 0;
+        clear_validated_recovery_prefix();
+        consecutive_prior_plan_actions_ = 0;
+        consecutive_candidate_prefix_actions_ = 0;
+        result->status = MPC_RTI_CYCLE_ACCEPTED_VIABILITY_RECOVERY;
+        result->admm_state_reset_for_recovery = 1;
+        result->first_control = first;
+        result->published_steering_command = first.steering_target_rad;
+        result->published_throttle = first.throttle_command;
+        result->minimum_predicted_corridor_slack_m =
+            selected.validation_minimum_corridor_slack_m;
+        result->nonlinear_objective = selected.validation_objective;
+        result->candidate_control_count = horizon;
+        std::copy_n(selected.controls, horizon, result->candidate_controls);
+        result->diagnostic_output_count = 0;
+        last_command_publication_lead_ns_ =
+            issued_ns >= control_stamp_ns ? issued_ns - control_stamp_ns : 0;
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+            "MPC full-horizon viability repair: trial_count=%d "
+            "trigger=%s terminal_v=%.3f terminal_epsi=%.3f "
+            "slack=%.4f (previous=%.4f)",
+            tested, nominal_instability ? "instability" : "near-wall",
+            selected.states[horizon].plant.v,
+            selected.states[horizon].plant.e_psi,
+            selected.validation_minimum_corridor_slack_m,
+            base_valid ? base_plan.validation_minimum_corridor_slack_m
+                       : NAN);
+        return true;
+    }
+
     bool try_publish_quality_aware_prefix(
         const MpcRtiState_t &state,
         double progress,
@@ -1178,10 +2218,15 @@ private:
     {
         if (attempted) *attempted = false;
         if (fault_reason) *fault_reason = nullptr;
+        if (fallback_episode_.requires_full_horizon(
+                fallback_max_short_prefix_actions_)) {
+            if (fault_reason) *fault_reason =
+                "short prefix episode exceeded limit; full 750ms physical "
+                "solution required (no more stale plan replay)";
+            return false;
+        }
         if (!quality_aware_prefix_selection_on_rejection_ || !result ||
-            result->status != MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT ||
-            result->candidate_control_count <
-                kCommandEffectValidationHorizon) {
+            result->status != MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT) {
             return false;
         }
 
@@ -1190,38 +2235,46 @@ private:
             ? certified_plan_.horizon - prior_start : 0;
         const bool use_validated_recovery_prefix =
             prior_remaining < 1 && has_validated_recovery_prefix();
-        if (prior_remaining < 1 && !use_validated_recovery_prefix)
-            return false;
 
         const bool solver_converged =
             result->admm_status == RICCATI_STATUS_OPTIMAL;
         const bool solver_iteration_limited =
             result->admm_status == RICCATI_STATUS_MAX_ITERATIONS;
-        if (!solver_converged && !solver_iteration_limited) return false;
-
-        const bool residual_quality_acceptable = solver_converged ||
+        const bool candidate_solver_status_usable =
+            solver_converged || solver_iteration_limited;
+        const bool candidate_controls_available =
+            candidate_solver_status_usable &&
+            result->candidate_control_count > 0;
+        if (prior_remaining < 1 && !use_validated_recovery_prefix &&
+            !candidate_controls_available)
+            return false;
+        const bool residual_quality_acceptable = candidate_solver_status_usable &&
+            (solver_converged ||
             iteration_limited_prefix_meets_residual_quality(
                 result->primal_residual, result->dual_residual,
-                rti_config_.solver.tolerance, 2.0);
+                rti_config_.solver.tolerance, 2.0));
         candidate_prefix_residual_quality_ = residual_quality_acceptable;
 
+        /* Candidate convergence and retained-plan safety are independent.
+         * A poor/failed ADMM iterate must not suppress exact revalidation of
+         * an already certified plan: that plan may still provide a safe
+         * command-effect prefix even when its full remaining suffix is no
+         * longer valid from the current measured state. */
         if (attempted) *attempted = true;
         quality_prefix_attempted_ = true;
         candidate_prefix_revalidation_attempted_ = true;
         candidate_prefix_solver_converged_ = solver_converged;
         candidate_prefix_iteration_limited_ = solver_iteration_limited;
-        candidate_prefix_validation_horizon_ =
-            kCommandEffectValidationHorizon;
         prior_plan_revalidation_attempted_ = true;
-        prior_plan_validated_horizon_ =
-            kCommandEffectValidationHorizon;
 
         MpcModelControl_t candidate_controls[
             kCommandEffectValidationHorizon]{};
         MpcModelControl_t prior_controls[
             kCommandEffectValidationHorizon]{};
         for (int i = 0; i < kCommandEffectValidationHorizon; ++i) {
-            candidate_controls[i] = result->candidate_controls[i];
+            if (candidate_solver_status_usable &&
+                i < result->candidate_control_count)
+                candidate_controls[i] = result->candidate_controls[i];
             /* A published actuator command is held until its replacement
              * takes effect. If the retained plan has fewer than three queued
              * actions left, use its last command as a zero-order hold for the
@@ -1235,24 +2288,22 @@ private:
                     validated_recovery_prefix_count_ - 1);
                 prior_controls[i] =
                     validated_recovery_prefix_controls_[prior_index];
-            } else {
+            } else if (prior_remaining > 0) {
                 const int prior_index = std::min(
                     prior_start + i, certified_plan_.horizon - 1);
                 prior_controls[i] = certified_plan_.controls[prior_index];
+            } else {
+                prior_controls[i] = candidate_controls[i];
             }
         }
         quality_candidate_control_count_ = std::min(
             result->candidate_control_count, PREDICTION_HORIZON);
         for (int i = 0; i < quality_candidate_control_count_; ++i)
             quality_candidate_controls_[i] = result->candidate_controls[i];
-        quality_prior_control_count_ = kCommandEffectValidationHorizon;
-        for (int i = 0; i < quality_prior_control_count_; ++i)
-            quality_prior_controls_[i] = prior_controls[i];
-
         const auto controls_in_envelope = [this](
             MpcModelControl_t controls[
-                kCommandEffectValidationHorizon]) {
-            for (int i = 0; i < kCommandEffectValidationHorizon; ++i) {
+                kCommandEffectValidationHorizon], int horizon) {
+            for (int i = 0; i < horizon; ++i) {
                 if (!std::isfinite(controls[i].steering_target_rad) ||
                     !std::isfinite(controls[i].throttle_command) ||
                     controls[i].throttle_command <
@@ -1273,9 +2324,8 @@ private:
             return true;
         };
 
-        const bool candidate_envelope_valid =
-            controls_in_envelope(candidate_controls);
-        const bool prior_envelope_valid = controls_in_envelope(prior_controls);
+        const bool prior_controls_available = prior_remaining > 0 ||
+            use_validated_recovery_prefix;
         MpcRtiNominal_t candidate_revalidated{};
         MpcRtiNominal_t prior_revalidated{};
         MpcRtiDiagnosticStageOutput_t candidate_outputs[
@@ -1291,19 +2341,23 @@ private:
         MpcRtiRolloutStatus_t prior_status =
             MPC_RTI_ROLLOUT_INVALID_INPUT;
 
+        MpcRtiCycleConfiguration_t comparison_configuration = rti_config_;
+        if (result->comparison_objective.valid)
+            comparison_configuration.objective_schedule = &result->comparison_objective;
         auto validate = [&](
             const MpcModelControl_t *controls,
             MpcRtiNominal_t *validated,
             MpcRtiDiagnosticStageOutput_t *outputs,
             int *output_count,
-            int *failure_stage) {
+            int *failure_stage,
+            int horizon) {
             const auto start = std::chrono::steady_clock::now();
             const MpcRtiRolloutStatus_t status =
                 mpc_rti_validate_candidate_plan_with_diagnostics(
                     &state, progress, controls,
                     trajectory_.data(), trajectory_.size(), track_length_m_,
-                    kCommandEffectValidationHorizon, TIME_STEP_SECONDS,
-                    &rti_config_, validated, outputs, output_count,
+                    horizon, TIME_STEP_SECONDS,
+                    &comparison_configuration, validated, outputs, output_count,
                     failure_stage);
             return std::pair<MpcRtiRolloutStatus_t, double>{
                 status, std::chrono::duration<double, std::micro>(
@@ -1311,21 +2365,67 @@ private:
         };
 
         double candidate_validation_us = 0.0;
-        if (candidate_envelope_valid) {
-            const auto validation = validate(
-                candidate_controls, &candidate_revalidated, candidate_outputs,
-                &candidate_output_count, &candidate_failure_stage);
-            candidate_status = validation.first;
-            candidate_validation_us = validation.second;
-        }
         double prior_validation_us = 0.0;
-        if (prior_envelope_valid) {
-            const auto validation = validate(
-                prior_controls, &prior_revalidated, prior_outputs,
-                &prior_output_count, &prior_failure_stage);
-            prior_status = validation.first;
-            prior_validation_us = validation.second;
+        int selected_validation_horizon = 0;
+        /* Prefer the usual 75 ms action prefix. If both the new candidate and
+         * retained sequence fail it, retry at equal 50 ms then 25 ms horizons.
+         * Each published action remains exactly source-plant validated
+         * against the same hard corridor; only an unissued tail is omitted,
+         * and the MPC replans on the next control tick. */
+        for (int horizon = kCommandEffectValidationHorizon;
+             horizon >= 1; --horizon) {
+            candidate_status = MPC_RTI_ROLLOUT_INVALID_INPUT;
+            prior_status = MPC_RTI_ROLLOUT_INVALID_INPUT;
+            if (candidate_controls_available &&
+                result->candidate_control_count >= horizon &&
+                controls_in_envelope(candidate_controls, horizon)) {
+                const auto validation = validate(
+                    candidate_controls, &candidate_revalidated,
+                    candidate_outputs, &candidate_output_count,
+                    &candidate_failure_stage, horizon);
+                candidate_status = validation.first;
+                candidate_validation_us += validation.second;
+            }
+            if (prior_controls_available &&
+                controls_in_envelope(prior_controls, horizon)) {
+                // If both sequences issue the EXACT same physical commands,
+                // the already-computed source model and map validation are
+                // identical. Reuse the result; never run the 25ms vehicle step
+                // twice for the same state/control/trajectory/epoch.
+                bool identical = candidate_status !=
+                    MPC_RTI_ROLLOUT_INVALID_INPUT && candidate_controls_available;
+                for (int i = 0; identical && i < horizon; ++i)
+                    identical =
+                        candidate_controls[i].steering_target_rad ==
+                            prior_controls[i].steering_target_rad &&
+                        candidate_controls[i].throttle_command ==
+                            prior_controls[i].throttle_command;
+                if (identical) {
+                    prior_status = candidate_status;
+                    prior_failure_stage = candidate_failure_stage;
+                    prior_revalidated = candidate_revalidated;
+                    prior_output_count = candidate_output_count;
+                    std::copy_n(candidate_outputs, candidate_output_count,
+                                prior_outputs);
+                } else {
+                    const auto validation = validate(
+                        prior_controls, &prior_revalidated, prior_outputs,
+                        &prior_output_count, &prior_failure_stage, horizon);
+                    prior_status = validation.first;
+                    prior_validation_us += validation.second;
+                }
+            }
+            if (candidate_status == MPC_RTI_ROLLOUT_OK ||
+                prior_status == MPC_RTI_ROLLOUT_OK) {
+                selected_validation_horizon = horizon;
+                break;
+            }
         }
+        candidate_prefix_validation_horizon_ = selected_validation_horizon;
+        prior_plan_validated_horizon_ = selected_validation_horizon;
+        quality_prior_control_count_ = selected_validation_horizon;
+        for (int i = 0; i < quality_prior_control_count_; ++i)
+            quality_prior_controls_[i] = prior_controls[i];
         quality_prefix_validation_us_ =
             candidate_validation_us + prior_validation_us;
         candidate_prefix_validation_us_ = candidate_validation_us;
@@ -1362,6 +2462,14 @@ private:
             return false;
         }
 
+        const int shared_prefix_count = std::min(
+            candidate_revalidated.horizon, prior_revalidated.horizon);
+        quality_prefix_near_boundary_controls_bounded_ =
+            f1tenth_mpc::prefix_control_changes_bounded(
+                candidate_revalidated.controls,
+                prior_revalidated.controls, shared_prefix_count,
+                quality_prefix_near_boundary_max_steering_delta_rad_,
+                quality_prefix_near_boundary_max_throttle_delta_);
         const auto prefix_selection =
             f1tenth_mpc::select_validated_recovery_prefix(
             candidate_prefix_exact_valid_,
@@ -1378,15 +2486,15 @@ private:
             consecutive_prior_plan_actions_,
             quality_prefix_stale_prior_refresh_after_actions_,
             quality_prefix_stale_prior_max_clearance_loss_m_,
-            quality_prefix_stale_prior_clearance_gain_objective_loss_fraction_,
-            quality_prefix_stale_prior_minimum_clearance_gain_m_);
+            quality_prefix_stale_prior_objective_loss_fraction_,
+            quality_prefix_near_boundary_minimum_gain_m_,
+            quality_prefix_near_boundary_max_objective_ratio_,
+            quality_prefix_near_boundary_controls_bounded_);
         bool candidate_yaw_direction_conflict = false;
         if (prefix_selection.choose_candidate &&
             candidate_prefix_exact_valid_ && prior_plan_exact_valid_ &&
-            candidate_revalidated.horizon >=
-                kCommandEffectValidationHorizon &&
-            prior_revalidated.horizon >=
-                kCommandEffectValidationHorizon) {
+            candidate_revalidated.horizon >= 1 &&
+            prior_revalidated.horizon >= 1) {
             const int candidate_terminal = candidate_revalidated.horizon;
             const int prior_terminal = prior_revalidated.horizon;
             MpcTrajectorySample_t terminal_reference{};
@@ -1421,6 +2529,8 @@ private:
         }
         quality_prefix_clearance_override_ =
             prefix_selection.clearance_override;
+        quality_prefix_near_boundary_override_ =
+            prefix_selection.near_boundary_override;
         quality_prefix_stale_prior_refresh_ =
             prefix_selection.stale_prior_refresh;
         quality_prefix_choice_ = choose_candidate ? "candidate" :
@@ -1470,7 +2580,7 @@ private:
                 prior_start,
                 PREDICTION_HORIZON,
                 next_warm_start);
-            if (warm_start_count < kCommandEffectValidationHorizon) {
+            if (warm_start_count < 1) {
                 if (fault_reason)
                     *fault_reason = "validated candidate prefix could not seed "
                         "the next MPC nominal sequence";
@@ -1478,7 +2588,7 @@ private:
             }
             next_warm_start[0] = first;
         } else if (use_validated_recovery_prefix) {
-            warm_start_count = kCommandEffectValidationHorizon;
+            warm_start_count = selected_validation_horizon;
             for (int k = 0; k < warm_start_count; ++k)
                 next_warm_start[k] = prior_controls[k];
             next_warm_start[0] = first;
@@ -1566,6 +2676,13 @@ private:
         const char **fault_reason)
     {
         if (fault_reason) *fault_reason = nullptr;
+        if (fallback_episode_.requires_full_horizon(
+                fallback_max_short_prefix_actions_)) {
+            if (fault_reason) *fault_reason =
+                "candidate short-prefix budget exhausted; must obtain "
+                "complete source-plant feasible plan";
+            return false;
+        }
         if (!result || result->status !=
                 MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT ||
             result->candidate_control_count < 1 ||
@@ -1799,6 +2916,17 @@ private:
                              double solve_us)
     {
         ++control_cycles_;
+        if (fallback_max_short_prefix_actions_ > 0) {
+            if (status == MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN ||
+                status == MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX)
+                fallback_episode_.record_short_action();
+            else if (status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
+                     status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE ||
+                     status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH)
+                fallback_episode_.record_full_action();
+            else if (status == MPC_RTI_CYCLE_ACCEPTED_VIABILITY_RECOVERY)
+                fallback_episode_.reset();
+        }
         if (status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL) ++accepted_optimal_;
         else if (status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE)
             ++accepted_feasible_;
@@ -1808,6 +2936,8 @@ private:
             ++accepted_candidate_prefix_;
         else if (status == MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN)
             ++accepted_prior_plan_;
+        else if (status == MPC_RTI_CYCLE_ACCEPTED_VIABILITY_RECOVERY)
+            ++accepted_viability_recovery_;
         else if (status == MPC_RTI_CYCLE_DEFERRED_DEADLINE)
             ++deadline_miss_cycles_;
         max_solver_iterations_seen_ = std::max(
@@ -1822,7 +2952,8 @@ private:
             "MPC health (%s): control_cycles=%llu accepted_optimal=%llu "
             "accepted_feasible=%llu accepted_line_search=%llu "
             "accepted_candidate_prefix=%llu "
-            "accepted_prior_plan=%llu deadline_miss_cycles=%llu "
+            "accepted_prior_plan=%llu accepted_viability_recovery=%llu "
+            "deadline_miss_cycles=%llu "
             "control_fault_cycles=%llu max_solver_iterations_seen=%d "
             "max_solve_us=%.1f",
             phase,
@@ -1832,6 +2963,7 @@ private:
             static_cast<unsigned long long>(accepted_line_search_),
             static_cast<unsigned long long>(accepted_candidate_prefix_),
             static_cast<unsigned long long>(accepted_prior_plan_),
+            static_cast<unsigned long long>(accepted_viability_recovery_),
             static_cast<unsigned long long>(deadline_miss_cycles_),
             static_cast<unsigned long long>(control_fault_cycles_),
             max_solver_iterations_seen_, max_solve_us_);
@@ -1846,6 +2978,8 @@ private:
         case MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX:
             return "accepted_candidate_prefix";
         case MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN: return "accepted_prior_plan";
+        case MPC_RTI_CYCLE_ACCEPTED_VIABILITY_RECOVERY:
+            return "accepted_viability_recovery";
         case MPC_RTI_CYCLE_DEFERRED_DEADLINE:
             return "deferred_deadline_recovery";
         case MPC_RTI_CYCLE_REJECTED_INPUT: return "rejected_input";
@@ -2221,10 +3355,16 @@ private:
             << quality_prefix_stale_prior_refresh_after_actions_
             << ",\"stale_prior_max_clearance_loss_m\":"
             << quality_prefix_stale_prior_max_clearance_loss_m_
-            << ",\"stale_prior_clearance_gain_objective_loss_fraction\":"
-            << quality_prefix_stale_prior_clearance_gain_objective_loss_fraction_
-            << ",\"stale_prior_minimum_clearance_gain_m\":"
-            << quality_prefix_stale_prior_minimum_clearance_gain_m_
+            << ",\"stale_prior_objective_loss_fraction\":"
+            << quality_prefix_stale_prior_objective_loss_fraction_
+            << ",\"near_boundary_minimum_clearance_gain_m\":"
+            << quality_prefix_near_boundary_minimum_gain_m_
+            << ",\"near_boundary_max_objective_ratio\":"
+            << quality_prefix_near_boundary_max_objective_ratio_
+            << ",\"near_boundary_control_changes_bounded\":"
+            << (quality_prefix_near_boundary_controls_bounded_ ? "true" : "false")
+            << ",\"near_boundary_override\":"
+            << (quality_prefix_near_boundary_override_ ? "true" : "false")
             << ",\"iteration_limited_relative_gain\":"
             << quality_prefix_iteration_limited_relative_gain_
             << ",\"prior_source\":\""
@@ -2318,6 +3458,17 @@ private:
             << consecutive_prior_plan_actions_
             << ",\"prior_plan_actions_remaining\":"
             << prior_plan_actions_remaining_
+            << ",\"feasibility_restoration\":{\"attempted\":"
+            << result.feasibility_restoration_attempted
+            << ",\"accepted\":"
+            << result.feasibility_restoration_accepted
+            << ",\"iterations\":"
+            << result.feasibility_restoration_iterations
+            << ",\"primal_residual\":";
+        json_number(result.feasibility_restoration_primal_residual);
+        json << ",\"elapsed_us\":";
+        json_number(result.feasibility_restoration_us);
+        json << '}'
             << ",\"consecutive_candidate_prefix_actions\":"
             << consecutive_candidate_prefix_actions_
             << ",\"input_failure_reason\":\""
@@ -2475,6 +3626,8 @@ private:
             << ",\"throttle\":"
             << rti_config_.model.sqp_throttle_trust_region << '}';
         json << ",\"solver\":{\"iterations\":" << result.solver_iterations
+            << ",\"max_iterations_requested\":"
+            << requested_max_solver_iterations_
             << ",\"max_iterations_configured\":"
             << rti_config_.solver.max_iterations
             << ",\"time_budget_exhausted\":"
@@ -2603,6 +3756,7 @@ private:
              << ",\"nominal_control_seed_source\":"
              << result.nominal_control_seed_source
              << ",\"admm_us\":" << result.admm_us
+             << ",\"admm_thread_cpu_us\":" << result.admm_thread_cpu_us
              << ",\"exact_rollout_us\":" << result.exact_rollout_us
              << ",\"nonlinear_validation_us\":"
              << result.nonlinear_validation_us
@@ -2820,6 +3974,55 @@ private:
         diagnostic_timing.end_enqueue();
     }
 
+    static int world_map_sweep_check(
+        void *context,double x0,double y0,double yaw0,
+        double x1,double y1,double yaw1,double required_margin_m,
+        float *minimum_slack_m)
+    {
+        if (!context || !minimum_slack_m) return 0;
+        const auto *node=static_cast<const MpcControllerNode*>(context);
+        const auto grid=std::atomic_load(&node->world_grid_);
+        if (!grid) return 0;
+        // Physical source rear-axle body + exact occupancy EDT,
+        // interpolated segment, and explicitly budgeted uncertainty.
+        double slack=-INFINITY;
+        const bool safe=grid->interpolated_sweep_passes(
+            {x0,y0,yaw0},{x1,y1,yaw1},
+            required_margin_m+node->world_map_additional_uncertainty_m_,
+            &slack);
+        *minimum_slack_m=static_cast<float>(slack);
+        return safe?1:0;
+    }
+
+    void world_map_callback(
+        const nav_msgs::msg::OccupancyGrid::SharedPtr message)
+    {
+        if (!message || message->header.frame_id!=path_frame_) {
+            RCLCPP_ERROR_THROTTLE(get_logger(),*get_clock(),5000,
+                "MPC map geometry not certified: occupancy frame mismatch");
+            return;
+        }
+        const auto &pose=message->info.origin;
+        const auto &q=pose.orientation;
+        const double map_yaw=std::atan2(
+            2.0*(q.w*q.z+q.x*q.y),1.0-2.0*(q.y*q.y+q.z*q.z));
+        const auto grid=MpcWorldFootprint::from_occupancy(
+            static_cast<int>(message->info.width),
+            static_cast<int>(message->info.height),
+            message->info.resolution,pose.position.x,pose.position.y,
+            map_yaw,message->data);
+        if (!grid) {
+            RCLCPP_ERROR(get_logger(),
+                "MPC map geometry not certified: invalid occupancy grid");
+            return;
+        }
+        std::atomic_store(&world_grid_,grid);
+        RCLCPP_INFO(get_logger(),
+            "MPC map world/body authority ready: resolution=%.4fm "
+            "extra uncertainty=%.3fm",grid->resolution(),
+            world_map_additional_uncertainty_m_);
+    }
+
     void pose_callback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr message)
     {
         if (!message->header.frame_id.empty() && message->header.frame_id != path_frame_) {
@@ -2968,6 +4171,8 @@ private:
         quality_prefix_attempted_ = false;
         quality_prefix_choice_ = "none";
         quality_prefix_clearance_override_ = false;
+        quality_prefix_near_boundary_controls_bounded_ = false;
+        quality_prefix_near_boundary_override_ = false;
         quality_prefix_stale_prior_refresh_ = false;
         quality_prefix_yaw_direction_guard_ = false;
         quality_prefix_prior_is_recovery_ = false;
@@ -3007,6 +4212,12 @@ private:
         candidate_prefix_validation_status_ = -1;
         candidate_prefix_validation_failure_stage_ = -1;
         if (!enabled_ || control_fault_latched_) return;
+        if (world_map_authority_enabled_ &&
+            !std::atomic_load(&world_grid_)) {
+            RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),1000,
+                "MPC awaiting authoritative occupancy map; no commands");
+            return;
+        }
 
         const auto handle_stale_state = [this](
             const MpcSynchronizedState &stale_state,
@@ -3445,8 +4656,42 @@ private:
                 "miss; resolving a new MPC plan this cycle (%s)",
                 recovery_reason ? recovery_reason : "unknown validation failure");
         }
+        // A short prefix updates ADMM but also seeds the next full nominal
+        // with a stale, unverified tail. After an isolated fallback, discard
+        // that TAIL before solving. The new source-witness seed is rolled out
+        // from the current plant/queued actuator state, with no map-specific
+        // speed reduction or relaxation of physical corridor constraints.
+        if (fallback_max_short_prefix_actions_ > 0 &&
+            fallback_episode_.must_reseed_nominal()) {
+            if (fallback_retain_validated_seed_enabled_) {
+                f1tenth_mpc::reseed_after_bounded_fallback(
+                    &rti_memory_,fallback_episode_,
+                    kCommandEffectValidationHorizon);
+            } else {
+                rti_memory_.nominal.valid = 0;
+                rti_memory_.warm_start_controls_valid = 0;
+                rti_memory_.warm_start_control_count = 0;
+                mpc_rti_memory_reset_solver_state(&rti_memory_);
+            }
+        }
+        if (try_publish_source_reacquisition(state,last_projected_s_,
+                callback_steady_ns,control_stamp_ns,&result)) {
+            record_cycle_health(MPC_RTI_CYCLE_ACCEPTED_VIABILITY_RECOVERY,
+                result,0.0);
+            if (diagnostics_pub_)
+                publish_cycle_diagnostics(state,coherent_state,
+                    control_time_prediction,control_prediction_us,
+                    last_projected_s_,source_dt,result,0.0,
+                    control_ros_time.nanoseconds(),candidate_command_stamp_ns,
+                    callback_steady_ns,synchronize_steady_ns);
+            return;
+        }
         const auto solve_start = std::chrono::steady_clock::now();
         MpcRtiCycleConfiguration_t cycle_configuration = rti_config_;
+        cycle_configuration.prefer_feasibility_first =
+            cycle_configuration.enable_feasibility_restoration &&
+            fallback_max_short_prefix_actions_ > 0 &&
+            fallback_episode_.must_reseed_nominal();
         cycle_configuration.absolute_deadline_monotonic_us =
             callback_deadline_us;
         cycle_configuration.line_search_command_epoch_valid =
@@ -3486,6 +4731,19 @@ private:
              * During motion, route it through the normal fault/reuse path. */
             status = MPC_RTI_CYCLE_REJECTED_SOLVER;
             result.status = status;
+        }
+        if (try_publish_viability_recovery(
+                state, last_projected_s_, callback_steady_ns,
+                control_stamp_ns, &result)) {
+            record_cycle_health(MPC_RTI_CYCLE_ACCEPTED_VIABILITY_RECOVERY,
+                result, solve_us);
+            if (diagnostics_pub_)
+                publish_cycle_diagnostics(state, coherent_state,
+                    control_time_prediction, control_prediction_us,
+                    last_projected_s_, source_dt, result, solve_us,
+                    control_ros_time.nanoseconds(), candidate_command_stamp_ns,
+                    callback_steady_ns, synchronize_steady_ns);
+            return;
         }
         if (status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
             status != MPC_RTI_CYCLE_ACCEPTED_FEASIBLE &&
@@ -3845,6 +5103,9 @@ private:
     int prior_plan_control_index_{};
     int consecutive_prior_plan_actions_{};
     int consecutive_candidate_prefix_actions_{};
+    f1tenth_mpc::FallbackEpisode fallback_episode_{};
+    bool fallback_retain_validated_seed_enabled_{};
+    int fallback_max_short_prefix_actions_{};
     MpcRtiNominal_t recovered_action_revalidated_nominal_{};
     MpcModelControl_t validated_recovery_prefix_controls_[
         kCommandEffectValidationHorizon]{};
@@ -3873,8 +5134,27 @@ private:
     std::string unity_plant_state_topic_;
     bool prefer_full_validated_prior_plan_on_rejection_{};
     bool quality_aware_prefix_selection_on_rejection_{};
+    bool viability_recovery_enabled_{};
+    bool viability_recovery_on_rejection_only_{};
+    bool viability_steady_bridge_enabled_{};
+    bool viability_minimal_nearwall_recovery_enabled_{};
+    bool viability_stage_targeted_recovery_enabled_{};
+    bool viability_early_hazard_recovery_enabled_{};
+    bool viability_line_search_wall_warning_enabled_{};
+    bool viability_terminal_extension_select_enabled_{};
+    bool viability_geometric_feasibility_seed_enabled_{};
+    bool viability_braking_aware_geometric_enabled_{};
+    bool viability_geometric_anticipatory_enabled_{};
+    bool viability_blended_geometric_recovery_enabled_{};
+    bool viability_proactive_after_fallback_only_{};
+    int viability_recovery_max_trials_{16};
+    double viability_lookahead_reserve_m_{0.02};
+    double curvature_speed_envelope_lateral_accel_mps2_{0.0};
+    double curvature_speed_envelope_braking_mps2_{5.0};
+    std::uint64_t accepted_viability_recovery_{};
     bool quality_prefix_attempted_{};
     bool quality_prefix_clearance_override_{};
+    bool quality_prefix_near_boundary_override_{};
     bool quality_prefix_stale_prior_refresh_{};
     bool quality_prefix_yaw_direction_guard_{};
     bool quality_prefix_prior_is_recovery_{};
@@ -3883,8 +5163,12 @@ private:
     double quality_prefix_iteration_limited_relative_gain_{0.02};
     int quality_prefix_stale_prior_refresh_after_actions_{};
     double quality_prefix_stale_prior_max_clearance_loss_m_{0.02};
-    double quality_prefix_stale_prior_clearance_gain_objective_loss_fraction_{};
-    double quality_prefix_stale_prior_minimum_clearance_gain_m_{0.005};
+    double quality_prefix_stale_prior_objective_loss_fraction_{};
+    double quality_prefix_near_boundary_minimum_gain_m_{};
+    double quality_prefix_near_boundary_max_objective_ratio_{};
+    double quality_prefix_near_boundary_max_steering_delta_rad_{0.10};
+    double quality_prefix_near_boundary_max_throttle_delta_{0.20};
+    bool quality_prefix_near_boundary_controls_bounded_{};
     std::string quality_prefix_choice_{"none"};
     bool quality_candidate_prefix_valid_{};
     bool quality_prior_prefix_valid_{};
@@ -3932,6 +5216,12 @@ private:
         drive_command_pub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr world_map_sub_;
+    std::shared_ptr<const MpcWorldFootprint> world_grid_;
+    bool world_map_authority_enabled_{};
+    bool world_map_rejection_only_{};
+    std::string world_map_topic_{"/map"};
+    double world_map_additional_uncertainty_m_{0.005};
     rclcpp::Subscription<sdu_apex_msgs::msg::UnityPlantState>::SharedPtr
         unity_plant_state_sub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr diagnostics_pub_;
@@ -3950,6 +5240,7 @@ private:
     std::uint64_t control_fault_cycles_{};
     int consecutive_deadline_misses_{};
     int max_solver_iterations_seen_{};
+    int requested_max_solver_iterations_{150};
     double max_solve_us_{};
 };
 

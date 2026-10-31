@@ -105,4 +105,17 @@ fi
 if [[ -n "${SDU_APEX_AMCL_PARAMETER_OVERLAY:-}" ]]; then
   launch_args+=("amcl_parameter_overlay:=${SDU_APEX_AMCL_PARAMETER_OVERLAY}")
 fi
+# Development-only opt-in process affinity. Docker's cpuset argument may be
+# ignored by some container relays; taskset here pins the actual ROS launch
+# process and all child worker threads, including the OpenMP Jacobian team.
+# Leave this unset for the normal (portable) controller.
+if [[ -n "${SDU_APEX_MPC_RUNTIME_AFFINITY_CPUS:-}" ]]; then
+  if [[ ! "${SDU_APEX_MPC_RUNTIME_AFFINITY_CPUS}" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then
+    echo 'Invalid SDU_APEX_MPC_RUNTIME_AFFINITY_CPUS' >&2
+    exit 2
+  fi
+  echo "Running ROS on CPUs ${SDU_APEX_MPC_RUNTIME_AFFINITY_CPUS}"
+  exec taskset --cpu-list "${SDU_APEX_MPC_RUNTIME_AFFINITY_CPUS}" \
+    ros2 launch sdu_apex_autodrive controller.launch.py "${launch_args[@]}"
+fi
 exec ros2 launch sdu_apex_autodrive controller.launch.py "${launch_args[@]}"

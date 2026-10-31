@@ -31,6 +31,12 @@ option(SDU_APEX_MPC_RICCATI_PROFILE
   "Collect fine-grained Riccati timing counters (development only)"
   OFF)
 
+# Fixed-QP Riccati affine cache is mathematically equivalent up to float
+# rounding. Keep it opt-in until it clears the full racing repeatability gate.
+option(SDU_APEX_MPC_FIXED_QP_AFFINE_CACHE
+  "Cache P[k+1]*d[k] within one fixed-QP ADMM solve (experimental)"
+  OFF)
+
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -61,6 +67,9 @@ if(OpenMP_C_FOUND)
 endif()
 if(SDU_APEX_MPC_RICCATI_PROFILE)
   target_compile_definitions(mpc_core PRIVATE MPC_ENABLE_RICCATI_PROFILE)
+endif()
+if(SDU_APEX_MPC_FIXED_QP_AFFINE_CACHE)
+  target_compile_definitions(mpc_core PRIVATE MPC_ENABLE_RICCATI_FIXED_QP_AFFINE_CACHE)
 endif()
 set_target_properties(mpc_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -145,6 +154,29 @@ if(BUILD_TESTING)
   ament_add_gtest(test_mpc_publication_deadline
     test/test_mpc_publication_deadline.cpp)
   target_include_directories(test_mpc_publication_deadline PRIVATE include)
+  ament_add_gtest(test_mpc_viability_recovery
+    test/test_mpc_viability_recovery.cpp)
+  target_include_directories(test_mpc_viability_recovery PRIVATE include)
+  ament_add_gtest(test_mpc_world_footprint
+    test/test_mpc_world_footprint.cpp)
+  target_include_directories(test_mpc_world_footprint PRIVATE include)
+  ament_add_gtest(test_mpc_fallback_seed
+    test/test_mpc_fallback_seed.cpp)
+  target_link_libraries(test_mpc_fallback_seed mpc_core)
+  target_include_directories(test_mpc_fallback_seed PRIVATE include)
+  ament_add_gtest(test_mpc_speed_envelope
+    test/test_mpc_speed_envelope.cpp)
+  target_include_directories(test_mpc_speed_envelope PRIVATE include)
+  ament_add_gtest(test_mpc_tracking_tolerance
+    test/test_mpc_tracking_tolerance.cpp)
+  target_include_directories(test_mpc_tracking_tolerance PRIVATE include)
+  ament_add_gtest(test_mpc_fallback_episode
+    test/test_mpc_fallback_episode.cpp)
+  target_include_directories(test_mpc_fallback_episode PRIVATE include)
+  ament_add_gtest(test_mpc_feasibility_restoration
+    test/test_mpc_feasibility_restoration.cpp)
+  target_include_directories(test_mpc_feasibility_restoration PRIVATE include)
+  target_link_libraries(test_mpc_feasibility_restoration mpc_core)
   ament_add_gtest(test_mpc_prefix_selection
     test/test_mpc_prefix_selection.cpp)
   target_include_directories(test_mpc_prefix_selection PRIVATE include)

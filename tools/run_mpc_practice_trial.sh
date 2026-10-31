@@ -27,6 +27,12 @@ set -- --config mpc=f1tenth_mpc/config/mpc_practice_fastline.yaml
 set -- "$@" --config amcl=f1tenth_localization/config/gpu_amcl_cpp_params.yaml
 cp -- f1tenth_mpc/config/mpc_practice_fastline.yaml "$run_dir/mpc_parameters.yaml"
 cp -- f1tenth_localization/config/gpu_amcl_cpp_params.yaml "$run_dir/amcl_parameters.yaml"
+mpc_overlay="${SDU_APEX_MPC_PARAMETER_OVERLAY:-}"
+if [[ -n "$mpc_overlay" ]]; then
+  [[ -f "$mpc_overlay" ]] || { echo 'Missing MPC overlay' >&2; exit 2; }
+  cp -- "$mpc_overlay" "$run_dir/mpc_overlay.yaml"
+  set -- "$@" --config "overlay=$mpc_overlay"
+fi
 amcl_overlay="${SDU_APEX_AMCL_PARAMETER_OVERLAY:-}"
 if [[ -n "$amcl_overlay" ]]; then
   [[ -f "$amcl_overlay" ]] || { echo 'Missing AMCL overlay' >&2; exit 2; }
@@ -49,9 +55,11 @@ cleanup() {
   docker kill --signal SIGINT "$recorder" "$controller" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
-env -u SDU_APEX_MPC_PARAMETER_OVERLAY AUTODRIVE_REBUILD=0 \
+env AUTODRIVE_REBUILD=0 SDU_APEX_MPC_PARAMETER_OVERLAY="$mpc_overlay" \
   SDU_APEX_CONTAINER="$controller" \
-  SDU_APEX_CPUSET_CPUS=0-11 SDU_APEX_MPC_PUBLISH_DIAGNOSTICS=true \
+  SDU_APEX_CPUSET_CPUS="${SDU_APEX_TRIAL_CONTROLLER_CPUSET_CPUS:-0-11}" \
+  SDU_APEX_MPC_RUNTIME_AFFINITY_CPUS="${SDU_APEX_TRIAL_RUNTIME_AFFINITY_CPUS:-}" \
+  SDU_APEX_MPC_PUBLISH_DIAGNOSTICS=true \
   SDU_APEX_MPC_START_DELAY_SEC=2 SDU_APEX_DEV_SIM_RESET_ENABLED=true \
   SDU_APEX_MAP_YAML="$map" SDU_APEX_TRAJECTORY_FILE="$trajectory" \
   tools/start_dev.sh >"$run_dir/controller.log" 2>&1 &

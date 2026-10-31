@@ -51,6 +51,21 @@ int mpc_model_linearize_from_known_step(
     const MpcStageResult_t *known_step,
     MpcStageLinearization_t *linearization);
 
+/* MPC RTI sensitivity-only specialization. The RTI QP projects the full
+ * physical A/B and motion/slip derivatives into its smaller state and forms
+ * the affine residual there, so computing every source-model d[row] first
+ * wastes 24x24 matrix-vector work per prediction stage. This function is
+ * identical to mpc_model_linearize_from_known_step for all derivatives and
+ * branch diagnostics, but intentionally leaves d[] at zero. Do not use in
+ * consumers of the full source-state affine offsets. */
+int mpc_model_linearize_sensitivities_from_known_step(
+    const MpcModelState_t *state,
+    const MpcModelControl_t *control,
+    float dt,
+    float path_curvature,
+    const MpcStageResult_t *known_step,
+    MpcStageLinearization_t *linearization);
+
 /* Lower-level transition/Jacobian path used by the affine-map wrapper. */
 int mpc_vehicle_model_linearize_from_known_step(
     const MpcModelState_t *state,

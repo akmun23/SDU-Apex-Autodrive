@@ -128,6 +128,13 @@ typedef struct
     float K[RICCATI_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NX];
     float S_inv[RICCATI_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NU];
     float G[RICCATI_HORIZON][RICCATI_MAX_NU][RICCATI_MAX_NX];
+    /* Constant affine dynamics contribution: P[k+1] d[k]. Refreshed
+     * together with P and K whenever rho-dependent factors are rebuilt. */
+    float affine_state_shift[RICCATI_HORIZON][RICCATI_MAX_NX];
+    /* Only private fixed-QP ADMM may assume d[k] never changes while
+     * reusing this factorization. Public factored RHS calls explicitly
+     * support changing d[k] between calls. */
+    uint8_t private_fixed_qp_affine_cache_enabled;
     uint8_t x_is_constrained[RICCATI_HORIZON + 1][RICCATI_MAX_NX];
     /* Diagonal augmented-Lagrangian penalties; scalar fields are summaries
      * retained for the public scalar-factorization API and diagnostics. */

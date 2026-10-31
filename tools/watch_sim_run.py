@@ -120,7 +120,7 @@ class SimRunWatcher(Node):
                 "accepted_optimal", "accepted_feasible",
                 "accepted_line_search",
                 "accepted_candidate_prefix", "accepted_prior_plan",
-                "deferred_deadline_recovery"):
+                "accepted_viability_recovery", "deferred_deadline_recovery"):
             reason = diagnostic.get("nonlinear_failure_reason", "none")
             stage = diagnostic.get("nonlinear_failure_stage", -1)
             self.mpc_fault_reason = f"{status}; nonlinear={reason}@{stage}"
@@ -129,7 +129,8 @@ class SimRunWatcher(Node):
         if status in (
                 "accepted_optimal", "accepted_feasible",
                 "accepted_line_search", "accepted_candidate_prefix",
-                "accepted_prior_plan", "deferred_deadline_recovery"):
+                "accepted_prior_plan", "accepted_viability_recovery",
+                "deferred_deadline_recovery"):
             # Localization/plant warm-up may legitimately hold the car still.
             # Start the motion-stall timer when the controller first produces
             # a usable cycle, not when the first stationary odometry arrives.

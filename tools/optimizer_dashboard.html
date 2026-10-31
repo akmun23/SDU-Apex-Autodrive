@@ -100,21 +100,54 @@
 </div></header>
 <div id="errorBanner" class="notice error hidden" role="alert"></div>
 <div class="notice" role="status"><strong id="plainStatus">Connecting to the campaign…</strong><p id="plainExplanation">The optimizer searches for faster paths. Unity then checks whether the real controller can drive them.</p><p id="drivingSummary"></p></div>
+<section class="panel" style="margin-bottom:18px" aria-label="Search explained">
+ <h2 id="taskTitle">What is the optimizer doing now?</h2>
+ <p id="taskGoal">Waiting for the current solve's objective…</p>
+ <p class="description" id="taskWhy" style="margin-top:8px"></p>
+ <p id="taskProgress" style="margin-top:8px"></p>
+ <p class="description" id="objectiveProgress" style="margin-top:8px"></p>
+ <h2 style="margin-top:18px">Saved certified results</h2>
+ <p id="qualitySummary">Reading certified speed and wall-clearance alternatives…</p>
+ <p class="description" id="searchIntent" style="margin-top:8px"></p>
+ <h2 style="margin-top:18px">Verification evidence — not optimization progress</h2>
+ <p class="description" id="evidenceScope"></p>
+ <div id="acceptanceChecks" style="overflow-x:auto;margin-top:12px" aria-label="Saved-point and replay verification checks"></div>
+ <p class="description" id="acceptanceProvenance" style="margin-top:8px"></p>
+ <p class="description" id="replaySchedule" style="margin-top:8px"></p>
+ <p class="description" id="clearanceRepair" style="margin-top:8px"></p>
+ <p class="description" id="clearanceAccuracy" style="margin-top:8px"></p>
+ <p class="description" id="searchQueue" style="margin-top:8px"></p>
+</section>
 <section class="cards" aria-label="Live optimizer metrics">
 <div class="card"><div class="label">Best model-feasible lap</div><div class="value green" id="bestLap">—</div><div class="sub" id="bestSub">Not a proven Unity lap time</div></div>
-<div class="card"><div class="label">Current trial</div><div class="value blue" id="trialLap">—</div><div class="sub" id="trialSub">Not yet validated</div></div>
+<div class="card"><div class="label" id="trialLabel">Current trial</div><div class="value blue" id="trialLap">—</div><div class="sub" id="trialSub">Not yet validated</div></div>
 <div class="card"><div class="label">Current iteration</div><div class="value" id="iteration">—</div><div class="sub" id="iterationSub">Waiting for solver output</div></div>
 <div class="card"><div class="label">Best saved residual</div><div class="value amber" id="bestResidual">—</div><div class="sub" id="residualSub">Checkpoint not yet written</div></div>
+</section>
+<section class="layout" style="margin-bottom:18px">
+<div class="panel track-panel"><div class="panel-head"><div><h2>Track · fastest and roomiest lines</h2><p class="description">Map coordinates · Unity-verified direction</p></div><span class="tag">SAVED RESULT</span></div><div class="track-canvas"><canvas id="track" aria-label="Occupancy map with best validated raceline and extracted centerline"></canvas></div><div class="legend"><span><i class="line"></i>Best validated</span><span><i class="line" style="background:#b14aab"></i>Roomiest alternative</span><span><i class="line gray"></i>Centerline</span></div><div class="downloads" id="downloads"></div><p id="mapNote" class="description" style="margin-top:12px">Loading map…</p></div>
+<div class="panel"><div class="panel-head"><div><h2>How far is this trial from feasibility?</h2><p class="description">Model constraint error every 5 solver iterations · lower is better</p></div><span class="tag" id="solveTag">WAITING</span></div>
+<div class="canvas-box"><canvas id="residualChart" aria-label="Independently checked constraint residual history"></canvas></div>
+<div class="legend"><span><i class="line blue"></i>Current constraint error</span><span><i class="line"></i>Best observed error</span><span><i class="line amber"></i><span id="thresholdLabel">Exact-grid threshold (10⁻⁵)</span></span></div>
+<div class="metrics-row"><span>Last checked <strong id="currentResidual">—</strong></span><span>Initial <strong id="initialResidual">—</strong></span><span>Best reduction <strong id="residualGain">—</strong></span></div>
+<p class="graph-label">Evaluated directly against model constraint bounds. This is the feasibility metric used to save the best primal; a low residual alone does not certify wall clearance, periodicity or Unity driving.</p>
+<div style="border-top:1px solid var(--stroke);margin:20px 0 16px"></div>
+<div class="panel-head"><div><h2>IPOPT raw progress</h2><p class="description">Internal primal infeasibility (inf_pr) · every printed iteration</p></div><span class="tag" id="ipoptMode">DIAGNOSTIC</span></div>
+<div class="canvas-box" style="height:160px"><canvas id="ipoptChart" aria-label="IPOPT internal primal infeasibility on an independent vertical scale"></canvas></div>
+<div class="metrics-row"><span>Constraint error (inf_pr) <strong id="rawResidual">—</strong></span><span>Stationarity error (inf_du) <strong id="rawDual">—</strong></span><span>Iteration <strong id="rawIteration">—</strong></span></div>
+<p class="graph-label">Separate logarithmic scale. IPOPT may use different scaling. inf_pr is internal constraint error; inf_du is stationarity error, not metres or seconds. Large persistent inf_du with flat constraint error suggests numerical stagnation, not proof of a physical speed limit.</p></div>
+<div class="panel"><div class="panel-head"><div><h2>Certified raceline history</h2><p class="description">Saved speed and quality alternatives · slower can mean more clearance</p></div><span class="tag" id="gainsTag">0 EXPORTS</span></div><div class="canvas-box" style="height:180px"><canvas id="lapChart" aria-label="History of saved validated lap times"></canvas></div><p class="graph-label" id="historyNote">Waiting for the first validated lap. Completion time cannot be predicted reliably.</p></div>
 </section>
 <section class="panel" aria-label="Multi-incumbent optimization progress" style="margin-bottom:18px">
  <div class="panel-head"><div><h2>Search diversification · equal-time alternatives</h2>
  <p class="description">Only independently certified candidates become alternate seeds. Every seed gets its own 25 ms and hybrid-time searches.</p></div>
  <span class="tag" id="eliteStatus">WAITING</span></div>
  <div class="mpc-facts" style="margin-top:13px">
-  <div class="mpc-fact"><div class="mpc-fact-label">Certified alternative witnesses</div><div class="mpc-fact-value" id="eliteCount">0</div><div class="mpc-fact-foot">Same or better source lap time</div></div>
-  <div class="mpc-fact"><div class="mpc-fact-label">Explored starting basins</div><div class="mpc-fact-value" id="basinsExplored">0</div><div class="mpc-fact-foot">Independently searched alternatives</div></div>
+  <div class="mpc-fact"><div class="mpc-fact-label">Current-run alternate witnesses</div><div class="mpc-fact-value" id="eliteCount">0</div><div class="mpc-fact-foot">Historical alternatives listed below</div></div>
+  <div class="mpc-fact"><div class="mpc-fact-label">Starting basins visited</div><div class="mpc-fact-value" id="basinsExplored">0</div><div class="mpc-fact-foot">Seeds given a search turn, not proven local minima</div></div>
   <div class="mpc-fact"><div class="mpc-fact-label">Failed faster-time starts</div><div class="mpc-fact-value" id="failedTimeStarts">0</div><div class="mpc-fact-foot">Trials since current duration</div></div>
-  <div class="mpc-fact"><div class="mpc-fact-label">Largest archived clearance reserve</div><div class="mpc-fact-value" id="eliteMargin">—</div><div class="mpc-fact-foot">Extra beyond the hard 5 cm margin</div></div>
+  <div class="mpc-fact"><div class="mpc-fact-label">Roomiest planned body-to-wall gap</div><div class="mpc-fact-value" id="eliteMargin">—</div><div class="mpc-fact-foot">Total gap, including planning buffer</div></div>
+  <div class="mpc-fact"><div class="mpc-fact-label">Fastest line body-to-wall gap</div><div class="mpc-fact-value" id="bestSourceMargin">—</div><div class="mpc-fact-foot">Source-model plan, not measured Unity tracking</div></div>
  </div>
  <div class="details" style="grid-template-columns:repeat(2,minmax(0,1fr))">
   <div class="detail"><div class="label">Search currently running</div><strong id="eliteMode">Initial feasibility search</strong></div>
@@ -122,25 +155,24 @@
  </div>
  <p class="description" id="eliteExplanation" style="margin-top:15px">The dashboard distinguishes optimizer activity from certified speed improvements. There is no defensible percent complete for an unbounded search.</p>
 </section>
+<section class="panel" aria-label="Historical certified raceline alternatives" style="margin-bottom:18px">
+ <div class="panel-head"><div><h2>Certified raceline portfolio · across campaigns</h2>
+ <p class="description">Only independent 1 ms full-footprint source certificates with the same vehicle model are counted. Same-time gains in clearance and command smoothness matter, even when the lap does not get faster.</p></div>
+ <span class="tag" id="portfolioTag">LOADING</span></div>
+ <div class="mpc-facts" style="margin-top:13px">
+  <div class="mpc-fact"><div class="mpc-fact-label">Historical certified witnesses</div><div class="mpc-fact-value" id="portfolioCount">—</div><div class="mpc-fact-foot">Duplicates across exports omitted</div></div>
+  <div class="mpc-fact"><div class="mpc-fact-label">Non-dominated racing lines</div><div class="mpc-fact-value" id="portfolioPareto">—</div><div class="mpc-fact-foot">Time, clearance, steering, throttle</div></div>
+  <div class="mpc-fact"><div class="mpc-fact-label">Fastest certified source time</div><div class="mpc-fact-value" id="portfolioFastest">—</div><div class="mpc-fact-foot">Across matching source campaigns</div></div>
+  <div class="mpc-fact"><div class="mpc-fact-label">Best extra clearance</div><div class="mpc-fact-value" id="portfolioClearance">—</div><div class="mpc-fact-foot">Beyond required 50 mm</div></div>
+ </div>
+ <p class="description" style="margin:12px 0">Each archived line is a different tradeoff. A source certificate does not establish closed-loop Unity ten-lap drivability. Standalone certificates without a bundled map fingerprint are explicitly marked.</p>
+ <div id="certifiedPortfolio"><p class="empty">Checking previous optimizer campaigns…</p></div>
+</section>
 <section class="panel mpc-section" aria-label="Unity MPC driving test results" style="margin-bottom:18px">
 <div class="panel-head"><div><h2>Most recent Unity driving test</h2><p class="description">One heavy job at a time · optimization pauses during driving tests</p></div><span class="tag" id="mpcQueueStatus">NOT CONFIGURED</span></div>
 <p class="graph-label" id="mpcQueueNote">The simulation supervisor runs separately from the optimizer and retains its logs and ROS bags.</p>
 <div id="mpcTrials"></div>
 <p class="mpc-footnote">These are actual Unity driving results, not a guarantee that the source model exactly reproduces Unity physics. Only completed timed laps are scored. Technical details and logs are available inside each trial.</p>
-</section>
-<section class="layout">
-<div class="panel track-panel"><div class="panel-head"><div><h2>Track & best line</h2><p class="description">Map coordinates · Unity-verified direction</p></div><span class="tag">SAVED RESULT</span></div><div class="track-canvas"><canvas id="track" aria-label="Occupancy map with best validated raceline and extracted centerline"></canvas></div><div class="legend"><span><i class="line"></i>Best validated</span><span><i class="line gray"></i>Centerline</span></div><div class="downloads" id="downloads"></div><p id="mapNote" class="description" style="margin-top:12px">Loading map…</p></div>
-<div class="panel"><div class="panel-head"><div><h2>Verified constraint residual</h2><p class="description">Independent constraint check every 5 solver iterations · lower is better</p></div><span class="tag" id="solveTag">WAITING</span></div>
-<div class="canvas-box"><canvas id="residualChart" aria-label="Independently checked constraint residual history"></canvas></div>
-<div class="legend"><span><i class="line blue"></i>Actual checked residual</span><span><i class="line"></i>Best observed actual residual</span><span><i class="line amber"></i>Candidate threshold (10⁻⁴)</span></div>
-<div class="metrics-row"><span>Last checked <strong id="currentResidual">—</strong></span><span>Initial <strong id="initialResidual">—</strong></span><span>Best reduction <strong id="residualGain">—</strong></span></div>
-<p class="graph-label">Evaluated directly against model constraint bounds. This is the feasibility metric used to save the best primal; a low residual alone does not certify wall clearance, periodicity or Unity driving.</p>
-<div style="border-top:1px solid var(--stroke);margin:20px 0 16px"></div>
-<div class="panel-head"><div><h2>IPOPT raw progress</h2><p class="description">Internal primal infeasibility (inf_pr) · every printed iteration</p></div><span class="tag" id="ipoptMode">DIAGNOSTIC</span></div>
-<div class="canvas-box" style="height:160px"><canvas id="ipoptChart" aria-label="IPOPT internal primal infeasibility on an independent vertical scale"></canvas></div>
-<div class="metrics-row"><span>Last raw inf_pr <strong id="rawResidual">—</strong></span><span>Latest iteration <strong id="rawIteration">—</strong></span></div>
-<p class="graph-label">Separate logarithmic scale. IPOPT may use a different constraint representation or scaling. Its values cannot be compared numerically with the upper graph or its 10⁻⁴ candidate threshold. Use this graph only to assess iteration-by-iteration solver activity.</p></div>
-<div class="panel"><div class="panel-head"><div><h2>Validated lap-time gains</h2><p class="description">Every point is a saved, independently checked improvement</p></div><span class="tag" id="gainsTag">0 EXPORTS</span></div><div class="canvas-box" style="height:180px"><canvas id="lapChart" aria-label="History of saved validated lap times"></canvas></div><p class="graph-label" id="historyNote">Waiting for the first validated lap. Completion time cannot be predicted reliably.</p></div>
 </section>
 <section class="panel stage-panel"><div class="panel-head"><div><h2 id="stageTitle">Waiting for optimizer</h2><p id="stageText" class="description">The workspace will appear here when a run starts.</p></div><span class="tag" id="activity">NO DATA</span></div><div class="stages" id="stages"><div class="stage" data-step="0"><b>01 / geometry</b>Extract & seed</div><div class="stage" data-step="1"><b>02 / bootstrap</b>Find feasible lap</div><div class="stage" data-step="2"><b>03 / search</b>Shorten & refine</div><div class="stage" data-step="3"><b>04 / save</b>Check every gain</div></div><div class="progress-track"><div class="progress-fill" id="iterationBar"></div></div><p class="description" id="budgetNote">Iteration budget for this solve, not total optimization completion.</p><div class="details"><div class="detail"><div class="label">Geometry basin</div><strong id="basin">—</strong></div><div class="detail"><div class="label">Phase / refinement</div><strong id="phase">—</strong></div><div class="detail"><div class="label">Workers / memory</div><strong id="resources">—</strong></div><div class="detail"><div class="label">Checkpoint age</div><strong id="checkpointAge">—</strong></div><div class="detail"><div class="label">Iteration / patience limits</div><strong id="limits">—</strong></div><div class="detail"><div class="label">Saved local dynamics defect</div><strong id="dynamicDefect">—</strong></div><div class="detail"><div class="label">Saved extra wall slack</div><strong id="clearance">—</strong></div><div class="detail"><div class="label">Active checkpoint folder</div><strong id="activePath">—</strong></div></div></section>
 <section class="bottom"><div class="panel"><div class="panel-head"><div><h2>Recent attempts</h2><p class="description">Completed trials in this geometry basin</p></div><span class="tag" id="attemptTag">0 COMPLETED</span></div><div id="attempts"></div></div><div class="panel"><h2>What is happening</h2><p class="description">Stage changes, new trials and accepted improvements</p><ul id="feed" class="feed"></ul></div></section>
@@ -188,7 +220,7 @@ function residualChart(){
  const pts=(snapshot?.residuals||[]).filter(p=>p.residual!=null&&p.residual>=0);
  if(!pts.length){emptyCanvas('residualChart','Waiting for independent constraint checks…');return;}
  const {ctx,w,h}=canvasContext('residualChart'), pad={l:48,r:14,t:12,b:27};
- const floor=1e-12, logs=pts.map(p=>Math.log10(Math.max(floor,p.residual))), threshold=-4;
+ const floor=1e-12, logs=pts.map(p=>Math.log10(Math.max(floor,p.residual))), threshold=Math.log10(snapshot?.search_progress?.nlp_threshold||1e-5);
  let ymin=Math.floor(Math.min(threshold,...logs)),ymax=Math.ceil(Math.max(threshold,...logs));if(ymax-ymin<2){ymax++;ymin--;}
  const xmin=Math.min(...pts.map(p=>p.iteration)),xmax=Math.max(xmin+1,...pts.map(p=>p.iteration));
  const xx=x=>pad.l+(x-xmin)/(xmax-xmin)*(w-pad.l-pad.r),yy=y=>h-pad.b-(y-ymin)/(ymax-ymin)*(h-pad.t-pad.b);
@@ -229,7 +261,7 @@ function drawTrack(){
  ctx.imageSmoothingEnabled=false;ctx.drawImage(mapImage,ox,oy,d.width*scale,d.height*scale);
  const [mx,my,yaw]=d.origin,c=Math.cos(yaw),s=Math.sin(yaw);
  function project(p){const dx=p[0]-mx,dy=p[1]-my;return [ox+((c*dx+s*dy)/d.resolution-.5)*scale,oy+(d.height-(-s*dx+c*dy)/d.resolution-.5)*scale];}
- d.layers.forEach(layer=>{const pts=layer.points.map(project);if(pts.length)pts.push(pts[0]);line(ctx,pts,layer.kind==='best'?'#007a61':'#7d8da4',layer.kind==='best'?2.2:1.3,layer.kind==='best'?[]:[4,4]);});
+ d.layers.forEach(layer=>{const pts=layer.points.map(project);if(pts.length)pts.push(pts[0]);line(ctx,pts,layer.kind==='best'?'#007a61':layer.kind==='roomiest'?'#b14aab':'#7d8da4',layer.kind==='best'?2.2:1.3,layer.kind==='best'?[]:[4,4]);});
  // One direction arrow follows the actual ordered best line, not map orientation.
  const best=d.layers.find(l=>l.kind==='best');if(best?.points.length>15){const i=Math.floor(best.points.length*.16),a=project(best.points[i]),b=project(best.points[Math.min(i+8,best.points.length-1)]),angle=Math.atan2(b[1]-a[1],b[0]-a[0]);ctx.fillStyle='#007a61';ctx.beginPath();ctx.moveTo(b[0],b[1]);ctx.lineTo(b[0]-10*Math.cos(angle-.45),b[1]-10*Math.sin(angle-.45));ctx.lineTo(b[0]-10*Math.cos(angle+.45),b[1]-10*Math.sin(angle+.45));ctx.closePath();ctx.fill();}
 }
@@ -239,9 +271,22 @@ async function refreshTrack(key){
  catch(error){set('mapNote',`Track view: ${error.message}. Retrying automatically.`);}finally{trackFetching=false;}
 }
 function eventText(event){
+ if(event.event==='source_clearance_refinement_requested')return {
+  title:'Replay found missing wall constraints; stopping stale solve',
+  detail:`${event.new_cuts?.length??0} source-tick constraints requested. Checked primal saved for immediate repair.`};
+ if(event.event==='source_clearance_constraints_added')return {
+  title:'Rebuilding IPOPT with measured clearance constraints',
+  detail:`Repair pass ${event.refinement}; ${event.total_cuts} extra exact 1 ms constraints. No margin relaxation.`};
+ if(event.event==='time_prediction_finished')return {
+  title:event.status==='no_time_proposal'?'Time search found no better initializer':'Time search proposed a shorter initializer',
+  detail:event.reason||'A proposal is not a certificate; exact-grid repair and source replay remain required.'};
+ if(event.event==='branch_yielded')return {title:'Giving another seed its turn',detail:'Completed duration starts saved; unfinished basins resume in a later visit.'};
  if(event.event==='solve')return {title:`Testing ${num(event.target_lap_s)} s lap`,detail:`${event.key} · refinement ${event.refinement}`};
  if(event.event==='faster_source_witness')return {title:`New source-validated best: ${num(event.lap_s)} s`,detail:'Independent model replay passed; saved automatically'};
  if(event.event==='budgets_increased')return {title:'Exploration budget increased',detail:`${event.iterations} iterations · ${event.stagnation_iterations} patience`};
+ if(event.event==='early_source_checkpoint_gate')
+  return {title:event.accepted?'Promising source checkpoint passes gate':'Checkpoint still requires source repair',
+    detail:`Extra clearance ${num(event.clearance_slack_m*1000,3)} mm · required ${num(event.target_slack_m*1000,2)} mm · full independent promotion follows`};
  if(event.event==='feasibility_stagnation')
   return {title:'Solve stopped after progress stalled',detail:'Best intermediate states were saved. The optimizer will try another candidate; the campaign has not crashed.'};
  return {title:human(event.event||event.stage),detail:event.error||event.reason||event.key||'Optimizer stage update'};
@@ -348,6 +393,49 @@ function mpcCard(a,data,index,persist){
  const message=mpcEl('div','mpc-explainer is-'+state[1]);
  mpcAppend(message,mpcEl('strong','',reason[0]),mpcEl('p','',reason[1]),mpcEl('p','',reason[2]));
  body.append(message);
+ const failure=a.failure_diagnostic;
+ if(failure){
+  const diagnosis=mpcEl('section','mpc-subpanel');
+  mpcAppend(diagnosis,mpcEl('h3','','Last nonlinear rejection · decoded from bag'),
+    mpcEl('p','mpc-helper','State at rejection, not a collision report. Negative predicted corridor slack means the exact model rollout crossed its configured corridor bound.'));
+  const facts=mpcEl('div','mpc-facts');
+  const speedError=Number.isFinite(failure.forward_speed_mps)&&Number.isFinite(failure.reference_speed_mps)
+    ?failure.forward_speed_mps-failure.reference_speed_mps:null;
+  const headingDeg=Number.isFinite(failure.heading_error_rad)?failure.heading_error_rad*180/Math.PI:null;
+  mpcAppend(facts,
+    mpcFact('Progress',mpcNum(failure.progress_m,2),'m','Along-track at failed cycle'),
+    mpcFact('Cross-track',mpcNum(Number.isFinite(failure.cross_track_m)?failure.cross_track_m*100:null,1),'cm','Signed controller error'),
+    mpcFact('Heading error',mpcNum(headingDeg,1),'°','Signed controller error'),
+    mpcFact('Speed error',mpcNum(speedError,2),'m/s','Vehicle minus requested speed'),
+    mpcFact('Yaw rate',mpcNum(failure.yaw_rate_radps,2),'rad/s','Current observer state'),
+    mpcFact('Path curvature',mpcNum(failure.curvature_per_m,3),'1/m','At current progress'),
+    mpcFact('Requested speed',mpcNum(failure.reference_speed_mps,2),'m/s','Raceline target'),
+    mpcFact('Requested acceleration',mpcNum(failure.reference_acceleration_mps2,2),'m/s²','Raceline target'));
+  diagnosis.append(facts);
+  const solver=mpcEl('div','mpc-grid-2');
+  const optimization=mpcEl('section','mpc-subpanel'),checks=mpcEl('section','mpc-subpanel');
+  mpcAppend(optimization,mpcEl('h3','','Solver at rejection'));
+  mpcKV(optimization,'ADMM',`${failure.iterations??'—'} / ${failure.iteration_limit??'—'} · ${failure.admm_stop_reason||'unknown'}`);
+  mpcKV(optimization,'Primal / dual residual',`${mpcNum(failure.primal_residual,3)} / ${mpcNum(failure.dual_residual,3)}`);
+  mpcKV(optimization,'Cycle time',`${mpcNum(failure.end_to_end_control_ms,2)} / ${mpcNum(failure.cycle_budget_ms,1)} ms`);
+  mpcAppend(checks,mpcEl('h3','','Exact prefix checks'));
+  mpcKV(checks,'Candidate / retained',`${failure.candidate_exact_valid?'valid':'invalid'} / ${failure.prior_exact_valid?'valid':'invalid'}`);
+  mpcKV(checks,'Failed prediction step',failure.candidate_invalid_stage??'—');
+  mpcKV(checks,'Candidate corridor slack',Number.isFinite(failure.candidate_invalid_slack_m)
+    ?mpcNum(failure.candidate_invalid_slack_m*100,2)+' cm':'—');
+  mpcKV(checks,'Reported candidate / prior stage',`${failure.candidate_failure_stage??'—'} / ${failure.prior_failure_stage??'—'}`);
+  mpcAppend(solver,optimization,checks);diagnosis.append(solver);body.append(diagnosis);
+  const recovery=failure.last_recovery_decision;
+  if(recovery){
+   const recoveryPanel=mpcEl('section','mpc-subpanel');
+   mpcAppend(recoveryPanel,mpcEl('h3','','Last validated recovery choice before rejection'));
+   mpcKV(recoveryPanel,'Choice',`${recovery.choice||'—'} · ${mpcNum(recovery.progress_m,2)} m`);
+   mpcKV(recoveryPanel,'Candidate / retained slack',`${mpcNum(Number.isFinite(recovery.candidate_clearance_m)?recovery.candidate_clearance_m*100:null,2)} / ${mpcNum(Number.isFinite(recovery.prior_clearance_m)?recovery.prior_clearance_m*100:null,2)} cm`);
+   mpcKV(recoveryPanel,'Candidate / retained objective',Number.isFinite(recovery.objective_ratio)?`${mpcNum(recovery.objective_ratio,2)}×`:'—');
+   mpcKV(recoveryPanel,'Near-wall rule',recovery.near_boundary_override?'used':'not used');
+   diagnosis.append(recoveryPanel);
+  }
+ }
  const fixed=m.fixed_command_rollout;
  if(fixed?.status==='scored'){
   const physics=mpcEl('div','mpc-facts');
@@ -471,8 +559,9 @@ function mpcCard(a,data,index,persist){
 function renderMpc(data){
  const mpc=data.mpc_trials||{},target=$('mpcTrials'),worker=mpc.worker||{},queue=mpc.pending||0;
  const paused=!!mpc.optimizer_pause?.unit,pauseReason=mpc.optimizer_pause?.reason||'Unity driving test';
- set('plainStatus',paused?pauseReason+' · optimizer paused':data.process.alive?'One optimizer is searching for a faster path':'Optimizer is not running');
- set('plainExplanation',paused?'The same optimization iterate is preserved. It resumes when this task finishes, so optimization does not compete with driving or analysis.':
+ set('plainStatus',paused?'Optimizer paused for a simulator test':data.process.alive?
+  'Current task: '+(data.search_progress?.task?.label||'preparing the next solve'):'Optimizer is not running');
+ set('plainExplanation',paused?pauseReason+'. Saved iterate is preserved; search resumes after the test. No competing solver workload during driving.':
   mpc.supervisor_alive?'New model-feasible lines are automatically tested in Unity, one at a time. Model feasibility alone does not prove the controller can drive a line.':
   'Automatic driving tests are stopped. Optimization can continue, but new candidates will not be tested until the supervisor is started.');
  set('drivingSummary',`${mpc.successful_trials??0} / ${mpc.total_trials??0} driving tests completed all 10 timed laps. First lap is warm-up and is not scored.`);
@@ -502,29 +591,139 @@ function renderMpc(data){
  target.append(list);
 }
 
+function renderAcceptance(acceptance){
+ reconcileCollection('acceptanceChecks',JSON.stringify(acceptance||{}),target=>{
+  target.replaceChildren();
+  if(!acceptance?.gates?.length)return;
+  const table=document.createElement('table');table.className='attempts';
+  const header=table.createTHead().insertRow();
+  for(const title of ['Saved-point / replay check','Result','Measured','Required','Evidence']){
+   const th=document.createElement('th');th.textContent=title;header.append(th);}
+  const body=table.createTBody();
+  for(const gate of acceptance.gates){
+   const row=body.insertRow(),scale=gate.unit==='m'?1000:1;
+   const miss=gate.value!=null&&gate.limit!=null?Math.abs(gate.value-gate.limit):0;
+   const digits=gate.id==='clearance'&&gate.status==='failed'&&miss>0&&miss<1e-4?
+    Math.min(9,Math.max(2,Math.ceil(-Math.log10(miss*1000))+1)):gate.tolerance_m>0?3:2;
+   const format=value=>value==null?'—':gate.unit==='m'?num(value*scale,digits)+' mm':sci(value);
+   const withinTolerance=gate.status==='passed'&&gate.tolerance_m>0&&gate.value<gate.limit;
+   const values=[gate.label,gate.status==='passed'?(withinTolerance?'Passed (numerical tolerance)':'Passed'):gate.status==='failed'?'Failed':'Pending',
+     format(gate.value),gate.limit==null?'—':(gate.comparison==='>='?'≥ ':'≤ ')+format(gate.limit)+
+      (gate.tolerance_m>0?` · tolerance ${num(gate.tolerance_m*1000,3)} mm`:''),gate.detail];
+   values.forEach((value,i)=>{const cell=row.insertCell();cell.textContent=value;
+    if(i===1)cell.className=gate.status==='passed'?'green':gate.status==='failed'?'amber':'muted';});
+  }
+  target.append(table);
+ });
+ set('acceptanceProvenance',acceptance?.replay_iteration!=null?
+  (acceptance.replay_matches_checkpoint?
+   `Early replay and saved checkpoint both refer to iteration ${acceptance.replay_iteration}.`:
+   `Latest early replay: iteration ${acceptance.replay_iteration}; saved checkpoint: iteration ${acceptance.checkpoint_iteration??'unknown'}. Different iterates: this replay does not certify that saved point.`)+
+  ' Eligible iterates are replayed periodically, then checked again after the solve finishes.':
+  'Passing model constraints alone does not establish recursive drift, full 1 ms wall clearance or final certification. Pending means not yet measured here—not passed.');
+ const measurement=acceptance?.measurement;
+ // Current source callback waits 40 iterations between eligible checks.
+ // Prefer explicit solver policy metadata if a future header supplies it.
+ const cadence=snapshot?.solver?.source_replay_every_iterations??40;
+ const next=acceptance?.replay_iteration==null?null:acceptance.replay_iteration+cadence;
+ const pausedForTest=!!snapshot?.mpc_trials?.optimizer_pause?.unit;
+ set('replaySchedule',snapshot?.active?.time_predictor?
+  'This is a time predictor; exact source replay follows command-grid repair.':
+  snapshot?.solve_report?'This solve has finished; its final replay is reported above.':
+  (next==null?'First replay waits for an eligible live iterate.':
+   `Next replay eligible from iteration ${next}; current iteration ${snapshot?.iteration??'unknown'}.`)+
+  ' Requires live constraint error ≤ 1e-5 and periodic closure ≤ 1e-5; a saved checkpoint passing does not mean the current iterate passes.'+
+  (pausedForTest?' Optimizer is paused for a simulator test; iteration count will not advance until resumed.':''));
+ set('clearanceAccuracy',measurement?
+  `Check resolution: ${num(measurement.source_tick_s*1000,0)} ms production-model steps; ${num(measurement.map_resolution_m*100,2)} cm map cells. Gap includes a ${num(measurement.perimeter_probe_correction_m*1000,2)} mm conservative perimeter-sampling correction. Numerical acceptance tolerance ${num((acceptance.clearance_numerical_tolerance_m||0)*1000,3)} mm; raw values are preserved. Not millimetre-accurate Unity ground truth or a continuous inter-tick guarantee.`:
+  `Configured numerical clearance tolerance: ${num((acceptance?.clearance_numerical_tolerance_m||0)*1000,3)} mm. Clearance is a conservative occupancy-map/source-model check, not a direct Unity wall-distance measurement.`);
+}
+
 function render(data){
  snapshot=data;const best=data.best,trial=data.active?.trial_lap_s,current=data.residuals.at(-1)?.residual,initial=data.solver?.initial_residual,cp=data.checkpoint,c=data.contract;
  set('trackName',data.name.replace(/^optimizer_/,'').replace(/_[a-f\d]{10}$/,''));
  const live=data.process.alive,isFinished=['plateau','search_domain_reached','prepared'].includes(data.status);
- set('statusText',data.mpc_trials?.optimizer_pause?.unit?'Paused for '+data.mpc_trials.optimizer_pause.reason:data.status==='running'?(data.activity==='quiet'?'Running · quiet':'Optimizer running'):human(data.status));
- $('status').dataset.kind=data.status==='failed'||data.status==='not_running'?'error':data.activity==='quiet'||!live?'quiet':'active';
+ set('statusText',data.mpc_trials?.optimizer_pause?.unit?'Paused · simulator test':data.status==='running'?(data.activity==='quiet'?'Running · quiet':'Optimizer running'):human(data.status));
+ $('status').dataset.kind=data.status==='failed'||data.status==='not_running'?'error':data.mpc_trials?.optimizer_pause?.unit||data.activity==='quiet'||!live?'quiet':'active';
  set('connection',`Connected · ${new Date().toLocaleTimeString()} · 2 s polling · last log change ${age(data.log_age_s)} ago`);
  const ep=data.elite_progress||{},branch=ep.active_branch||{},alternatives=ep.recent_alternatives||[];
+ const progress=data.search_progress||{},schedule=ep.schedule||{},task=progress.task||{};
+ set('taskTitle','Current task: '+(task.label||'preparing the next solve'));
+ set('taskGoal',task.goal||'Waiting for this solve’s objective.');
+ set('taskWhy',task.why_continuing||'');
+ set('taskProgress',task.progress||'Waiting for verification evidence.');
+ set('evidenceScope',task.evidence||'No current-solve evidence available.');
+ const objective=task.objective||{};
+ const objectiveValue=value=>value==null?'not recorded':Number(value).toPrecision(6);
+ set('objectiveProgress',objective.latest!=null?
+  `Objective (lower is better): start ${objectiveValue(objective.initial)} → latest ${objectiveValue(objective.latest)} at iteration ${objective.latest_iteration}; saved ${objectiveValue(objective.saved)} at iteration ${objective.saved_iteration??'unknown'}. `+
+  `Latest callback constraint error: ${sci(objective.latest_residual)}. This combined solver cost is not a wall gap or a certified improvement.`:
+  'Objective comparison is not available yet; no improvement is inferred from iteration count.');
+ set('qualitySummary',progress.roomiest_lap_s!=null?
+   `Fastest: ${num(best.lap_s,3)} s. Roomiest alternative: ${num(progress.roomiest_lap_s,3)} s with ${num(progress.roomiest_clearance_cm,2)} cm minimum planned body-to-wall gap. Both source-certified; Unity driving is a separate test.`:
+   'No independently certified clearance alternative yet. Solver iterations alone do not count as progress.');
+ set('searchIntent',`Last certified speed gain ${age(progress.last_speed_gain_age_s)} ago. Saved certificates are separate from the active solve’s verification evidence below.`);
+ renderAcceptance(progress.acceptance);
+ const wallCuts=data.solver?.source_clearance_cuts??data.active?.cuts?.length??0;
+ set('clearanceRepair',`Explicit extra 1 ms wall constraints in this solve: ${wallCuts}. Repair pass ${data.active?.refinement??0}. Newly violated ticks stop the current solve and trigger constraint refinement instead of waiting for its iteration limit.`);
+ set('searchQueue',schedule.policy?`Seed rotation: ${Object.keys(schedule.visits||{}).length} visited; ${(schedule.queue||[]).length} still active. Up to ${schedule.attempts_per_visit} duration starts per visit, each with its full solver budget. Roomiest seed gets the first turn.`:'Building alternative seeds. Time reduction, wall clearance and command smoothness are distinct search goals.');
+ set('thresholdLabel',data.active?.time_predictor?'Relaxed predictor threshold (10⁻⁴; not a certificate)':'Exact-grid threshold (10⁻⁵)');
  set('eliteCount',ep.archived_alternatives??0);
  set('basinsExplored',ep.explored_basins??0);
- set('failedTimeStarts',Math.max(0,(ep.parent_attempts??0)+(ep.current_attempts??0)-(ep.current_attempts===ep.parent_attempts?(ep.parent_attempts??0):0)));
- set('eliteMargin',ep.best_clearance_mm==null?'—':num(ep.best_clearance_mm*1000,3)+' mm');
+ set('failedTimeStarts',ep.failed_time_starts??0);
+ set('eliteMargin',progress.roomiest_clearance_cm==null?'—':num(progress.roomiest_clearance_cm,2)+' cm');
+ set('bestSourceMargin',progress.fastest_clearance_cm==null?'—':num(progress.fastest_clearance_cm,2)+' cm');
+ const portfolio=ep.historical_quality||{},pf=portfolio.best_speed||{},pc=portfolio.best_clearance||{};
+ set('portfolioCount',portfolio.total??0);
+ set('portfolioPareto',portfolio.pareto_count??0);
+ set('portfolioFastest',Number.isFinite(pf.lap_s)?num(pf.lap_s,3)+' s':'—');
+ set('portfolioClearance',Number.isFinite(pc.clearance_slack_m)?
+   num(pc.clearance_slack_m*1000,2)+' mm':'—');
+ set('portfolioTag',(portfolio.total||0)+' SOURCE CERTIFIED');
+ const nondominated=portfolio.pareto||[];
+ reconcileCollection('certifiedPortfolio',JSON.stringify(nondominated),target=>{
+   target.replaceChildren();
+   if(!nondominated.length){const message=document.createElement('p');
+     message.className='empty';message.textContent='No historical independently certified alternatives found for this source model.';target.append(message);return;}
+   const table=document.createElement('table');table.className='attempts';
+   const header=table.createTHead().insertRow();
+   for(const head of ['Source lap','Extra clearance','Steering step RMS','Throttle step RMS','Certification provenance']){
+     const cell=document.createElement('th');cell.textContent=head;header.append(cell);}
+   const body=table.createTBody();
+   for(const item of nondominated.slice(0,20)){
+     const row=body.insertRow();
+     const cells=[num(item.lap_s,3)+' s',
+        num(item.clearance_slack_m*1000,2)+' mm',
+        num(item.steering_step_rms_rad,4)+' rad',
+        num(item.throttle_step_rms,4),
+        item.workspace+(item.map_fingerprint_checked?' · map matched':' · map not fingerprinted')];
+     cells.forEach((value,i)=>{const cell=row.insertCell();cell.textContent=value;
+       if(i===0)cell.className='green';});
+   }
+   target.append(table);
+ });
  const polishing=ep.polishing||{},polishingActive=ep.polishing_active||{};
- const mode=polishing.output?'Same-duration '+(polishingActive.strategy||'clearance/geometry')+
+ const region=polishingActive.adaptive_spec||{}, adaptiveActive=polishingActive.strategy==='adaptive';
+ const mode=adaptiveActive?'Adaptive corner '+((region.sector??0)+1)+'/'+(region.sectors||8)+
+   ' · '+num((region.amplitude_rad||0)*1000,3)+' mrad':
+   polishing.output?'Same-duration '+(polishingActive.strategy||'clearance/geometry')+
    ' IPOPT · attempt '+((polishingActive.index??0)+1)+'/'+(ep.polishing_total||'—'):
     branch.output?'Alternate basin · '+(data.active?.time_predictor?'hybrid-time IPOPT':'25 ms IPOPT'):
     data.active?.time_predictor?'Main basin · hybrid-time IPOPT':
     data.active?.strategy==='drop-packet'?'Main basin · 25 ms packet removal':
     'Main basin · fixed-duration IPOPT';
  set('eliteMode',mode);
- set('eliteBranch',polishing.output?'Seed '+(polishing.seed||'').split('/').at(-2):branch.sha256?branch.sha256.slice(0,14):'Main source-certified witness');
- set('eliteStatus',polishing.output?'BUILDING ALTERNATIVES':branch.output?'SEARCHING ALTERNATIVE':ep.archived_alternatives?'ALTERNATIVES CERTIFIED':ep.enabled?'DIVERSIFICATION ENABLED':'NOT ENABLED');
- set('eliteExplanation',polishing.output?
+ set('eliteBranch',adaptiveActive?(region.source||'adaptive')+
+   ' · apex shift '+num(region.center_shift_sectors||0,2)+' sector':
+   polishing.output?'Seed '+(polishing.seed||'').split('/').at(-2):
+   branch.sha256?num(branch.lap_s,3)+' s seed · '+num(((branch.required_margin_m??.05)+(branch.clearance_slack_m||0))*100,2)+' cm planned gap':'Main source-certified witness');
+ set('eliteStatus',adaptiveActive?'ADAPTIVE CORNER SEARCH':
+    polishing.output?'BUILDING ALTERNATIVES':branch.output?'SEARCHING ALTERNATIVE':ep.archived_alternatives?'ALTERNATIVES CERTIFIED':ep.enabled?'DIVERSIFICATION ENABLED':'NOT ENABLED');
+ set('eliteExplanation',adaptiveActive?
+   'Adaptive source-model corner exploration: high-demand sectors are ranked by curvature and footprint clearance. Infeasible proposals reduce steering amplitude; certified successors are explored with shifted corner timing and increased amplitude. No source timing or collision validation is bypassed.':
+   polishingActive.strategy==='proposal_restoration'?
+  'Restoring a previously better clearance/smoothness proposal into an exact-grid, source-verified trajectory. Passing the required constraints alone does not prove an improvement.':
+  polishing.output?
   'Searching alternative geometries or improving clearance at the unchanged lap duration. Independently certified variants are archived; unsuccessful IPOPT solves are not counted as improvements.':
   branch.output?
    'Searching a different independently certified witness at the same starting lap duration; both command-packet reduction and hybrid-time proposals are active. A new incumbent requires a strictly faster independently validated source lap.':
@@ -532,17 +731,18 @@ function render(data){
    'Standard single-incumbent search. Equal-time diversification is not configured for this workspace.');
  set('bestLap',best.lap_s==null?'—':`${num(best.lap_s)} s`);set('bestSub',best.lap_s==null?'No validated export yet':`${data.history.length} certified exports · verified direction`);
  set('trialLap',trial==null?'—':`${num(trial)} s`);const gain=best.lap_s!=null&&trial!=null?best.lap_s-trial:null;
- set('trialSub',data.active?.time_predictor?'Time predictor · requires exact command repair':gain!=null&&gain>0?`Seeking ${num(gain)} s gain · not validated`:trial!=null?'Current solve · not validated':'No active trial');
+ set('trialLabel',task.fixed_duration?'Fixed lap time · quality search':'Current trial');
+ set('trialSub',task.fixed_duration?task.label+' · not a shorter-time trial':data.active?.time_predictor?'Time predictor · requires exact command repair':gain!=null&&gain>0?`Seeking ${num(gain)} s gain · not validated`:trial!=null?'Current solve · not validated':'No active trial');
  set('iteration',data.iteration??'—');set('iterationSub',`of ${data.solver?.max_iterations??c.iterations??'—'} per solve · ${c.stagnation_iterations??'—'} stagnation patience · resets for each new candidate`);
  set('bestResidual',sci(cp?.residual));set('residualSub',cp?`Saved at iteration ${cp.iteration}`:'No checkpoint in current solve yet');
  set('currentResidual',sci(current));set('initialResidual',sci(initial));
- const raw=data.ipopt||{};set('rawResidual',sci(raw.primal_infeasibility));set('rawIteration',raw.iteration??'—');
+ const raw=data.ipopt||{};set('rawResidual',sci(raw.primal_infeasibility));set('rawDual',sci(raw.dual_infeasibility));set('rawIteration',raw.iteration??'—');
  set('ipoptMode',raw.restoration?'RESTORATION':'DIAGNOSTIC');
  const lowest=data.residuals.length?Math.min(...data.residuals.filter(p=>p.residual!=null).map(p=>p.residual)):null;
  set('residualGain',initial>0&&lowest!=null?`${num((1-lowest/initial)*100,1)}%`:'—');
  set('solveTag',data.solve_report?'CHECKS COMPLETE':data.iteration!=null?'SOLVING · '+data.iteration:'SETTING UP');
  set('gainsTag',`${data.history.length} EXPORTS`);const history=data.history;
- set('historyNote',history.length>1?`${num(history[0].lap_s)} s → ${num(history.at(-1).lap_s)} s · ${num(history[0].lap_s-history.at(-1).lap_s)} s saved since first export. No reliable ETA to the final plateau.`:'The campaign saves each accepted improvement. There is no fixed target-time stopping goal.');
+ set('historyNote',history.length>1?`${history.length} certified alternatives; fastest ${num(best.lap_s)} s. Slower points can improve clearance or smoothness. No reliable ETA or claim of global optimum.`:'The campaign saves certified speed and quality alternatives. There is no fixed target-time stopping goal.');
  const stageNames={centerline_and_geometry:'Extracting map geometry',periodic_bootstrap:'Repairing the first periodic lap',adaptive_minimum_time_search:'Searching for a faster feasible lap',finished:isFinished?'Search stopped at its configured boundary':'Search finished',interrupted:'Optimizer interrupted',failed:'Optimizer failed',prepared:'Geometry prepared'};
  set('stageTitle',stageNames[data.stage]||human(data.stage));
  set('stageText',data.stage==='adaptive_minimum_time_search'?

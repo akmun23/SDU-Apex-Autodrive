@@ -277,6 +277,21 @@ TEST(MpcReference, SourceWitnessSeedsTorqueAndUsesItsLateralReferences)
       refs[1].right_bound, &c, 2, &lower_slack, &upper_slack));
   EXPECT_GE(lower_slack,.04999f);
   EXPECT_GE(upper_slack,.04999f);
+  // Removing the optional soft target shift restores the native path without
+  // weakening the body-footprint wall constraints or altering witness states.
+  const float shifted_left_bound = refs[1].left_bound;
+  const float shifted_right_bound = refs[1].right_bound;
+  c.reference_clearance_reserve_m=0.f;
+  ASSERT_TRUE(mpc_rti_build_nominal(&initial, 0., nullptr, points, count, length,
+      PREDICTION_DT_SECONDS, PREDICTION_HORIZON, &c, &nominal, refs));
+  EXPECT_FLOAT_EQ(refs[1].e_y,0.f);
+  EXPECT_FLOAT_EQ(refs[1].e_psi,.07f);
+  EXPECT_FLOAT_EQ(refs[1].v,-.2f);
+  EXPECT_FLOAT_EQ(refs[1].r,.3f);
+  EXPECT_FLOAT_EQ(refs[1].source_steering_target,.04f);
+  EXPECT_FLOAT_EQ(refs[1].left_bound,shifted_left_bound);
+  EXPECT_FLOAT_EQ(refs[1].right_bound,shifted_right_bound);
+  EXPECT_FLOAT_EQ(c.corridor_margin_m,.05f);
 }
 
 TEST(MpcReference, ProgressSensitivityPersistsAcrossLaterStages)
@@ -1191,7 +1206,8 @@ TEST(MpcRtiDirectInputCondensing, PreservesPlantJacobianAndBasePoint)
       references, horizon, PREDICTION_DT_SECONDS,
       &no_steering_slew_config, &no_steering_slew_problem));
   const float expected_reference_slew_linear_term =
-      2.0f * config.weight_steering_slew * 0.01f;
+      2.f * config.weight_steering_slew *
+      (references[1].steering_command - references[0].steering_command);
   EXPECT_NEAR(problem.steps[0].q[
           MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND] -
           no_steering_slew_problem.steps[0].q[
@@ -1200,9 +1216,8 @@ TEST(MpcRtiDirectInputCondensing, PreservesPlantJacobianAndBasePoint)
   EXPECT_NEAR(problem.steps[0].r[0] -
           no_steering_slew_problem.steps[0].r[0],
       -expected_reference_slew_linear_term, 1.0e-5f);
-  // The source's target can change while the rack is still rate-limited.
-  // Compare the exact same plant/QP with and without its slew cost, and verify
-  // that it follows TARGET changes, never the physical-rack reference changes.
+  // Native commanded-target jumps must not replace the physical rack/path
+  // increments used by the successful v1 objective.
   MpcRtiReference_t source_references[PREDICTION_HORIZON + 1];
   std::copy_n(references, PREDICTION_HORIZON + 1, source_references);
   for (int k = 0; k <= horizon; ++k) {
@@ -1216,10 +1231,8 @@ TEST(MpcRtiDirectInputCondensing, PreservesPlantJacobianAndBasePoint)
   ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal_states, nominal_controls,
       source_references, horizon, PREDICTION_DT_SECONDS, &no_steering_slew_config, &source_no_slew));
   for (int k : {0, 1, 2}) {
-    const float previous = k == 0 ? nominal_states[0].plant.delayed_steering_command_2 :
-        source_references[k - 1].source_steering_target;
-    const float expected = 2.f*config.weight_steering_slew *
-        (source_references[k].source_steering_target - previous);
+    const float expected = 2.f * config.weight_steering_slew *
+        (source_references[k + 1].steering_command - source_references[k].steering_command);
     EXPECT_NEAR(source_problem.steps[k].r[0] - source_no_slew.steps[k].r[0], -expected, 1.e-5f);
     EXPECT_NEAR(source_problem.steps[k].q[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND] -
         source_no_slew.steps[k].q[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND], expected, 1.e-5f);
@@ -2066,6 +2079,53 @@ TEST(MpcRti, IterationLimitedCandidateIsAcceptedOnlyAfterExactValidation)
   EXPECT_EQ(result.solver_iterations, 0);
 }
 
+TEST(MpcRtiObjective, FrozenTargetsKeepCandidateProgressCorridorExact)
+{
+  MpcTrajectorySample_t trajectory[] = {
+      {0.,0.,0.,0.,0.,2.,2.,2.,0.},
+      {10.,10.,0.,0.,0.,2.,.30,2.,0.},
+      {20.,20.,0.,0.,0.,2.,2.,2.,0.}};
+  size_t count=3;
+  double length=0.;
+  ASSERT_TRUE(mpc_trajectory_prepare(trajectory,&count,&length));
+  MpcRtiCycleConfiguration_t config{};
+  config.model.weight_e_y=10.f;
+  config.model.weight_u=2.f;
+  config.model.weight_u_overspeed=10.f;
+  config.model.weight_steering_target=3.f;
+  config.model.terminal_multiplier=2.f;
+  config.model.corridor_margin_m=.05f;
+  config.model.first_prediction_corridor_margin_m=.05f;
+  MpcRtiNominal_t plan{};
+  plan.valid=1;
+  plan.horizon=1;
+  plan.controls[0]={.1f,.2f};
+  for (int k=0;k<2;++k) {
+    plan.states[k].plant.u=2.f;
+    plan.states[k].plant.e_y=.2f;
+  }
+  MpcRtiReference_t references[PREDICTION_HORIZON+1]{};
+  for (int k=0;k<2;++k) {
+    references[k].u=2.f;
+    references[k].source_witness_valid=1;
+    references[k].source_steering_target=.2f;
+    references[k].left_bound=references[k].right_bound=100.f;
+  }
+  MpcRtiObjectiveSchedule_t schedule{};
+  ASSERT_TRUE(mpc_rti_build_objective_schedule(&plan,references,&config.model,&schedule));
+  config.objective_schedule=&schedule;
+  plan.progress[1]=.1;
+  ASSERT_TRUE(mpc_rti_score_candidate_plan(&plan,trajectory,count,length,&config));
+  const float objective=plan.validation_objective;
+  plan.progress[1]=5.;
+  ASSERT_TRUE(mpc_rti_score_candidate_plan(&plan,trajectory,count,length,&config));
+  EXPECT_FLOAT_EQ(plan.validation_objective,objective);
+  // The frozen objective's deliberately wide bounds cannot widen the real
+  // wall corridor sampled at the candidate's new progress.
+  plan.progress[1]=10.;
+  EXPECT_FALSE(mpc_rti_score_candidate_plan(&plan,trajectory,count,length,&config));
+}
+
 TEST(MpcRtiCostGradient, CondensedDirectionMatchesExactRollout)
 {
   for (int scenario : {0, -1, 1, 3, -2, 2}) {
@@ -2095,11 +2155,11 @@ TEST(MpcRtiCostGradient, CondensedDirectionMatchesExactRollout)
     if (source_witness) {
       for (auto &p : samples) {
         p.source_witness_valid=1;
-        p.source_heading_error=.03*direction;
-        p.source_v_rear=-.1*direction;
-        p.source_yaw_rate=.2*direction;
-        p.source_physical_steering=.03*direction;
-        p.source_steering_target=.04*direction;
+        p.source_heading_error=.03*direction+.01*std::sin(.3*p.s);
+        p.source_v_rear=-.1*direction+.04*std::sin(.6*p.s);
+        p.source_yaw_rate=.2*direction+.2*std::sin(.4*p.s);
+        p.source_physical_steering=.03*direction+.02*std::sin(.3*p.s);
+        p.source_steering_target=.04*direction+.06*std::sin(.8*p.s);
         p.source_throttle=.2;
       }
     }
@@ -2148,6 +2208,9 @@ TEST(MpcRtiCostGradient, CondensedDirectionMatchesExactRollout)
     MpcRtiProblem_t problem{};
     ASSERT_TRUE(mpc_rti_build_ltv_qp(nominal.states, nominal.controls,
         references, PREDICTION_HORIZON, PREDICTION_DT_SECONDS, &c, &problem));
+    MpcRtiObjectiveSchedule_t schedule{};
+    ASSERT_TRUE(mpc_rti_build_objective_schedule(&nominal,references,&c,&schedule));
+    config.objective_schedule=&schedule;
     for (int input : {0, 1}) {
       for (int changed_stage : {0, 8, 20}) {
         double x[RICCATI_MAX_NX], dx[RICCATI_MAX_NX]{};
@@ -2186,7 +2249,7 @@ TEST(MpcRtiCostGradient, CondensedDirectionMatchesExactRollout)
         }
         for (int i = 0; i < RICCATI_MAX_NX; ++i)
           derivative += (problem.terminal_Q[i] * x[i] + problem.terminal_q[i]) * dx[i];
-        float costs[2];
+        double costs[2];
         constexpr float epsilon = .0001f;
         // A 5e-4 throttle perturbation produced a 1--2% recursive secant/local
         // gradient difference. Use 1e-4 for the local check; do not mistake the
@@ -2424,6 +2487,48 @@ TEST(MpcSlipCost, SourceSlipLossEntersQpAndExactStageObjective)
       scheduled_underspeed_problem.steps[1].Q_diag[MPC_OPT_IDX_U] -
           uniform_underspeed_problem.steps[1].Q_diag[MPC_OPT_IDX_U],
       2.0f * (40.0f / 3.0f - 40.0f), 1.0e-3f);
+}
+
+TEST(VehicleModelSourceRollout, SensitivityOnlyRtiMatchesFullAffineJacobian)
+{
+  /* The RTI-only no-affine variant must retain identical source derivatives
+   * and branch diagnostics for the same known PhysX stage. */
+  for (float steering : {-0.2f, 0.0f, 0.22f}) {
+    MpcModelState_t state = turning_state();
+    state.u = 4.0f;
+    state.actual_steering_angle = steering;
+    state.e_y = 0.02f;
+    state.e_psi = -0.04f;
+    ASSERT_TRUE(vehicle_model_initialize_plant_state(&state));
+    const MpcModelControl_t control{steering, 0.2f};
+    const auto step = mpc_vehicle_model_step(&state, &control, 0.025f, 0.0f);
+    ASSERT_TRUE(step.valid);
+    MpcStageLinearization_t full{};
+    MpcStageLinearization_t fast{};
+    ASSERT_TRUE(mpc_model_linearize_from_known_step(
+        &state, &control, 0.025f, 0.0f, &step, &full));
+    ASSERT_TRUE(mpc_model_linearize_sensitivities_from_known_step(
+        &state, &control, 0.025f, 0.0f, &step, &fast));
+    EXPECT_EQ(fast.valid, full.valid);
+    EXPECT_EQ(fast.nominal_branch_flags, full.nominal_branch_flags);
+    EXPECT_EQ(fast.nonsmooth_column_mask, full.nonsmooth_column_mask);
+    EXPECT_EQ(fast.nonsmooth_column_count, full.nonsmooth_column_count);
+    EXPECT_EQ(fast.finite_difference_column_count, full.finite_difference_column_count);
+    EXPECT_EQ(fast.source_sensitivity_call_count, full.source_sensitivity_call_count);
+    EXPECT_EQ(0, std::memcmp(fast.A, full.A, sizeof(full.A)));
+    EXPECT_EQ(0, std::memcmp(fast.B, full.B, sizeof(full.B)));
+    EXPECT_EQ(0, std::memcmp(fast.body_motion_A, full.body_motion_A,
+                             sizeof(full.body_motion_A)));
+    EXPECT_EQ(0, std::memcmp(fast.body_motion_B, full.body_motion_B,
+                             sizeof(full.body_motion_B)));
+    EXPECT_EQ(0, std::memcmp(fast.maximum_slip_excess_A,
+                             full.maximum_slip_excess_A,
+                             sizeof(full.maximum_slip_excess_A)));
+    EXPECT_EQ(0, std::memcmp(fast.maximum_slip_excess_B,
+                             full.maximum_slip_excess_B,
+                             sizeof(full.maximum_slip_excess_B)));
+    for (float d : fast.d) EXPECT_FLOAT_EQ(d, 0.0f);
+  }
 }
 
 TEST(VehicleModelSourceRollout, JacobianDifferentiatesTheSameSourceStep)
