@@ -76,6 +76,36 @@ class SourceRolloutCaseIndexTest(unittest.TestCase):
             result["summary"]["strict_matches"], 1)
         self.assertIsNone(result["pairs"][0]["feature_delta"]["progress_m"])
 
+    def test_endpoint_reference_pose_and_source_motion_are_separate(self) -> None:
+        reference_error = _window(10_000, error=.08)
+        reference_error.update(xy_m=.08, plant_vs_twist_world_x=.006,
+                               plant_vs_twist_world_y=.0,
+                               truth_twist_world_x=.074,
+                               truth_twist_world_y=.0,
+                               truth_pose_twist_closure_max_m=.012)
+        source_error = _window(20_000, error=.09)
+        source_error.update(xy_m=.09, plant_vs_twist_world_x=.078,
+                            plant_vs_twist_world_y=.0,
+                            truth_twist_world_x=.012,
+                            truth_twist_world_y=.0,
+                            truth_pose_twist_closure_max_m=.011)
+        control = _window(30_000, error=.01)
+        control.update(xy_m=.01, plant_vs_twist_world_x=.004,
+                       plant_vs_twist_world_y=.0, truth_twist_world_x=.006,
+                       truth_twist_world_y=.0)
+        result = evaluator._build_source_rollout_case_index(
+            [reference_error, source_error, control], {})
+        summary = result["summary"]
+        self.assertEqual(summary["full_path_over_5cm"], 2)
+        self.assertEqual(summary["endpoint_truth_attribution_count"], 3)
+        self.assertEqual(summary["endpoint_reference_pose_dominated"], 1)
+        self.assertEqual(summary["endpoint_source_motion_dominated"], 1)
+        self.assertEqual(summary["endpoint_source_vs_unity_twist_over_5cm"], 1)
+        self.assertEqual(summary["endpoint_unity_twist_vs_pose_over_5cm"], 1)
+        self.assertEqual(
+            {r["classification"] for r in result["endpoint_truth_attribution"]},
+            {"source_motion_dominated", "reference_pose_dominated"})
+
     def test_truth_pose_twist_discontinuity_is_not_scored_as_model_failure(self) -> None:
         contaminated = _window(1_000_000_000, error=0.30)
         contaminated["truth_pose_twist_closure_max_m"] = 0.34

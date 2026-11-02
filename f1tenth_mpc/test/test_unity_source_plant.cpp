@@ -310,6 +310,88 @@ TEST(UnitySourcePlant, ForwardSensitivitiesMatchSmoothBranchDifferences)
   }
 }
 
+TEST(UnitySourcePlant, ActualRaceHighSteerSlipJacobianMatchesLocalSource)
+{
+  // Recorded exact source state from a fully completed 49.104s race
+  // (stamp=1793554724271802658): 2.43m/s, -0.426rad rack, r=-3.13rad/s,
+  // large lateral slip and roll. This is the physically difficult regime in
+  // which finite 10^-5 attitude/jounce differences can switch tire branches.
+  // The QP MUST retain the correct *local* source Jacobian; it must not
+  // confuse this first derivative with a valid long-step linear model.
+  auto state = state_at_speed(2.4328919425940874);
+  state.v_mps = -0.46965857369047104;
+  state.yaw_rate_radps = -3.1298;
+  state.wheel_omega_radps = {54.10617949432098, 54.86846405988446,
+                             49.23056577931635, 50.103356173729836};
+  state.body_height_m = 0.0042854783209262635;
+  state.body_height_rate_mps = -0.0006659972217720152;
+  state.roll_rad = -0.07576734860993374;
+  state.roll_rate_radps = 0.1122;
+  state.pitch_rad = 0.05662826068699716;
+  state.pitch_rate_radps = 0.0486;
+  state.physical_steering_rad = -0.42568582719828624;
+  state.suspension_jounce_m = {0.013184991097413112,
+      -0.004451872282625946, 0.004658395210780819,
+      -0.013310263141604828};
+  state.suspension_history_initialized = true;
+  const f1tenth_mpc::UnitySourcePlantInput control{
+      -0.4277801996638101, 0.13};
+  f1tenth_mpc::UnitySourcePlantSensitivitySeeds seeds{};
+  seeds.state[UNITY_SOURCE_PITCH][0] = 1.0;
+  seeds.state[UNITY_SOURCE_SUSPENSION_JOUNCE_RL][1] = 1.0;
+  seeds.steering_target[2] = 1.0;
+  seeds.throttle[3] = 1.0;
+  f1tenth_mpc::UnitySourcePlantSensitivity jac{};
+  ASSERT_TRUE(unity_source_plant_step_with_sensitivities(
+      state, control, 0.025, seeds, &jac));
+  // Small, source-representable perturbations: larger changes belong to
+  // nonlinear physical shooting / SQP relinearization, not local A/B tests.
+  constexpr double eps[] = {1.0e-8, 1.0e-8, 1.0e-7, 1.0e-6};
+  for (int lane = 0; lane < 4; ++lane) {
+    auto plus = state, minus = state;
+    auto control_plus = control, control_minus = control;
+    if (lane == 0) {
+      plus.pitch_rad += eps[lane];
+      minus.pitch_rad -= eps[lane];
+    } else if (lane == 1) {
+      plus.suspension_jounce_m[2] += eps[lane];
+      minus.suspension_jounce_m[2] -= eps[lane];
+    } else if (lane == 2) {
+      control_plus.steering_target_rad += eps[lane];
+      control_minus.steering_target_rad -= eps[lane];
+    } else {
+      control_plus.throttle_normalized += eps[lane];
+      control_minus.throttle_normalized -= eps[lane];
+    }
+    f1tenth_mpc::UnitySourcePlantOutput high{}, low{};
+    ASSERT_TRUE(unity_source_plant_step(
+        plus, control_plus, 0.025, &high));
+    ASSERT_TRUE(unity_source_plant_step(
+        minus, control_minus, 0.025, &low));
+    const auto check = [&](double ad, double a, double b, const char *label) {
+      const double fd = (a - b) / (2.0 * eps[lane]);
+      EXPECT_NEAR(ad, fd, 0.001 + 0.003 * std::abs(fd))
+          << "lane=" << lane << " component=" << label
+          << " ad=" << ad << " source_fd=" << fd;
+    };
+    check(jac.state[UNITY_SOURCE_YAW_RATE][lane],
+          high.state.yaw_rate_radps, low.state.yaw_rate_radps, "yaw_rate");
+    check(jac.state[UNITY_SOURCE_U][lane],
+          high.state.u_mps, low.state.u_mps, "u");
+    check(jac.state[UNITY_SOURCE_V][lane],
+          high.state.v_mps, low.state.v_mps, "v");
+    check(jac.state[UNITY_SOURCE_WHEEL_OMEGA_RL][lane],
+          high.state.wheel_omega_radps[2],
+          low.state.wheel_omega_radps[2], "omega_rl");
+    check(jac.yaw_delta[lane],
+          high.integrated_yaw_delta_rad,
+          low.integrated_yaw_delta_rad, "integrated_yaw");
+    check(jac.body_lateral_displacement[lane],
+          high.integrated_body_lateral_displacement_m,
+          low.integrated_body_lateral_displacement_m, "integrated_lateral");
+  }
+}
+
 TEST(UnitySourcePlant, ForwardSensitivitiesSupportUpperEightLanes)
 {
   auto state = state_at_speed(6.2);

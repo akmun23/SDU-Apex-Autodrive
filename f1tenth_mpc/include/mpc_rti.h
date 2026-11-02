@@ -61,6 +61,10 @@ typedef struct
 {
     MpcRtiReference_t references[PREDICTION_HORIZON + 1];
     float speed_weights[PREDICTION_HORIZON + 1];
+    MpcRtiReference_t terminal_targets[3];
+    float terminal_speed_weights[3];
+    float terminal_prediction_dt;
+    int terminal_targets_valid;
     int horizon;
     int valid;
 } MpcRtiObjectiveSchedule_t;
@@ -91,21 +95,29 @@ typedef struct
     float weight_v;
     float weight_r;
     float weight_steering_command;
-    /* Native commanded-target tracking when a source witness is available;
-     * zero-effort regularization for geometry-only references. */
+    /* Geometric steering target from path curvature, not IPOPT steering
+     * actuator output; applies equally to source-derived geometry. */
     float weight_steering_target;
     float weight_throttle_command;
     /* Steering changes relative to the loaded rack/feedforward increment;
      * throttle changes remain zero-centered. Anchor the previous input to
      * the command actually issued, not an unexecuted optimizer proposal. */
     float weight_steering_slew;
+    /* Convex pseudo-Huber total variation of steering CORRECTION changes.
+     * QP uses a locally tangent quadratic majorizer, exact merit uses the
+     * same smooth cost. Allows large curvature-demanded changes without
+     * clipping SQP inputs to a nominal trust box. Zero restores legacy cost. */
+    float weight_steering_correction_variation;
+    float steering_correction_variation_epsilon_rad;
     float weight_throttle_slew;
-    /* Local SQP decision radius about each nominal input. Zero disables the
-     * corresponding bound. These bound a linearization step, not actuator
-     * slew across physical epochs; successive solves can traverse the full
-     * command envelope. */
-    float sqp_steering_trust_region_rad;
-    float sqp_throttle_trust_region;
+    /* The normal Riccati QP may optimize physical command INCREMENTS
+     * instead of unrestricted absolute steering/throttle commands.
+     * These limits apply to successive ACTUAL
+     * command targets across the horizon, independently of nominal/iterate.
+     * Zero keeps the original absolute-input QP implementation. */
+    int command_increment_qp_enabled;
+    float max_steering_command_step_rad;
+    float max_throttle_command_step;
     /* Optional cold-nominal drive seed when launching below 0.5 m/s toward
      * a materially faster reference. This initializes the linearization only;
      * the optimizer remains free to reduce or reject the command. */
@@ -119,14 +131,17 @@ typedef struct
     float first_prediction_corridor_margin_m;
     float corridor_preview_halfwidth_m;
     float nonlinear_corridor_tolerance_m;
-    /* FD oracle is available only in BUILD_TESTING builds for A/B replay. */
-    int use_fd_jacobian_oracle;
     /* Independent horizon-stage Jacobians; zero selects the serial fallback. */
     int jacobian_threads;
     /* Soft geometric reference reserve beyond the HARD wall-clearance margin.
      * Moves the lateral target away from a tight wall when space permits;
      * does not tighten/relax constraints or change the loaded path/speeds. */
     float reference_clearance_reserve_m;
+    /* Opt-in physical-footprint-aware frozen lateral target bias. At a
+     * nominal stage whose actual body clearance is below this reserve above
+     * the existing hard corridor, move that stage's lateral cost target away
+     * from the nearby wall. This is an objective target, not relaxed geometry. */
+    float near_wall_tracking_reserve_m;
     /* Experimental authoritative swept-world-body check using loaded map,
      * not an extra polygon QP constraint. Fail closed when map unavailable.
      * Callback inputs are two successive source-plant derived rear-axle poses
@@ -186,7 +201,6 @@ typedef struct
     double cold_start_queue_seed_us;
     double nominal_rollout_a_us;
     double progress_reference_resampling_us;
-    double nominal_rollout_b_us;
     MpcRtiNominalBuildFailureStage_t build_failure_stage;
     MpcRtiCommandEnvelopeFailure_t build_failure_constraint;
     int build_failure_index;
@@ -199,7 +213,8 @@ typedef enum
     MPC_RTI_ROLLOUT_INVALID_MODEL,
     MPC_RTI_ROLLOUT_COMMAND_LIMIT,
     MPC_RTI_ROLLOUT_STATE_LIMIT,
-    MPC_RTI_ROLLOUT_CORRIDOR
+    MPC_RTI_ROLLOUT_CORRIDOR,
+    MPC_RTI_ROLLOUT_TERMINAL_VIABILITY
 } MpcRtiRolloutStatus_t;
 
 /* Details of the first state that made an exact nonlinear candidate
@@ -220,6 +235,7 @@ typedef struct
 typedef struct
 {
     RiccatiStepData_t steps[RICCATI_HORIZON];
+    RiccatiTerminalConstraints_t terminal_constraints;
     float terminal_Q[RICCATI_MAX_NX];
     float terminal_q[RICCATI_MAX_NX];
     float terminal_x_lb[RICCATI_MAX_NX];
@@ -249,8 +265,7 @@ typedef struct
  * rollout, the physical footprint, or the command publication gate. */
 int mpc_rti_prepare_feasibility_restoration_qp(
     MpcRtiProblem_t *problem, const MpcRtiNominal_t *nominal,
-    float relaxation_m, float wall_weight,
-    const MpcRtiConfiguration_t *model);
+    float relaxation_m, float wall_weight);
 
 /* Offline replay only. When non-NULL, solve_rti_pass copies the exact QP,
  * effective solver configuration, pre-solve ADMM memory, and raw solver result
@@ -281,6 +296,13 @@ typedef struct
      * check. Stage zero is measured input and is not corridor-constrained. */
     float lower_corridor_slack_m[PREDICTION_HORIZON + 1];
     float upper_corridor_slack_m[PREDICTION_HORIZON + 1];
+    /* When obtained from one complete exact nonlinear rollout, the world
+     * reference is already sampled at each physical stage. Reuse it only
+     * for an UNCHANGED trajectory, where all progress and speed references
+     * match exactly; otherwise resample during objective evaluation. */
+    MpcRtiReference_t sampled_reference[PREDICTION_HORIZON + 1];
+    double sampled_progress[PREDICTION_HORIZON + 1];
+    int sampled_references_valid;
 } MpcRtiCandidatePathDelta_t;
 
 /* Diagnostic form of the nonlinear corridor test, using the same vehicle
@@ -306,6 +328,9 @@ typedef struct
 {
     MpcRtiConfiguration_t model;
     RiccatiAdmmConfig_t solver;
+    /* Stage-zero request epoch. Zero preserves legacy offline one-stage
+     * advancement; the runtime supplies its explicit predicted epoch. */
+    int64_t command_epoch_ns;
     /* Relative end-to-end budget for offline callers; zero means unbounded. */
     double max_cycle_time_us;
     /* Optional absolute CLOCK_MONOTONIC deadline in microseconds. When set,
@@ -319,16 +344,29 @@ typedef struct
     /* Reuse the QP's Riccati feedback during nonlinear forward trials. Every
      * resulting command and state still passes the ordinary exact checks. */
     int feedback_rollout;
-    int line_search_max_backtracks; /* 0..4: alpha halves through 0.0625 */
+    /* Opt-in gain damping for closed-loop nonlinear source rollout.
+     * Full-scale feedback is 1.0; zero is open-loop gain correction. The
+     * exact physical rollout and all hard acceptance checks are unchanged. */
+    float feedback_rollout_gain_scale;
+    int line_search_max_backtracks; /* 0..4: exact-validated alpha down to 1/16 */
     int line_search_command_epoch_valid;
-    /* Zero/one preserves the single RTI pass. Two enables one deadline-gated
-     * relinearization after a rejected corridor step or alpha=0 no-op. */
+    /* One or two full SQP passes at the SAME command epoch. With two,
+     * a physically certified first iterate seeds deadline-gated exact
+     * nonlinear relinearization, and the better exact-valid cost wins. */
     int max_sqp_iterations;
-    /* Optional fast path: a first-pass exact-valid full horizon is already
-     * safe. Reserve a second SQP for rejected nonlinear horizons instead of
-     * spending Jacobian + ADMM on accepted damped solutions. The ordinary
-     * full physical/safety validations remain unchanged. */
-    int skip_sqp_refinement_after_first_valid_horizon;
+    /* Source-informed curvature within the normal constrained QP.
+     * Uses the exact-trajectory adjoint secant to damp finite-step model
+     * error without changing its gradient. No post-QP second controller. */
+    int source_informed_sqp;
+    /* Model a held-command 75ms source continuation inside the QP and
+     * exact merit, including future footprint and dynamic constraints. */
+    int terminal_viability;
+    /* Experimental R1/R2 tie-break: when both full horizons are physically
+     * valid, but at least one ends close to a wall or dynamically unstable,
+     * prefer a candidate with a source-validated 75ms legal continuation.
+     * Never accepts an unchecked action or discards both valid solutions.
+     * Default disabled pending repeated full-race validation. */
+    int prefer_terminal_continuable_refinement;
     /* Optional one extra Phase-I ADMM solve on the SAME 30-stage Jacobians
      * after a rejected full nonlinear corridor rollout. QP constraints may
      * be softened; a published action MUST pass the untouched source-plant
@@ -343,10 +381,12 @@ typedef struct
     /* Capture already-computed source-output samples for runtime diagnostics.
      * When false, exact rollouts do not retain or copy this debug data. */
     int capture_diagnostic_outputs;
-    /* Optional offline-only POD sink. Must remain NULL in production. */
+    /* Optional diagnostic sinks, disabled by default. Each pass receives its
+     * own complete QP and exact pre/post ADMM state; never alias the two. */
     MpcRtiQpCapture_t *qp_capture;
-    /* Optional shared comparison objective for independently validated plans.
-     * solve_rti_pass builds its own schedule for its QP and line search. */
+    MpcRtiQpCapture_t *qp_capture_second_pass;
+    /* Immutable cycle objective shared by both QP passes, exact merit and
+     * any independently validated plan comparisons. */
     const MpcRtiObjectiveSchedule_t *objective_schedule;
 } MpcRtiCycleConfiguration_t;
 
@@ -356,11 +396,14 @@ typedef struct
     /* Last full-horizon nominal retained for progress seeding. This is not
      * the certified plan that may be replayed after a rejected solve. */
     MpcRtiNominal_t nominal;
-    /* Current sequence, including the command just issued at element zero.
-     * The next nominal shifts it once, so stage zero matches the next action. */
+    /* Sequence rooted at command_epoch_ns. Runtime advances by elapsed
+     * command stages; same-epoch callbacks must not consume its first action. */
     MpcModelControl_t warm_start_controls[PREDICTION_HORIZON];
     int warm_start_control_count;
     int warm_start_controls_valid;
+    int64_t command_epoch_ns;
+    double solver_nominal_progress[PREDICTION_HORIZON + 1];
+    int solver_nominal_progress_valid;
 } MpcRtiMemory_t;
 
 typedef enum
@@ -424,13 +467,31 @@ typedef struct
     int sqp_iterations_attempted;
     int sqp_iterations_completed;
     int sqp_iterations_accepted;
+    int experimental_source_nonlinear_selected;
+    int source_nonlinear_exact_evaluations;
+    int source_nonlinear_gradient_discrepancies;
+    int source_nonlinear_timed_out;
+    double source_nonlinear_wall_us;
+    double source_nonlinear_objective_improvement;
+    int source_nonlinear_terminal_probe_count;
+    int source_nonlinear_terminal_rejected;
     /* Only compared when neither SQP pass has a valid complete horizon.
      * This selects a proposal for the controller's independent prefix gate;
      * it never certifies the rejected tail. 0=not compared, 1=first, 2=second. */
+    int refinement_full_horizon_selected_pass; /* 0=none, 1=R1, 2=R2 */
+    int refinement_terminal_probe_count;
+    int refinement_terminal_selected_pass;
+    double refinement_terminal_probe_us;
+    double refinement_nominal_build_us;
     int refinement_prefix_selected_pass;
     double refinement_first_prefix_objective;
     double refinement_second_prefix_objective;
     double refinement_prefix_validation_us;
+    double first_pass_objective;
+    double second_pass_objective;
+    double exact_objective_improvement;
+    double source_directional_derivative;
+    double source_curvature_regularization[2];
     int admm_status;
     float primal_residual;
     float dual_residual;
@@ -478,6 +539,8 @@ typedef struct
     int nominal_control_count;
     /* 0=cold seed, 1=shifted prior nominal, 2=issued command sequence. */
     int nominal_control_seed_source;
+    /* -1=cold/unusable epoch; otherwise elapsed 25ms control stages. */
+    int command_epoch_shift_stages;
     float rho_start;
     float rho_u_start;
     float rho_final;
@@ -519,7 +582,6 @@ typedef struct
     double cold_start_queue_seed_us;
     double nominal_rollout_a_us;
     double progress_reference_resampling_us;
-    double nominal_rollout_b_us;
     double admm_us;
     /* Actual thread CPU spent in ADMM, excluding OS descheduling, per solve. */
     double admm_thread_cpu_us;
@@ -545,6 +607,26 @@ int mpc_rti_score_candidate_plan(
     double lap_length, const MpcRtiCycleConfiguration_t *configuration);
 
 /* Build an absolute-state/input affine LTV QP from a nonlinear nominal. */
+/* Convert normal QP from absolute commands u to delta commands du.
+ * The augmented previous-command state becomes the actual command at
+ * each stage. This exactly preserves quadratic costs and plant dynamics
+ * while enforcing local command step constraints via ADMM boxes.
+ * Returns 0 rather than silently discarding unsupported cross terms. */
+int mpc_rti_transform_qp_to_command_increments(
+    MpcRtiProblem_t *problem, const MpcRtiConfiguration_t *configuration);
+
+/* Stage source A/B and corridor constraints follow the physically integrated
+ * nominal, while target weights follow the frozen exact nonlinear objective. */
+int mpc_rti_build_ltv_qp_with_objective_schedule(
+    const MpcRtiState_t nominal_states[PREDICTION_HORIZON + 1],
+    const MpcModelControl_t nominal_controls[PREDICTION_HORIZON],
+    const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
+    int horizon,
+    float prediction_dt,
+    const MpcRtiConfiguration_t *configuration,
+    const MpcRtiObjectiveSchedule_t *objective_schedule,
+    MpcRtiProblem_t *problem);
+
 int mpc_rti_build_ltv_qp(
     const MpcRtiState_t nominal_states[PREDICTION_HORIZON + 1],
     const MpcModelControl_t nominal_controls[PREDICTION_HORIZON],
@@ -587,6 +669,139 @@ int mpc_rti_build_nominal_with_warm_start(
     MpcRtiNominal_t *nominal,
     MpcRtiReference_t references[PREDICTION_HORIZON + 1]);
 
+/* Rebuild a nonlinear SQP nominal at the SAME physical command epoch.
+ * Unlike next-cycle warm_start(), this DOES NOT shift the supplied actuator
+ * commands forward one optimization stage. Exposing the distinction avoids
+ * accidental one-stage phase errors in RTI relinearization and offline
+ * derivative/curvature audits. */
+int mpc_rti_build_nominal_same_epoch(
+    const MpcRtiState_t *current_state,
+    double current_progress,
+    const MpcRtiNominal_t *previous_nominal,
+    const MpcModelControl_t *same_epoch_controls,
+    int same_epoch_control_count,
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    float prediction_dt,
+    int horizon,
+    const MpcRtiConfiguration_t *configuration,
+    MpcRtiNominal_t *nominal,
+    MpcRtiReference_t references[PREDICTION_HORIZON + 1]);
+
+/* Experimental exact-source nonlinear single-shooting adjoint. Builds the
+ * same-epoch physical source trajectory and its local A/B derivatives,
+ * then returns d(exact-nominal objective)/d(absolute steering,throttle)
+ * using a full-horizon costate sweep. The local cost gradient is approximate
+ * in changing tire/progress regimes: certify against source finite differences
+ * before enabling a runtime policy. Does not solve or publish any command. */
+/* Recover the exact same stage references as a freshly integrated
+ * same-epoch nominal, without repeating the full PhysX/source rollout.
+ * Call only for an independently source-integrated, validated nominal. */
+int mpc_rti_references_from_exact_nominal(
+    const MpcRtiNominal_t *nominal,
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count, double lap_length,
+    const MpcRtiConfiguration_t *model,
+    MpcRtiReference_t references[PREDICTION_HORIZON + 1]);
+
+/* The adjoint of an ALREADY source-validated full horizon. The passed
+ * physical stage states must match the same immutable control sequence.
+ * Unlike the legacy wrapper below, it never reintegrates source dynamics. */
+int mpc_rti_source_adjoint_gradient_from_exact_nominal(
+    const MpcRtiNominal_t *validated_nominal,
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count, double lap_length,
+    float prediction_dt, const MpcRtiConfiguration_t *model,
+    const MpcRtiObjectiveSchedule_t *frozen_objective,
+    double gradient_out[PREDICTION_HORIZON][MPC_RTI_NU]);
+
+int mpc_rti_source_adjoint_gradient(
+    const MpcRtiState_t *initial,
+    double progress,
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    float prediction_dt,
+    const MpcRtiConfiguration_t *model,
+    const MpcModelControl_t controls[PREDICTION_HORIZON],
+    const MpcRtiObjectiveSchedule_t *frozen_objective,
+    double gradient_out[PREDICTION_HORIZON][MPC_RTI_NU]);
+
+/* Experimental full-source iterative nonlinear MPC. This entrypoint is NOT
+ * connected to the normal ROS controller mode: it only evaluates externally
+ * supplied, same-command-epoch controls and returns a strictly source-valid
+ * improved full horizon. Every trial integrates the source plant and checks
+ * the ORIGINAL physical corridor. No QP-predicted path or unrelated merit
+ * schedule may substitute for these physical trajectories.
+ *
+ * A frozen schedule MUST come from the current cycle. First derivatives use
+ * the production source adjoint; a separately integrated directional
+ * perturbation audits whether it predicts the true nonlinear merit.
+ *
+ * The iteration cap is deterministic; the caller must independently budget
+ * its worst-case duration before ever enabling real-time control. */
+typedef struct
+{
+    int max_iterations; /* 1..8 */
+    int max_exact_trials_per_iteration; /* 1..16 */
+    float initial_step_scale; /* positive dimensionless search parameter */
+    float minimum_step_scale;
+    float armijo_fraction; /* 0..0.5, requires true source merit reduction */
+    float steering_direction_norm_rad; /* L2 norm of 30 steering changes */
+    float throttle_direction_norm; /* L2 norm of 30 throttle changes */
+    float directional_check_step_scale; /* relative to selected physical dir */
+    double maximum_wall_time_us; /* 0 = offline unbounded; caller reserves publication overhead */
+} MpcRtiSourceNonlinearOptions_t;
+
+typedef struct
+{
+    int initial_valid;
+    int final_valid;
+    MpcRtiRolloutStatus_t initial_failure_reason;
+    int initial_failure_stage;
+    int iterations_attempted;
+    int iterations_accepted;
+    int exact_rollout_evaluations;
+    int source_adjoint_evaluations;
+    int source_derivative_consistency_checks;
+    int source_derivative_discrepancies;
+    int trial_corridor_rejections;
+    int trial_model_rejections;
+    int budget_exhausted;
+    int feasibility_iterations_attempted;
+    int feasibility_iterations_accepted;
+    int feasible_seed_recovered;
+    double initial_corridor_violation_m2;
+    double final_corridor_violation_m2;
+    double initial_objective;
+    double final_objective;
+    double minimum_corridor_clearance_m;
+    double largest_control_step_rad;
+    double largest_throttle_step;
+    double max_directional_derivative_relative_error;
+    double wall_time_ms;
+    /* Exact-source objective after each ACCEPTED iteration; the original
+     * seed is element zero. Not a QP-predicted merit or relaxed-track score. */
+    double accepted_exact_objectives[9];
+    double accepted_step_scales[8];
+    double directional_relative_error_by_iteration[8];
+    MpcModelControl_t controls[PREDICTION_HORIZON];
+} MpcRtiSourceNonlinearResult_t;
+
+int mpc_rti_source_nonlinear_optimize(
+    const MpcRtiState_t *initial,
+    double progress,
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    float prediction_dt,
+    const MpcRtiCycleConfiguration_t *configuration,
+    const MpcRtiObjectiveSchedule_t *frozen_objective,
+    const MpcModelControl_t seed[PREDICTION_HORIZON],
+    const MpcRtiSourceNonlinearOptions_t *options,
+    MpcRtiSourceNonlinearResult_t *result);
+
 /* Recursively score a candidate at candidate progress, sampling its exact
  * nonlinear curvature and corridor instead of reusing the nominal schedule. */
 MpcRtiRolloutStatus_t mpc_rti_rollout_candidate(
@@ -623,6 +838,18 @@ MpcRtiRolloutStatus_t mpc_rti_validate_candidate_plan(
     MpcRtiNominal_t *validated_plan,
     int *failure_stage);
 
+/* Causal 75ms post-horizon viability PROBE, not an infinite-horizon safety
+ * proof: two legal successors (source witness at terminal station or held
+ * final command) are independently simulated from the exact terminal
+ * physical state and must pass the same body/map/command validator.
+ * The whole car source state and actuator history are preserved. */
+int mpc_rti_terminal_extension_probe(
+    const MpcRtiNominal_t *validated_plan,
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count, double lap_length,
+    float prediction_dt,
+    const MpcRtiCycleConfiguration_t *configuration);
+
 /* As above, while retaining selected source outputs that were already
  * computed by the exact rollout. This avoids stepping the plant again in the
  * ROS diagnostics publisher. */
@@ -657,10 +884,28 @@ int mpc_rti_refinement_improves_action(
 /* True when the cycle has enough time remaining to attempt one nonlinear
  * backtracking rollout without bypassing the final publication deadline. */
 int mpc_rti_line_search_budget_available(double remaining_us);
+/* Classify a fully source-integrated but exact-merit-invalid QP candidate
+ * as a nonlinear domain failure eligible for ordinary exact-validation
+ * globalization. The nominal must itself be fully source-valid. */
+int mpc_rti_line_search_should_backtrack(
+    MpcRtiRolloutStatus_t candidate_rollout_status,
+    int candidate_exact_valid, int nominal_exact_valid,
+    int exact_merit_regression);
+/* A physically invalid intermediate source state does not imply that ALL
+ * smaller steps are invalid when the exact nominal is valid. */
+int mpc_rti_line_search_should_continue(
+    MpcRtiRolloutStatus_t trial_status, int nominal_exact_valid);
 int mpc_rti_memory_set_warm_start_controls(
     MpcRtiMemory_t *memory,
     const MpcModelControl_t *controls,
     int control_count);
+int mpc_rti_memory_set_warm_start_controls_at_epoch(
+    MpcRtiMemory_t *memory, const MpcModelControl_t *controls,
+    int control_count, int64_t command_epoch_ns);
+/* Nearest discrete source stage; -1 means missing/reversed/expired epoch.
+ * Host request jitter does not change the source's fixed 25ms interval. */
+int mpc_rti_command_epoch_shift(int64_t previous_ns, int64_t current_ns,
+                              float prediction_dt);
 
 /* One RTI cycle: build shifted nominal/QP, solve once, validate the exact
  * nonlinear rollout, and commit the candidate only when it is accepted. */

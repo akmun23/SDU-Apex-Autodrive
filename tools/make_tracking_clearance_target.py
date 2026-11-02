@@ -17,8 +17,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
-from scipy.optimize import minimize
-from scipy.sparse import diags, lil_matrix
+from scipy.sparse import diags, eye, lil_matrix, triu
 from scipy.sparse.linalg import spsolve
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,20 +38,42 @@ def smooth_offsets(left, right, required, spacing, smoothing_length, max_offset)
     initial = np.clip(np.zeros_like(left), lower, upper)
     if not np.any(initial):
         return initial
+    # The original L-BFGS-B solve was ill-conditioned on source-witness
+    # paths with millimetre-spaced knots: (length / ds)^4 reaches 1e8,
+    # causing a false max-iteration failure. This is a strictly convex
+    # periodic sparse QP; a box-constrained sparse factorization is both
+    # faster and numerically much better behaved at 7k+ knots.
+    try:
+        import osqp
+    except ImportError as exc:
+        raise RuntimeError(
+            "Install tools/requirements_mpc_qp_oracle.txt (includes osqp) "
+            "to construct a physically certified tracking target") from exc
+    n = len(left)
+    second = diags((np.ones(n), -2 * np.ones(n), np.ones(n)),
+                   (-1, 0, 1), shape=(n, n), format="lil")
+    second[0, n - 1] = 1.
+    second[n - 1, 0] = 1.
+    second = second.tocsc()
     gain = (smoothing_length / spacing) ** 4
-
-    def cost_and_gradient(offset):
-        second = np.roll(offset, 1) - 2 * offset + np.roll(offset, -1)
-        fourth = np.roll(second, 1) - 2 * second + np.roll(second, -1)
-        return (float(offset @ offset + gain * (second @ second)),
-                2 * offset + 2 * gain * fourth)
-
-    result = minimize(cost_and_gradient, initial, jac=True, method="L-BFGS-B",
-        bounds=list(zip(lower, upper)),
-        options={"maxiter": 5000, "maxls": 40, "ftol": 1.e-13, "gtol": 1.e-7})
-    if not result.success:
-        raise ValueError(f"clearance smoothing failed: {result.message}")
-    return result.x
+    regularizer = eye(n, format="csc") + gain * (second.T @ second)
+    # Scaling by a positive constant leaves the argmin unchanged and
+    # removes artificial huge Hessian coefficients at small knot spacings.
+    hessian = triu(regularizer / (1. + gain), format="csc")
+    problem = osqp.OSQP()
+    problem.setup(P=hessian, q=np.zeros(n), A=eye(n, format="csc"),
+                  l=lower, u=upper, verbose=False, polishing=True,
+                  adaptive_rho=True, eps_abs=1.e-7, eps_rel=1.e-7,
+                  max_iter=20000)
+    result = problem.solve()
+    if result.info.status_val not in (1, 2) or result.x is None or \
+            not np.isfinite(result.x).all():
+        raise ValueError(f"clearance smoothing QP failed: {result.info.status}")
+    if max(np.max(lower - result.x), np.max(result.x - upper)) > 1.e-5:
+        raise ValueError("clearance QP candidate violates physical bounds")
+    # Clamp only floating-point solver tolerance overshoots; this guarantees
+    # the contour target is inside every original physical corridor box.
+    return np.clip(result.x, lower, upper)
 
 
 def path_geometry(xy):

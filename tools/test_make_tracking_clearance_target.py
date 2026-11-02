@@ -33,6 +33,24 @@ class TrackingClearanceTargetTests(unittest.TestCase):
         mirrored = smooth_offsets(right, left, .25, .06, .6, .1)
         np.testing.assert_allclose(mirrored, -offset, atol=1.e-7)
 
+    def test_dense_witness_knot_grid_has_stable_periodic_qp(self):
+        # A 6,925-knot source-witness trajectory previously exhausted
+        # L-BFGS-B at a stiffness ratio of order (L / ds)**4.
+        n = 6925
+        left = np.ones(n)
+        right = np.ones(n)
+        left[100:450] = 0.211
+        left[-2:] = 0.211
+        required = .2365
+        result = smooth_offsets(left, right, required, .006, .6, .1)
+        self.assertEqual(result.shape, (n,))
+        self.assertTrue(np.isfinite(result).all())
+        self.assertLessEqual(float(np.max(np.abs(result))), .1 + 1.e-7)
+        self.assertGreaterEqual(float(np.min(result + right - required)), -1.e-8)
+        self.assertGreaterEqual(float(np.min(left - result - required)), -1.e-8)
+        self.assertLess(float(np.min(result[110:440])), -.025)
+        self.assertLess(abs(result[0] - result[-1]), .01)
+
     def test_rejects_impossible_reserve(self):
         with self.assertRaises(ValueError):
             smooth_offsets(np.full(40, .2), np.full(40, .2), .25, .06, .6, .1)

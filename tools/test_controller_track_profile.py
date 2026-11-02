@@ -20,7 +20,7 @@ def test_iros_does_not_silently_inherit_practice_weights_or_sqp_radii():
 
 def test_practice_keeps_verified_profile_and_explicit_overlay_wins():
     assert parameter_files('autodrive_practice_20260924_b.yaml', '/tuning.yaml') == [
-        '/mpc/config/mpc_competition.yaml', '/mpc/config/mpc_practice_fastline.yaml', '/tuning.yaml']
+        '/mpc/config/mpc_practice.yaml', '/tuning.yaml']
     assert parameter_files('another_track.yaml', '/tuning.yaml') == [
         '/mpc/config/mpc_competition.yaml', '/tuning.yaml']
 

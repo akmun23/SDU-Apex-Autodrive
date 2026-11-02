@@ -90,9 +90,13 @@ elif [[ "${target_lap}" == "mpc" ]]; then
     _ "${timeout_s}" "${stall_timeout_s}"
 elif [[ "${target_lap}" =~ ^mpc-lap-([1-9][0-9]*)$ ]]; then
   mpc_target_lap="${BASH_REMATCH[1]}"
+  observe_args=()
+  if [[ "${SDU_APEX_WATCH_CONTINUE_ON_MPC_REJECTION:-0}" == "1" ]]; then
+    observe_args=(--continue-after-mpc-rejection)
+  fi
   docker exec "${watcher_container}" /bin/bash -lc \
-    'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --mpc-run --target-lap "$1" --timeout-s "$2" --stall-timeout-s "$3" --post-target-lap-guard-s "$4" --minimum-lap-distance-m "$5"' \
-    _ "${mpc_target_lap}" "${timeout_s}" "${stall_timeout_s}" "${post_target_lap_guard_s}" "${minimum_lap_distance_m}"
+    'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --mpc-run --target-lap "$1" --timeout-s "$2" --stall-timeout-s "$3" --post-target-lap-guard-s "$4" --minimum-lap-distance-m "$5" "${@:6}"' \
+    _ "${mpc_target_lap}" "${timeout_s}" "${stall_timeout_s}" "${post_target_lap_guard_s}" "${minimum_lap_distance_m}" "${observe_args[@]}"
 elif [[ "${target_lap}" == "csv-command" ]]; then
   docker exec "${watcher_container}" /bin/bash -lc \
     'source /opt/ros/humble/setup.bash && python3 /workspace/src/tools/watch_sim_run.py --csv-command-test --timeout-s "$1" --stall-timeout-s "$2"' \

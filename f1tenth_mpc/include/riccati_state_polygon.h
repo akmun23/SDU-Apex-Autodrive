@@ -89,4 +89,5 @@ static inline int riccati_project_state_polygon(
     }
     return best < DBL_MAX;
 }
+
 #endif

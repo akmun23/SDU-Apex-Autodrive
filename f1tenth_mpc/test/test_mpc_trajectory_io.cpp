@@ -22,7 +22,7 @@ TEST(MpcTrajectoryIo, OrdinaryReferenceUnchanged)
     EXPECT_NEAR(length, 2.+std::sqrt(2.), 1.e-12);
 }
 
-TEST(MpcTrajectoryIo, WitnessKeepsEveryFieldForRuntimeAndReplay)
+TEST(MpcTrajectoryIo, OfflineParserRetainsWitnessForOptimizerAudit)
 {
     std::istringstream input("# sdu_apex_source_witness/v1\r\n" +
         triangle(",.03,.04,-2.1,-.2,-.25,.15"));
@@ -55,5 +55,45 @@ TEST(MpcTrajectoryIo, InvalidRowsCannotBeSilentlyDroppedOrTruncated)
         double length = 0.;
         EXPECT_THROW(f1tenth_mpc::read_mpc_trajectory(input, &length),
                      std::runtime_error) << text;
+    }
+}
+
+TEST(MpcTrajectoryIo, ControllerDiscardsOptimizerActuationAndNativeStates)
+{
+    const std::string input_text =
+        "# sdu_apex_source_witness/v1\n" +
+        triangle(",.03,.04,-2.1,-.2,-.25,.15");
+    std::istringstream input(input_text);
+    double length = 0.;
+    const auto points =
+        f1tenth_mpc::read_mpc_controller_trajectory(input,&length);
+    ASSERT_EQ(points.size(),3u);
+    EXPECT_NEAR(length,2.+std::sqrt(2.),1.e-12);
+    for(std::size_t i=0;i<points.size();++i) {
+        EXPECT_EQ(points[i].source_witness_valid,0);
+        EXPECT_DOUBLE_EQ(points[i].source_heading_error,0.);
+        EXPECT_DOUBLE_EQ(points[i].source_v_rear,0.);
+        EXPECT_DOUBLE_EQ(points[i].source_yaw_rate,0.);
+        EXPECT_DOUBLE_EQ(points[i].source_physical_steering,0.);
+        EXPECT_DOUBLE_EQ(points[i].source_steering_target,0.);
+        EXPECT_DOUBLE_EQ(points[i].source_throttle,0.);
+        EXPECT_DOUBLE_EQ(points[i].speed,5.+(double)i);
+        EXPECT_DOUBLE_EQ(points[i].left_bound,1.);
+        EXPECT_DOUBLE_EQ(points[i].right_bound,1.);
+    }
+    // Projection is format-invariant: 9-column and 15-column files with
+    // the same geometry must give the same production controller reference.
+    std::istringstream simple_input(triangle());
+    double simple_length=0.;
+    const auto simple_points=f1tenth_mpc::read_mpc_controller_trajectory(
+        simple_input,&simple_length);
+    ASSERT_EQ(simple_points.size(),points.size());
+    EXPECT_DOUBLE_EQ(simple_length,length);
+    for(std::size_t i=0;i<points.size();++i) {
+        EXPECT_DOUBLE_EQ(points[i].x,simple_points[i].x);
+        EXPECT_DOUBLE_EQ(points[i].y,simple_points[i].y);
+        EXPECT_DOUBLE_EQ(points[i].heading,simple_points[i].heading);
+        EXPECT_DOUBLE_EQ(points[i].curvature,simple_points[i].curvature);
+        EXPECT_DOUBLE_EQ(points[i].speed,simple_points[i].speed);
     }
 }

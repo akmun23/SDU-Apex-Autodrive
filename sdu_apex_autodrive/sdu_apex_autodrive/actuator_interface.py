@@ -44,6 +44,10 @@ class ActuatorInterface(Node):
             Float32, self.get_parameter("steering_topic").value, 10)
         self.throttle_pub = self.create_publisher(
             Float32, self.get_parameter("throttle_topic").value, 10)
+        # Unity's request sender consumes one validated pair atomically. The
+        # Float32 outputs remain available to hardware adapters and recorders.
+        self.bridge_command_pub = self.create_publisher(
+            DriveCommand, "/actuators/drive_command", 1)
         self.command_sub = self.create_subscription(
             DriveCommand,
             self.get_parameter("drive_command_topic").value,
@@ -69,6 +73,7 @@ class ActuatorInterface(Node):
             self._publish_command_timing(
                 message, received_monotonic_ns, "rejected_invalid")
             return
+        self.bridge_command_pub.publish(message)
         self._publish(steering / self.max_steering, throttle)
         self._publish_command_timing(
             message, received_monotonic_ns, "forwarded")

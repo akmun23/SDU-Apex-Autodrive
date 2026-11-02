@@ -23,9 +23,10 @@ controller="$run_id"_controller
 simulator="$run_id"_sim
 recorder="rec_$run_id"
 mkdir -p "$run_dir"
-set -- --config mpc=f1tenth_mpc/config/mpc_practice_fastline.yaml
+# One canonical, fully resolved practice configuration, no competition inheritance.
+set -- --config mpc=f1tenth_mpc/config/mpc_practice.yaml
 set -- "$@" --config amcl=f1tenth_localization/config/gpu_amcl_cpp_params.yaml
-cp -- f1tenth_mpc/config/mpc_practice_fastline.yaml "$run_dir/mpc_parameters.yaml"
+cp -- f1tenth_mpc/config/mpc_practice.yaml "$run_dir/mpc_parameters.yaml"
 cp -- f1tenth_localization/config/gpu_amcl_cpp_params.yaml "$run_dir/amcl_parameters.yaml"
 mpc_overlay="${SDU_APEX_MPC_PARAMETER_OVERLAY:-}"
 if [[ -n "$mpc_overlay" ]]; then

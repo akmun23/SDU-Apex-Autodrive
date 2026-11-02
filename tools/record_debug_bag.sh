@@ -79,7 +79,10 @@ exec docker run --rm --name "${container}" \
       /odom \
       /odom/diagnostics \
       /odom/unity_plant_state \
+      /odom/bridge_request_command \
+      /odom/bridge_actuator_feedback \
       /mpc/drive_command \
+      /actuators/drive_command \
       /ekf_odom \
       /ekf_pose \
       /amcl_pose \
@@ -118,7 +121,10 @@ exec docker run --rm --name "${container}" \
       /odom \
       /odom/diagnostics \
       /odom/unity_plant_state \
+      /odom/bridge_request_command \
+      /odom/bridge_actuator_feedback \
       /mpc/drive_command \
+      /actuators/drive_command \
       /ekf_odom \
       /ekf_pose \
       /amcl_pose \

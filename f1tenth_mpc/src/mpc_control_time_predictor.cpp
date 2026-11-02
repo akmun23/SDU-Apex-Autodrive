@@ -64,7 +64,7 @@ bool propagate_model_segment(MpcModelState_t *state, double *progress_m,
         start_ns < grid_origin_ns || end_ns < grid_origin_ns) return false;
 
     /* The source vehicle advances on Unity's fixed 1 ms physics grid. Bridge
-     * header stamps are receive-time stamps and commonly contain fractional
+     * header stamps are host request stamps and commonly contain fractional
      * milliseconds, so passing the raw final remainder to the plant makes it
      * reject an otherwise valid rollout. Quantize event boundaries relative
      * to this prediction's source stamp and preserve that phase across command

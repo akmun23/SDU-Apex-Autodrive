@@ -26,9 +26,11 @@ def make_valid_payload():
         floats(nx)
         floats(nx)
         floats(nx)
+        floats(nx * nx)  # Full offdiagonal Q (schema v5)
         floats(nx * nu)
         floats(nu)
         floats(nu)
+        floats(1)  # R cross term (schema v5)
         floats(nx, -1.0)
         floats(nx, 1.0)
         floats(nu, -1.0)
@@ -104,6 +106,29 @@ class FrozenQpFixtureTest(unittest.TestCase):
         self.assertEqual(summary["reuse_same_epoch"], 1)
         self.assertGreater(summary["float_count"], 20_000)
 
+    def test_independent_oracle_reconstructs_full_coupled_hessian(self):
+        # The old fixture schema dropped the cross-state and cross-control
+        # Hessian entirely, so prior independent convergence experiments
+        # solved a DIFFERENT QP while reporting it as exact reproduction.
+        from tools.mpc_qp_oracle import decode_problem, build_osqp_matrices
+        data = bytearray(make_valid_payload())
+        nx,nu=fixture.NX,fixture.NU
+        start=fixture.HEADER_SIZE
+        qoff=start+4*(nx*nx+nx*nu+3*nx)
+        # Each Qoff entry carries the COMPLETE symmetric matrix, not an
+        # upper-triangle compression. 0.75 is intentionally signed.
+        struct.pack_into('<f',data,qoff+4*(2*nx+4),-0.75)
+        struct.pack_into('<f',data,qoff+4*(4*nx+2),-0.75)
+        rcross=qoff+4*(nx*nx+nx*nu+2*nu)
+        struct.pack_into('<f',data,rcross,.125)
+        prob=decode_problem(bytes(data))
+        P,*_=build_osqp_matrices(prob)
+        xsize=(fixture.HORIZON+1)*nx
+        self.assertAlmostEqual(P[2,4],-.75,places=6)
+        self.assertAlmostEqual(P[xsize,xsize+1],.125,places=6)
+        self.assertEqual(prob["steps"][0][12].shape,(23,23))
+        self.assertAlmostEqual(prob["steps"][0][13],.125,places=6)
+
     def test_rejects_bad_magic_and_dimensions(self):
         payload = bytearray(make_valid_payload())
         payload[0] ^= 0xFF
@@ -131,15 +156,15 @@ class FrozenQpFixtureTest(unittest.TestCase):
         payload = bytearray(make_valid_payload())
         # A stage's x_lb follows A, B, d, Q, q, and N.
         stage_x_lb_offset = 36 + 4 * (
-            fixture.NX * fixture.NX + 2 * fixture.NX * fixture.NU +
-            3 * fixture.NX + 2 * fixture.NU)
+            2 * fixture.NX * fixture.NX + 2 * fixture.NX * fixture.NU +
+            3 * fixture.NX + 2 * fixture.NU + 1)
         struct.pack_into("<f", payload, stage_x_lb_offset, 2.0)
         with self.assertRaises(fixture.FixtureError):
             fixture.parse_payload(payload)
 
     def test_polygon_metadata_is_checked_and_old_schema_rejected(self):
         nx, nu = fixture.NX, fixture.NU
-        start = fixture.HEADER_SIZE + 4*(fixture.HORIZON*(nx*nx+2*nx*nu+5*nx+4*nu)+5*nx)
+        start = fixture.HEADER_SIZE + 4*(fixture.HORIZON*(2*nx*nx+2*nx*nu+5*nx+4*nu+1)+5*nx)
         data = bytearray(make_valid_payload())
         struct.pack_into('<i', data, start, 9)
         with self.assertRaisesRegex(fixture.FixtureError, 'plane count'):
@@ -180,6 +205,38 @@ class FrozenQpFixtureTest(unittest.TestCase):
                 metadata["source_abi"]["model"]["sha256"] = "a" * 64
                 sidecar.write_text(json.dumps(metadata))
                 fixture.validate_sidecar(payload, sidecar)
+
+
+
+class TerminalConstraintExtensionTests(unittest.TestCase):
+    def payload(self):
+        normal = [0.0] * fixture.NX
+        normal[2], normal[4] = .25, -.4
+        return (make_valid_payload() + struct.pack('<Iif', 0x314d5254, 1, 7.) +
+                struct.pack(f'<{fixture.NX + 1}f', *normal, .2))
+
+    def test_terminal_planes_roundtrip_and_reach_independent_oracle(self):
+        from tools.mpc_qp_oracle import decode_problem, build_osqp_matrices
+        parsed = fixture.parse_payload(self.payload())
+        self.assertEqual(len(parsed['terminal_constraints']), 1)
+        self.assertAlmostEqual(parsed['terminal_constraints'][0]['normal'][2], .25)
+        problem = decode_problem(self.payload())
+        _, _, matrix, lower, upper = build_osqp_matrices(problem)
+        row = matrix.getrow(matrix.shape[0] - 1)
+        self.assertEqual(row.nnz, 2)
+        self.assertAlmostEqual(row[0, fixture.HORIZON * fixture.NX + 2], .25)
+        self.assertAlmostEqual(row[0, fixture.HORIZON * fixture.NX + 4], -.4)
+        self.assertAlmostEqual(upper[-1], .2)
+        self.assertEqual(lower[-1], float('-inf'))
+
+    def test_malformed_extension_fails_closed(self):
+        payload = self.payload()
+        for bad in [payload[:-1], payload + b'x',
+                    make_valid_payload() + struct.pack('<Iif', 0x314d5254, 11, 7.),
+                    make_valid_payload() + struct.pack('<Iif', 0x314d5254, 1, -1.)]:
+            with self.subTest(size=len(bad)):
+                with self.assertRaises(fixture.FixtureError):
+                    fixture.parse_payload(bad)
 
 
 if __name__ == "__main__":

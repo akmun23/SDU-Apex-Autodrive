@@ -101,6 +101,11 @@ if(BUILD_TESTING)
   target_include_directories(test_odom_history PRIVATE gpu_amcl_cpp/include)
   ament_add_gtest(test_scan_validity test/test_scan_validity.cpp)
   target_include_directories(test_scan_validity PRIVATE gpu_amcl_cpp/include)
+  ament_add_gtest(test_bridge_request_command_history
+    test/test_bridge_request_command_history.cpp)
+  target_include_directories(test_bridge_request_command_history PRIVATE include)
+  ament_add_gtest(test_bridge_epoch_assembler test/test_bridge_epoch_assembler.cpp)
+  target_include_directories(test_bridge_epoch_assembler PRIVATE include)
   ament_add_gtest(test_sensor_packet_assembler
     test/test_sensor_packet_assembler.cpp
     src/sensor_packet_assembler.cpp)

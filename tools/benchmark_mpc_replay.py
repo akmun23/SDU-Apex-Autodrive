@@ -136,7 +136,7 @@ def cmake_metadata(build_dir: Path) -> dict[str, Any]:
     relevant_flags = {}
     for item in compile_commands:
         source = Path(item.get("file", "")).name
-        if source in {"mpc_rti.c", "riccati_solver.c", "unity_source_plant.cpp"}:
+        if source in {"mpc_rti.cpp", "riccati_solver.cpp", "riccati_factorization.cpp", "riccati_scaling.cpp", "unity_source_plant.cpp", "mpc_rti_qp.cpp"}:
             relevant_flags[source] = item.get("command") or item.get("arguments")
     return {
         "build_dir": str(build_dir.resolve()),

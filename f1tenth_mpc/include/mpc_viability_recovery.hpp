@@ -38,6 +38,70 @@ inline double viability_score(const MpcRtiNominal_t &plan,
         0.12 * std::abs(s.u - expected_terminal_speed);
 }
 
+// A native IPOPT source witness contains held steering and motor commands,
+// not just geometric curvature. Form a causal feedback-corrected control
+// candidate in *command* coordinates, without modifying source trajectory
+// speed or reference geometry. Every output still requires a separate exact
+// full-horizon source-plant/corridor rollout before publication.
+// The same sign convention as the Frenet tracking objective is used:
+// positive e_y/heading error needs negative corrective steering.
+inline bool witness_recovery_controls(
+    const MpcModelControl_t *witness, MpcModelControl_t *out,
+    int horizon, float current_ey, float current_epsi,
+    float lateral_gain, float heading_gain, float drive_scale,
+    float steering_limit)
+{
+    if (!witness || !out || horizon < 1 || horizon > PREDICTION_HORIZON ||
+        !std::isfinite(current_ey) || !std::isfinite(current_epsi) ||
+        !std::isfinite(lateral_gain) || lateral_gain < 0.f ||
+        !std::isfinite(heading_gain) || heading_gain < 0.f ||
+        !std::isfinite(drive_scale) || drive_scale <= 0.f ||
+        drive_scale > 1.f || !std::isfinite(steering_limit) ||
+        steering_limit <= 0.f) return false;
+    const float correction = std::clamp(
+        -lateral_gain * current_ey - heading_gain * current_epsi,
+        -0.22f, 0.22f);
+    // The correction must enter *before* the queued rack finishes turning;
+    // decay as the reference catches up to avoid a terminal steering offset.
+    for (int k = 0; k < horizon; ++k) {
+        if (!std::isfinite(witness[k].steering_target_rad) ||
+            std::abs(witness[k].steering_target_rad) > steering_limit + 1.e-5f ||
+            !std::isfinite(witness[k].throttle_command) ||
+            witness[k].throttle_command < MPC_THROTTLE_MIN_DRIVE ||
+            witness[k].throttle_command > MPC_THROTTLE_MAX)
+            return false;
+        const float fraction =
+            k < 12 ? 1.f : std::max(0.f, (float)(horizon - k) /
+                                                  (float)(horizon - 12));
+        out[k].steering_target_rad = std::clamp(
+            witness[k].steering_target_rad + fraction * correction,
+            -steering_limit, steering_limit);
+        out[k].throttle_command = std::clamp(
+            witness[k].throttle_command * drive_scale,
+            MPC_THROTTLE_MIN_DRIVE, MPC_THROTTLE_MAX);
+    }
+    return true;
+}
+
+// Full-horizon recovery's terminal states may have nearly identical
+// tracking scores but radically different minimum body clearance. A safe
+// successor is more likely when it has a reserve beyond numerical noise.
+// This selector never changes physical feasibility or the published command
+// envelope; it ranks only *independently exact-validated* recovery plans.
+// When disabled, the historic practice ranking is preserved bit for bit.
+inline double viability_score_with_reserve(
+    const MpcRtiNominal_t &plan, float expected_terminal_speed,
+    bool prioritize_reserve, float desired_reserve_m)
+{
+    const double base = viability_score(plan, expected_terminal_speed);
+    if (!prioritize_reserve) return base;
+    if (!std::isfinite(base) || !std::isfinite(desired_reserve_m) ||
+        desired_reserve_m <= 0.f) return INFINITY;
+    const double actual = plan.validation_minimum_corridor_slack_m;
+    return base + 30.0 * std::max(
+        0.0, static_cast<double>(desired_reserve_m) - actual);
+}
+
 // Seed a physically validated steady-actuation bridge from the *current*
 // actuator/geometry, not from arbitrary map-indexed steering guesses. This
 // expands the recovery search beyond the locally infeasible SQP nominal.

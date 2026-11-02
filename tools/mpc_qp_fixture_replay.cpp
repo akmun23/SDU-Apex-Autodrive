@@ -11,8 +11,15 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <sstream>
+#include <iomanip>
 
 namespace {
+
+std::string json_number(double value) {
+  if(!std::isfinite(value))return "null";
+  std::ostringstream out;out<<std::setprecision(12)<<value;return out.str();
+}
 
 float max_abs_difference(const RiccatiSolution_t &lhs,
                          const RiccatiSolution_t &rhs) {
@@ -180,6 +187,12 @@ Metrics evaluate(const MpcRtiProblem_t &problem,
       result.projected_objective +=
           0.5 * step.Q_diag[i] * x_projected * x_projected +
           step.q[i] * x_projected;
+      for (int j = 0; j < RICCATI_MAX_NX; ++j) {
+        result.primal_objective += 0.5 * step.Q_offdiag[i][j] *
+            x_primal * solution.x[k][j];
+        result.projected_objective += 0.5 * step.Q_offdiag[i][j] *
+            x_projected * projected_x[k][j];
+      }
     }
     for (int i = 0; i < RICCATI_MAX_NU; ++i) {
       const float u_primal = primal_u[k][i];
@@ -202,11 +215,18 @@ Metrics evaluate(const MpcRtiProblem_t &problem,
       result.projected_objective +=
           0.5 * step.R_diag[i] * u_projected * u_projected +
           step.r[i] * u_projected;
+      if (i == 0) {
+        result.primal_objective += step.R_cross *
+            u_primal * primal_u[k][1];
+        result.projected_objective += step.R_cross *
+            u_projected * final_state.z_u[k][1] *
+            (final_state.scaling_enabled ? final_state.input_scale[1] : 1.f);
+      }
       for (int j = 0; j < RICCATI_MAX_NX; ++j) {
         result.primal_objective +=
-            step.N[j][i] * solution.x[k][j] * u_primal;
+            static_cast<double>(step.N[j][i]) * solution.x[k][j] * u_primal;
         result.projected_objective +=
-            step.N[j][i] * projected_x[k][j] * u_projected;
+            static_cast<double>(step.N[j][i]) * projected_x[k][j] * u_projected;
       }
     }
   }
@@ -260,6 +280,59 @@ int main(int argc, char **argv) {
     select_seed(argv[2], capture, &config, &state);
     const std::string rho_policy = argc == 4 ? argv[3] : "recorded";
     select_rho_policy(rho_policy, &config);
+    // Isolated diagnostic parameter sweeps; this does NOT modify the
+    // production ROS MPC profile, physical plant, or original QP objective.
+    // Reinitialize the ADMM state when penalties change, so adapted warm
+    // multipliers cannot masquerade as a better cold-start policy.
+    const auto numeric_env = [](const char *name, float old_value) {
+      const char *text = std::getenv(name);
+      if (!text) return old_value;
+      const double parsed = std::strtod(text, nullptr);
+      if (!std::isfinite(parsed) || parsed <= 0.)
+        throw std::runtime_error(std::string("invalid ") + name);
+      return static_cast<float>(parsed);
+    };
+    config.rho = numeric_env("MPC_QP_BENCH_RHO", config.rho);
+    config.rho_u = numeric_env("MPC_QP_BENCH_RHO_U", config.rho_u);
+    config.rho_max = numeric_env("MPC_QP_BENCH_RHO_MAX", config.rho_max);
+    config.over_relaxation = numeric_env(
+        "MPC_QP_BENCH_OVER_RELAXATION",config.over_relaxation);
+    if (config.rho_max > 127.f || config.over_relaxation > 2.f)
+      throw std::runtime_error("invalid bench penalty or relaxation");
+    if (const char *iter = std::getenv("MPC_QP_BENCH_MAX_ITER")) {
+      const int count = std::atoi(iter);
+      if (count <= 0 || count > MAX_ITERATIONS)
+        throw std::runtime_error("invalid MPC_QP_BENCH_MAX_ITER");
+      config.max_iterations = count;
+    }
+    if (std::getenv("MPC_QP_BENCH_STATE_RHO")) {
+      const float value=numeric_env("MPC_QP_BENCH_STATE_RHO",0.f);
+      if (value < 1.f || value > 127.f)
+        throw std::runtime_error("invalid MPC_QP_BENCH_STATE_RHO");
+      for (auto &entry:config.rho_x_by_state) entry=value;
+    }
+    if (std::getenv("MPC_QP_BENCH_INPUT_RHO")) {
+      const float value=numeric_env("MPC_QP_BENCH_INPUT_RHO",0.f);
+      if (value > 127.f)
+        throw std::runtime_error("invalid MPC_QP_BENCH_INPUT_RHO");
+      for (auto &entry:config.rho_u_by_input) entry=value;
+    }
+    if (const char *coordinate = std::getenv(
+            "MPC_QP_BENCH_STATE_COORDINATE")) {
+      const int index = std::atoi(coordinate);
+      const float value = numeric_env("MPC_QP_BENCH_COORDINATE_RHO",0.f);
+      if (index < 0 || index >= RICCATI_MAX_NX || value < 1.f ||
+          value > 127.f)
+        throw std::runtime_error("invalid bench state coordinate/rho");
+      config.rho_x_by_state[index]=value;
+      riccati_admm_state_init(&state);
+    }
+    if (std::getenv("MPC_QP_BENCH_RHO") ||
+        std::getenv("MPC_QP_BENCH_RHO_U") ||
+        std::getenv("MPC_QP_BENCH_STATE_RHO") ||
+        std::getenv("MPC_QP_BENCH_INPUT_RHO") ||
+        std::getenv("MPC_QP_BENCH_RHO_MAX"))
+      riccati_admm_state_init(&state);
     const char *period_text = std::getenv("MPC_QP_BENCH_RHO_PERIOD");
     const int bench_period = period_text ? std::atoi(period_text) : 0;
     if (bench_period > 0 && bench_period <= 150)
@@ -285,6 +358,14 @@ int main(int argc, char **argv) {
       RiccatiAdmmConfig_t test_config = capture.solver_config;
       select_seed(argv[2], capture, &test_config, &test_state);
       select_rho_policy(rho_policy, &test_config);
+      // A benchmark with overridden penalties should use a single solve,
+      // unless an explicit fixed benchmark fixture is constructed instead.
+      if (std::getenv("MPC_QP_BENCH_RHO") ||
+          std::getenv("MPC_QP_BENCH_RHO_U") ||
+          std::getenv("MPC_QP_BENCH_STATE_RHO") ||
+          std::getenv("MPC_QP_BENCH_INPUT_RHO"))
+        throw std::runtime_error(
+            "benchmark repeats not supported with penalty overrides");
       if (bench_period > 0 && bench_period <= 150)
         test_config.adaptive_rho_update_period = bench_period;
       RiccatiSolution_t test_solution{};
@@ -326,25 +407,25 @@ int main(int argc, char **argv) {
               << "\"rho_policy\":\"" << rho_policy << "\","
               << "\"status\":" << static_cast<int>(status) << ','
               << "\"iterations\":" << solution.iterations << ','
-              << "\"primal_residual\":" << solution.primal_residual << ','
-              << "\"dual_residual\":" << solution.dual_residual << ','
-              << "\"primal_objective\":" << metrics.primal_objective << ','
-              << "\"projected_objective\":" << metrics.projected_objective << ','
+              << "\"primal_residual\":" << json_number(solution.primal_residual) << ','
+              << "\"dual_residual\":" << json_number(solution.dual_residual) << ','
+              << "\"primal_objective\":" << json_number(metrics.primal_objective) << ','
+              << "\"projected_objective\":" << json_number(metrics.projected_objective) << ','
               << "\"max_primal_dynamics_equality_residual\":"
-              << metrics.max_primal_dynamics_residual << ','
+              << json_number(metrics.max_primal_dynamics_residual) << ','
               << "\"max_projected_dynamics_equality_residual\":"
-              << metrics.max_projected_dynamics_residual << ','
+              << json_number(metrics.max_projected_dynamics_residual) << ','
               << "\"max_primal_state_bound_violation\":"
-              << metrics.max_primal_state_bound_violation << ','
+              << json_number(metrics.max_primal_state_bound_violation) << ','
               << "\"max_projected_state_bound_violation\":"
-              << metrics.max_projected_state_bound_violation << ','
+              << json_number(metrics.max_projected_state_bound_violation) << ','
               << "\"max_primal_input_bound_violation\":"
-              << metrics.max_primal_input_bound_violation << ','
+              << json_number(metrics.max_primal_input_bound_violation) << ','
               << "\"max_projected_input_bound_violation\":"
-              << metrics.max_projected_input_bound_violation << ','
+              << json_number(metrics.max_projected_input_bound_violation) << ','
               << "\"max_primal_vs_projected_input\":"
-              << metrics.max_primal_projected_u_delta << ','
-              << "\"recorded_result_max_abs_delta\":" << parity_delta << ','
+              << json_number(metrics.max_primal_projected_u_delta) << ','
+              << "\"recorded_result_max_abs_delta\":" << json_number(parity_delta) << ','
               << "\"factorization_count\":" << profile.quadratic_factorization_count << ','
               << "\"factorization_ns\":" << profile.quadratic_factorization_time_ns << ','
               << "\"rhs_ns\":" << profile.quadratic_rhs_time_ns << ','

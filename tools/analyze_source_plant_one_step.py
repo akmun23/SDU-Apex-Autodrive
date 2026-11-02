@@ -126,6 +126,27 @@ def _groups(rows: list[dict[str, Any]],
                 [row["v_com_error_mps"] for row in selected]),
             "yaw_rate_error_radps": _metric(
                 [row["yaw_rate_error_radps"] for row in selected]),
+            "wheel_omega_error_radps": {
+                str(i): _metric([
+                    row[f"wheel_{i}_omega_error_radps"] for row in selected])
+                for i in range(4)
+            },
+            "wheel_jounce_error_m": {
+                str(i): _metric([
+                    row[f"wheel_{i}_jounce_error_m"] for row in selected])
+                for i in range(4)
+            },
+            "wheel_normal_load_n": {
+                str(i): _metric([
+                    row[f"wheel_{i}_normal_load_n"] for row in selected])
+                for i in range(4)
+            },
+            "roll_error_rad": _metric([
+                row["roll_error_rad"] for row in selected]),
+            "pitch_error_rad": _metric([
+                row["pitch_error_rad"] for row in selected]),
+            "physical_steering_error_rad": _metric([
+                row["physical_steering_error_rad"] for row in selected]),
             "paired_previous_queue_slot": _paired_alternative(
                 selected, "slot1_u_error_mps"),
             "paired_next_epoch_feedback_oracle": _paired_alternative(
@@ -464,6 +485,39 @@ def analyze(bag: Path, library_path: Path) -> tuple[dict[str, Any], list[dict[st
             "v_com_error_mps": output.state[1] - actual_next["v"],
             "predicted_yaw_rate_radps": output.state[2],
             "yaw_rate_error_radps": output.state[2] - actual_next["r"],
+            # Full-state one-step decomposition against the causal source
+            # telemetry captured at the NEXT exact Unity request epoch.
+            # These are OFFLINE checks only: no future state is fed to the
+            # source model. Distinguishes tire/wheel spin and suspension
+            # contact errors from rigid-body yaw/attitude error.
+            **{
+                f"wheel_{i}_omega_error_radps":
+                    output.state[3 + i] - plant[next_ns]["wheel_omega"][i]
+                for i in range(4)
+            },
+            **{
+                f"wheel_{i}_jounce_error_m":
+                    output.state[14 + i] - plant[next_ns]["suspension_jounce"][i]
+                for i in range(4)
+            },
+            **{
+                f"wheel_{i}_pred_long_slip": output.longitudinal_slip[i]
+                for i in range(4)
+            },
+            **{
+                f"wheel_{i}_normal_load_n": output.normal_load_n[i]
+                for i in range(4)
+            },
+            **{
+                f"wheel_{i}_lateral_force_n": output.tire_lateral_force_n[i]
+                for i in range(4)
+            },
+            "roll_error_rad": output.state[9] - plant[next_ns]["roll"],
+            "pitch_error_rad": output.state[11] - plant[next_ns]["pitch"],
+            "body_height_error_m":
+                output.state[7] - plant[next_ns]["body_height"],
+            "physical_steering_error_rad":
+                output.state[13] - plant[next_ns]["physical_steering"],
             "physical_steering_rad": start["physical_steering"],
             "command_steering_rad": value.steering_target_rad,
             "queue_throttle_previous": start["delayed_throttle_1"],
@@ -510,6 +564,13 @@ def analyze(bag: Path, library_path: Path) -> tuple[dict[str, Any], list[dict[st
         ("throttle_change_abs_le_0p10", lambda row: abs(row["queue_throttle_delta"]) <= 0.10),
         ("near_straight_abs_steer_lt_0p10", lambda row: abs(row["physical_steering_rad"]) < 0.10),
         ("steer_abs_ge_0p10", lambda row: abs(row["physical_steering_rad"]) >= 0.10),
+        ("high_steer_abs_ge_0p35_speed_2_4", lambda row:
+            abs(row["physical_steering_rad"]) >= 0.35 and
+            2.0 <= row["start_speed_mps"] < 4.0),
+        ("high_steer_abs_ge_0p35_speed_2_4_yaw_outlier", lambda row:
+            abs(row["physical_steering_rad"]) >= 0.35 and
+            2.0 <= row["start_speed_mps"] < 4.0 and
+            abs(row["yaw_rate_error_radps"]) > 0.03),
         ("rear_wheel_mismatch_proxy_gt_0p5", lambda row: abs(row["rear_wheel_body_speed_mismatch_proxy_mps"]) > 0.5),
         ("source_rear_slip_abs_gt_0p10", lambda row: row["max_abs_source_rear_longitudinal_slip"] > 0.10),
     ))

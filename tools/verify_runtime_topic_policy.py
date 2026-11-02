@@ -17,6 +17,9 @@ RUNTIME_FILES = (
     "f1tenth_localization/gpu_amcl_cpp/src/core/amcl_node.cpp",
     "f1tenth_localization/gpu_amcl_cpp/src/core/ekf_node.cpp",
     "f1tenth_mpc/src/mpc_controller_node.cpp",
+    "f1tenth_mpc/src/mpc_controller_node_impl.hpp",
+    "f1tenth_mpc/src/mpc_controller_diagnostics.cpp",
+    "f1tenth_mpc/src/mpc_controller_recovery.cpp",
     "f1tenth_localization/config/sensor_odometry.yaml",
     "f1tenth_localization/config/ekf.yaml",
 )
@@ -136,6 +139,9 @@ def main() -> int:
         "f1tenth_localization/gpu_amcl_cpp/src/core/amcl_node.cpp",
         "f1tenth_localization/gpu_amcl_cpp/src/core/ekf_node.cpp",
         "f1tenth_mpc/src/mpc_controller_node.cpp",
+    "f1tenth_mpc/src/mpc_controller_node_impl.hpp",
+    "f1tenth_mpc/src/mpc_controller_diagnostics.cpp",
+    "f1tenth_mpc/src/mpc_controller_recovery.cpp",
     ):
         text = (ROOT / relative).read_text(encoding="utf-8")
         for token in TF_LISTENER_TOKENS:

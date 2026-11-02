@@ -35,6 +35,14 @@ typedef struct
     double source_physical_steering MPC_REFERENCE_ZERO;
     double source_steering_target MPC_REFERENCE_ZERO;
     double source_throttle MPC_REFERENCE_ZERO;
+    /* Precomputed spatially smoothed inboard objective target. Zero by
+     * default. Reference geometry and source control remain unmodified. */
+    double robust_contour_lateral_offset_m MPC_REFERENCE_ZERO;
+    /* Tangent and curvature corrections derived from the same smooth
+     * lateral contour, so strong heading/yaw objectives do not oppose
+     * the shifted lateral target. */
+    double robust_contour_heading_offset_rad MPC_REFERENCE_ZERO;
+    double robust_contour_curvature_delta_radpm MPC_REFERENCE_ZERO;
 } MpcTrajectorySample_t;
 
 #undef MPC_REFERENCE_ZERO
@@ -78,6 +86,17 @@ int mpc_trajectory_advance_tracking_with_progress(
     float body_dx, float body_dy, float body_yaw, double progress_seed,
     double *next_progress, float *next_e_y, float *next_e_psi,
     float jacobian[3][6]);
+
+/* Same loaded-frame propagation and differential; optionally returns the
+ * exact path sample already computed in the successful final projection.
+ * The returned sample is identical to mpc_trajectory_sample(next_progress)
+ * and can be used immediately for source-plant corridor evaluation. */
+int mpc_trajectory_advance_tracking_with_progress_sampled(
+    const MpcTrajectorySample_t *points, size_t count, double lap_length,
+    double progress, float e_y, float e_psi,
+    float body_dx, float body_dy, float body_yaw, double progress_seed,
+    double *next_progress, float *next_e_y, float *next_e_psi,
+    float jacobian[3][6], MpcTrajectorySample_t *end_sample);
 
 /* Removes a repeated closing row, validates the path, unwraps heading, and
  * computes the periodic length from the final point back to the first. */

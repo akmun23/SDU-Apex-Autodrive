@@ -3,10 +3,8 @@ sensor_odometry:
     left_encoder_topic: /autodrive/roboracer_1/left_encoder
     right_encoder_topic: /autodrive/roboracer_1/right_encoder
     imu_topic: /autodrive/roboracer_1/imu
-    steering_feedback_topic: /autodrive/roboracer_1/steering
-    throttle_feedback_topic: /autodrive/roboracer_1/throttle
-    steering_command_topic: /autodrive/roboracer_1/steering_command
-    throttle_command_topic: /autodrive/roboracer_1/throttle_command
+    bridge_request_command_topic: /odom/bridge_request_command
+    bridge_actuator_feedback_topic: /odom/bridge_actuator_feedback
     odom_topic: /odom
     diagnostics_topic: /odom/diagnostics
     publish_diagnostics: false

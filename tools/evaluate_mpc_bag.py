@@ -35,7 +35,7 @@ GT = "/autodrive/roboracer_1/odom"
 
 # MPC lateral velocity is represented at the rear axle, while Unity's odometry
 # twist is reported at the rigid-body COM. Keep this geometry aligned with
-# vehicle_model.c and unity_source_odom_runtime.hpp.
+# vehicle_model.cpp and unity_source_odom_runtime.hpp.
 MPC_REAR_AXLE_FROM_COM_M = 0.15532
 ODOM = "/odom"
 EKF = "/ekf_odom"
@@ -165,6 +165,47 @@ def _build_source_rollout_case_index(
                 if float(row.get("path_max_xy_m", 0.0)) > 0.05]
     passed = [row for row in closure_clean
               if float(row.get("path_max_xy_m", 0.0)) <= 0.05]
+    # Separate disagreement with the actual Unity pose from disagreement
+    # with displacement independently integrated from the same-epoch Unity
+    # velocity/yaw samples. This endpoint attribution does NOT replace the
+    # strict maximum-full-path clearance gate above: it identifies whether
+    # a >5cm endpoint is predominantly a source dynamics or a reference-pose
+    # coherence problem, using only logged signals. Overlapping windows are
+    # NOT statistically independent observations.
+    def endpoint_attribution(row: dict[str, Any]) -> dict[str, Any] | None:
+        keys = (
+            "plant_vs_twist_world_x", "plant_vs_twist_world_y",
+            "truth_twist_world_x", "truth_twist_world_y",
+        )
+        if not all(finite(row.get(key)) for key in keys):
+            return None
+        source_vs_unity_twist = math.hypot(
+            float(row["plant_vs_twist_world_x"]),
+            float(row["plant_vs_twist_world_y"]))
+        unity_twist_vs_pose = math.hypot(
+            float(row["truth_twist_world_x"]),
+            float(row["truth_twist_world_y"]))
+        source_vs_unity_pose = float(row.get("xy_m", 0.0))
+        if source_vs_unity_pose > 0.05:
+            if source_vs_unity_twist <= 0.05 and unity_twist_vs_pose > 0.05:
+                kind = "reference_pose_dominated"
+            elif source_vs_unity_twist > 0.05 and unity_twist_vs_pose <= 0.05:
+                kind = "source_motion_dominated"
+            else:
+                kind = "mixed_or_underdetermined"
+        else:
+            kind = "within_5cm"
+        return {
+            "start_stamp_ns": int(row["start_stamp_ns"]),
+            "progress_m": row.get("progress_m"),
+            "source_vs_unity_pose_m": source_vs_unity_pose,
+            "source_vs_unity_twist_integral_m": source_vs_unity_twist,
+            "unity_twist_integral_vs_pose_m": unity_twist_vs_pose,
+            "classification": kind,
+        }
+
+    endpoint_diagnostics = [v for row in closure_clean
+                            if (v := endpoint_attribution(row)) is not None]
     available = list(passed) + list(extra_control_windows or [])
     control_pool_source = list(available)
     pairs: list[dict[str, Any]] = []
@@ -290,6 +331,22 @@ def _build_source_rollout_case_index(
                                     for pair in pairs),
             "unmatched_failure_start_stamps_ns": unmatched,
             "available_clean_control_windows": len(control_pool),
+            "endpoint_truth_attribution_count": len(endpoint_diagnostics),
+            "endpoint_source_vs_unity_twist_over_5cm": sum(
+                d["source_vs_unity_twist_integral_m"] > 0.05
+                for d in endpoint_diagnostics),
+            "endpoint_unity_twist_vs_pose_over_5cm": sum(
+                d["unity_twist_integral_vs_pose_m"] > 0.05
+                for d in endpoint_diagnostics),
+            "endpoint_reference_pose_dominated": sum(
+                d["classification"] == "reference_pose_dominated"
+                for d in endpoint_diagnostics),
+            "endpoint_source_motion_dominated": sum(
+                d["classification"] == "source_motion_dominated"
+                for d in endpoint_diagnostics),
+            "endpoint_mixed_or_underdetermined": sum(
+                d["classification"] == "mixed_or_underdetermined"
+                for d in endpoint_diagnostics),
             "matching_dimensions": [
                 "start speed", "absolute physical steering",
                 "start queued throttle transition", "unwrapped progress when available"],
@@ -301,9 +358,26 @@ def _build_source_rollout_case_index(
         },
         "pairs": pairs,
         "clean_control_pool": control_pool,
+        # Keep these strictly additive: existing model failure classification
+        # and pair/control matching retain their original semantics.
+        "endpoint_truth_attribution": [
+            d for d in endpoint_diagnostics
+            if d["classification"] != "within_5cm"],
         "unmatched_failures": [
             row for row in failures
             if int(row["start_stamp_ns"]) in set(unmatched)],
+        # Do not silently hide telemetry pose/twist inconsistencies behind
+        # the scoring-validity filter. Save exact epochs and closure amplitudes
+        # separately, never misclassify them as physics-model successes.
+        "invalid_truth_closure_windows": [
+            {key: row.get(key) for key in (
+                "start_stamp_ns", "progress_m", "start_speed_mps",
+                "path_max_xy_m", "truth_pose_twist_closure_max_m",
+                "truth_pose_twist_bad_interval_count",
+                "end_u_error_mps", "end_v_error_mps", "end_r_error_radps")}
+            for row in windows
+            if float(row.get("truth_pose_twist_closure_max_m", 0.0))
+               > closure_threshold_m],
     }
 
 
@@ -1278,7 +1352,6 @@ def report_admm_convergence(
         ("cold-start command-queue seed", "cold_start_queue_seed_us", 1.0e-3),
         ("nominal rollout A", "nominal_rollout_a_us", 1.0e-3),
         ("progress/reference resampling", "progress_reference_resampling_us", 1.0e-3),
-        ("nominal rollout B", "nominal_rollout_b_us", 1.0e-3),
         ("QP build", "qp_build_us", 1.0e-3),
         ("Jacobian wall", "jacobian_wall_us", 1.0e-3),
         ("Jacobian worker CPU", "jacobian_thread_cpu_us", 1.0e-3),
@@ -2706,6 +2779,7 @@ def report_source_plant_rollout(
     case_index_metadata: dict[str, Any] | None = None,
     case_index_control_paths: list[Path] | None = None,
     oracle_initial_motion_components: set[str] | None = None,
+    source_initial_rear_omega_from_prior_step: bool = False,
 ) -> dict[str, Any] | None:
     """Replay only odom plant state and queued commands through the C++ MPC plant.
 
@@ -3131,6 +3205,31 @@ def report_source_plant_rollout(
             raise RuntimeError("source plant rejected suspension-jounce reconciliation")
         return list(c_state), bool(c_history_initialized.value)
 
+    # A single source of truth for the pre-observer physical rear-wheel
+    # endpoint. The observer may change rear omega at the next request epoch,
+    # but that correction must not be mistaken for independent Unity physics.
+    # Reconstruct from the PREVIOUS published plant state and request slot 2,
+    # never the stale slot 1 or an unavailable future measurement.
+    prior_step_raw_rear_omega: dict[float, tuple[float, float]] = {}
+
+    def raw_rear_omega_before_observer(
+        previous_time: float, current_time: float,
+    ) -> tuple[float, float] | None:
+        if current_time in prior_step_raw_rear_omega:
+            return prior_step_raw_rear_omega[current_time]
+        if abs(current_time - previous_time - .025) > .004:
+            return None
+        previous = plant_by_stamp[previous_time]
+        value = make_input(
+            source_state(previous), list(previous["wheel_angle"]), previous,
+            previous["suspension_history_initialized"], command_slot=2)
+        result = UnitySourcePlantOutputC()
+        if not step(ctypes.byref(value), .025, ctypes.byref(result)):
+            return None
+        rear = (float(result.state[5]), float(result.state[6]))
+        prior_step_raw_rear_omega[current_time] = rear
+        return rear
+
     def report_encoder_rollout() -> None:
         """Compare real WheelEncoder.FixedUpdate with pre-solve plant RPM.
 
@@ -3152,36 +3251,15 @@ def report_source_plant_rollout(
             name: [] for name in ("queue_slot_1", "queue_slot_2",
                                   "throttle_feedback_start",
                                   "throttle_feedback_end",
-                                  "queue_slot_1_pre_observer_wheels")}
-        # The plant topic is published after the observer corrects wheel
-        # omega. Reconstruct the immediately-preceding raw endpoint from the
-        # prior logged corrected state and the command applied over that
-        # preceding 25 ms interval. This allows a direct causal comparison of
-        # the corrected and uncorrected boundary states even when a bag did
-        # not record /odom/diagnostics.
+                                  "queue_slot_2_pre_observer_wheels")}
+        # The plant topic reports post-observer rear omega. Reuse the exact
+        # prior-request source transition for raw pre-observer wheel values
+        # even when the /odom/diagnostics stream was disabled in the bag.
         raw_wheels_at: dict[float, tuple[float, float]] = {}
         for previous_time, current_time in zip(common, common[1:]):
-            if abs((current_time - previous_time) - 0.025) > 0.004:
-                continue
-            previous = plant_by_stamp[previous_time]
-            value = make_input(
-                source_state(previous), list(previous["wheel_angle"]),
-                previous, previous["suspension_history_initialized"])
-            value.throttle_normalized = previous["delayed_throttle_1"]
-            valid = True
-            for _ in range(25):
-                output = UnitySourcePlantOutputC()
-                if not step(ctypes.byref(value), 0.001,
-                            ctypes.byref(output)):
-                    valid = False
-                    break
-                value.state[:] = output.state[:]
-                value.wheel_rotation_angle_rad[:] = \
-                    output.wheel_rotation_angle_rad[:]
-                value.suspension_history_initialized = \
-                    output.suspension_history_initialized
-            if valid:
-                raw_wheels_at[current_time] = (value.state[5], value.state[6])
+            rear = raw_rear_omega_before_observer(previous_time, current_time)
+            if rear is not None:
+                raw_wheels_at[current_time] = rear
         for start_time, end_time in zip(common, common[1:]):
             if abs((end_time - start_time) - 0.025) > 0.004:
                 continue
@@ -3208,8 +3286,8 @@ def report_source_plant_rollout(
                 # Compare against the plant endpoint before that correction
                 # to determine whether the correction itself harms the next
                 # interval's initial condition.
-                "queue_slot_1_pre_observer_wheels": (
-                    start["delayed_throttle_1"], True),
+                "queue_slot_2_pre_observer_wheels": (
+                    start["delayed_throttle_2"], True),
             }
             measured_average_omega = [
                 measured_angles[side] / (end_time - start_time)
@@ -3265,7 +3343,7 @@ def report_source_plant_rollout(
                     predicted_average_omega = predicted_delta[side] / (
                         end_time - start_time)
                     errors[mode].append({
-                        "q": start["delayed_throttle_1"],
+                        "q": throttle,
                         "steer": start["physical_steering"],
                         "error": measured_angles[side] - predicted_delta[side],
                         "start_omega": start_omega[side],
@@ -3881,10 +3959,28 @@ def report_source_plant_rollout(
         start_time = times[start]
         start_truth = truth_by_stamp[start_time]
         start_plant = plant_by_stamp[start_time]
-        # Isolate starting motion-state error without granting the rollout any
-        # future truth or changing hidden wheel/suspension states.
+        # Experimental causal A/B: the odometry observer overwrites the rear
+        # wheel speeds with 2*(encoder-model rotation innovation)/packet_dt.
+        # The resulting rear speeds are then carried into the MPC's physical
+        # source state. Here recover the PRE-OBSERVER rear wheel speeds using
+        # only the immediately preceding already-published source state and
+        # that previous request's exact slot-2 actuator command. NO Unity
+        # truth or future packet is used to construct these initial states.
+        # This does NOT alter production odometry or source state and is not
+        # an empirical damping/correction rule.
+        state = source_state(start_plant)
+        if source_initial_rear_omega_from_prior_step:
+            if start < 1 or abs(start_time - times[start-1] - .025) > .004:
+                skipped += 1
+                continue
+            raw_rear = raw_rear_omega_before_observer(
+                times[start-1], start_time)
+            if raw_rear is None:
+                skipped += 1
+                continue
+            state[5], state[6] = raw_rear
         state = apply_initial_motion_oracle(
-            source_state(start_plant), start_truth, oracle_components)
+            state, start_truth, oracle_components)
         if causal_steering_boundary_correction:
             state[13] = reconstruct_feedback_aligned_rack(start_plant)
         state, history_initialized = reconcile_start_state(
@@ -5021,6 +5117,8 @@ def report_source_plant_rollout(
             "yaw_residual_gain": yaw_residual_gain,
             "yaw_residual_decay": yaw_residual_decay,
             "oracle_motion_initial_state": oracle_motion_initial_state,
+            "causal_prior_step_raw_rear_omega_initialization":
+                source_initial_rear_omega_from_prior_step,
             "collision_or_fault_cutoff_receipt_s": cutoff_receipt_s,
             "collision_or_fault_cutoff_reason": cutoff_reason,
             "truth_pose_twist_closure_validity_threshold_m_per_25ms":
@@ -5053,6 +5151,13 @@ def main() -> int:
         "--source-plant-rollout", action="store_true",
         help="score a no-reanchoring 25 ms command-sequence rollout using the logged "
              "UnityPlantState and the production C++ source plant",
+    )
+    parser.add_argument(
+        "--source-initial-rear-omega-from-prior-step", action="store_true",
+        help="diagnostic A/B ONLY: replace the initial two encoder-corrected "
+             "rear wheel angular speeds with the raw source-plant transition "
+             "from the immediately preceding exact request epoch; this reads "
+             "only causal state/commands, never Unity truth or future sensors",
     )
     parser.add_argument(
         "--source-reconcile-suspension-jounce", action="store_true",
@@ -5279,7 +5384,8 @@ def main() -> int:
                         str(args.source_plant_library),
                 },
                 args.source_rollout_control_index,
-                set(args.oracle_initial_motion_components))
+                set(args.oracle_initial_motion_components),
+                args.source_initial_rear_omega_from_prior_step)
     elif args.source_plant_rollout:
         print(f"source-plant rollout: bag has no usable {PLANT} stream")
     # A replay bag may contain both the source run's controller diagnostics

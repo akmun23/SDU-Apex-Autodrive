@@ -1,43 +1,52 @@
-# Build and run
+# Running the MPC: choose practice or competition
 
-## Practice trial
+The maintained controller uses one of TWO standalone track configurations.
+The ROS launcher selects the profile from the map identity. There is no
+shared stack of old weight overlays in the normal runtime.
 
-The maintained practice pair is the `autodrive_practice_20260924_b` map and
-`source_command_4p800.csv` trajectory. Its MPC profile is
-`mpc_practice_fastline.yaml`; production AMCL parameters are used directly.
-Run a warmup lap plus ten scored laps with:
+| Track | Complete MPC profile | Native command raceline |
+|---|---|---|
+| Practice | f1tenth_mpc/config/mpc_practice.yaml | autodrive_practice_20260924_b/source_command_4p800.csv |
+| Competition | f1tenth_mpc/config/mpc_competition.yaml | autodrive_iros_2026_compete/ipopt_best_6p925_source_witness.csv |
 
-```bash
-SDU_APEX_TRIAL_TOTAL_LAPS=11 \
-  tools/run_mpc_practice_trial.sh practice_fastline_01
-```
+The practice profile is the exact merged, qualified 4500/1450 parameter
+set: five complete independent ten-scored-lap races, mean 49.1622 s,
+zero collisions/controller failures or hard command deadlines. The
+competition profile has INDEPENDENT weights and remains experimental.
+The competition reference is the 6.925 s PhysX source-validated IPOPT
+line, NOT a verified Unity/MPC ten-lap time.
 
-The runner starts the controller, recorder, simulator, and collision/lap
-watcher, and stores the complete run under `live_runs/`. Use a new run ID each
-time. The current baseline and recorded scores are in
-[`docs/PRODUCTION_BASELINE.md`](docs/PRODUCTION_BASELINE.md).
+## Choose a track
+
+    tools/run_mpc_trial.sh show
+    SDU_APEX_TRIAL_TOTAL_LAPS=11 tools/run_mpc_trial.sh practice practice_01
+    SDU_APEX_IROS_TOTAL_LAPS=11 tools/run_mpc_trial.sh competition comp_01
+
+Each supervised runner starts the controller, recorder, Unity simulator
+and collision/lap watcher, saving results to live_runs/RUN_ID. Use a new
+RUN_ID every time. The normal dispatcher refuses runtime parameter
+overrides and thus cannot silently mix practice and competition weights.
+
+For intentional development A/B runs only, call the lower-level
+tools/run_mpc_practice_trial.sh or tools/run_iros_trial.sh directly
+with its explicitly named MPC parameter overlay. Such overlays are
+never required to run the production practice baseline.
 
 ## Competition image
 
-Build and launch the fixed competition stack:
+    tools/build_competition.sh
+    tools/run_competition.sh
 
-```bash
-tools/build_competition.sh
-tools/run_competition.sh
-```
+This standalone launch has the same default IROS map and pinned IPOPT
+raceline. Source-only validity is not a substitute for closed-loop
+validation. The native source-plant physical corridor, controller
+faults, and 20 ms command-publication checks remain active.
 
-The competition launch uses the installed competition map/trajectory pair and
-only steering and normalized throttle actuator outputs. Check permitted ROS
-topics with `python3 tools/verify_runtime_topic_policy.py` before launch.
+## Development
 
-## Development launch
+    AUTODRIVE_REBUILD=0 SDU_APEX_IMAGE=sdu-apex-autodrive:dev tools/start_dev.sh
+    SDU_APEX_SIM_TRACK=practice SDU_APEX_SIM_MODE=batchmode tools/start_simulator.sh
 
-For development without the supervised trial wrapper:
-
-```bash
-AUTODRIVE_REBUILD=0 SDU_APEX_IMAGE=sdu-apex-autodrive:dev tools/start_dev.sh
-SDU_APEX_SIM_TRACK=practice SDU_APEX_SIM_MODE=batchmode tools/start_simulator.sh
-```
-
-Use `tools/stop_autodrive.sh` or Ctrl-C to stop the relevant process. Do not
-reuse a run ID; `live_runs/` is ignored by Git and contains only local captures.
+Stop with tools/stop_autodrive.sh or Ctrl-C. Superseded experiment files
+were preserved outside active config under
+live_runs/mpc_profile_history_20261101.

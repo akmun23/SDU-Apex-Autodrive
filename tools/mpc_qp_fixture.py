@@ -17,8 +17,8 @@ import subprocess
 import sys
 import time
 
-MAGIC = b"SDUFQP4\n"
-SCHEMA_VERSION = 4
+MAGIC = b"SDUFQP5\n"
+SCHEMA_VERSION = 5
 NX = 23
 NU = 2
 HORIZON = 30
@@ -83,7 +83,7 @@ def parse_payload(data: bytes) -> dict:
     if passes < 1:
         raise FixtureError("fixture has no solver pass")
 
-    per_stage = NX * NX + 2 * NX * NU + 5 * NX + 4 * NU
+    per_stage = 2 * NX * NX + 2 * NX * NU + 5 * NX + 4 * NU + 1
     lower_state_bounds = []
     upper_state_bounds = []
     lower_input_bounds = []
@@ -94,9 +94,11 @@ def parse_payload(data: bytes) -> dict:
         cursor.f32_array(NX)  # d
         cursor.f32_array(NX)  # Q diagonal
         cursor.f32_array(NX)  # q
+        cursor.f32_array(NX * NX)  # full symmetric Q offdiag
         cursor.f32_array(NX * NU)  # N cross term
         cursor.f32_array(NU)  # R diagonal
         cursor.f32_array(NU)  # r
+        cursor.f32_array(1)  # R steering/throttle cross term
         lower_state_bounds.append(cursor.f32_array(NX))
         upper_state_bounds.append(cursor.f32_array(NX))
         lower_input_bounds.append(cursor.f32_array(NU))
@@ -180,6 +182,21 @@ def parse_payload(data: bytes) -> dict:
     debug_regularization = cursor.f32_array(1)
     debug_counts = [cursor.signed(), cursor.signed()]
     debug_times_ns = [cursor.u64() for _ in range(7)]
+    terminal_planes = []
+    terminal_plane_rho = 0.0
+    if cursor.offset != len(data):
+        if cursor.word() != 0x314d5254:
+            raise FixtureError("fixture has unrecognized terminal extension")
+        count = cursor.signed()
+        terminal_plane_rho = cursor.f32_array(1)[0]
+        if not 1 <= count <= 10 or not math.isfinite(terminal_plane_rho) or terminal_plane_rho <= 0:
+            raise FixtureError("invalid terminal constraint metadata")
+        for _ in range(count):
+            normal = cursor.f32_array(NX)
+            bound = cursor.f32_array(1)[0]
+            if not all(math.isfinite(v) for v in (*normal, bound)) or not any(normal):
+                raise FixtureError("invalid terminal constraint")
+            terminal_planes.append({"normal": normal, "upper": bound})
     if cursor.offset != len(data):
         raise FixtureError("fixture has trailing or unrecognized bytes")
     if not all(math.isfinite(value) for value in terminal_q + terminal_linear):
@@ -187,7 +204,7 @@ def parse_payload(data: bytes) -> dict:
     if max_solve_time_us < 0.0 or iterations < 0 or time_budget_exhausted not in (0, 1):
         raise FixtureError("invalid solver metadata")
     if (rho <= 0 or rho_u <= 0 or rho_max < 1 or rho_max > 127 or
-            solver_tolerance <= 0 or max_iterations < 1 or max_iterations > 200 or
+            solver_tolerance <= 0 or max_iterations < 1 or max_iterations > 300 or
             adaptive_rho not in (0, 1) or cold_start not in (0, 1) or
             reuse_same_epoch not in (0, 1) or
             shared_rho not in (0, 1) or adaptive_update_period < 1 or
@@ -205,6 +222,8 @@ def parse_payload(data: bytes) -> dict:
         raise FixtureError("invalid solver status")
 
     return {
+        "terminal_constraints": terminal_planes,
+        "terminal_constraint_rho": terminal_plane_rho,
         "schema_version": version,
         "nx": nx,
         "nu": nu,
@@ -356,27 +375,54 @@ def seal(payload: Path, trajectory: Path | None, input_csv: Path | None,
                 "files": [
                     "f1tenth_mpc/include/mpc_types.h",
                     "f1tenth_mpc/include/mpc_rti.h",
-                    "f1tenth_mpc/src/mpc_rti.c",
-                    "f1tenth_mpc/src/vehicle_model.c",
+                    "f1tenth_mpc/src/mpc_rti.cpp",
+                    "f1tenth_mpc/src/mpc_rti_qp.cpp",
+                    "f1tenth_mpc/src/mpc_rti_internal.hpp",
+                    "f1tenth_mpc/src/vehicle_model.cpp",
                     "f1tenth_mpc/src/unity_source_plant.cpp",
                 ],
                 "sha256": source_set_sha256(root, (
                     "f1tenth_mpc/include/mpc_types.h",
                     "f1tenth_mpc/include/mpc_rti.h",
-                    "f1tenth_mpc/src/mpc_rti.c",
-                    "f1tenth_mpc/src/vehicle_model.c",
+                    "f1tenth_mpc/src/mpc_rti.cpp",
+                    "f1tenth_mpc/src/mpc_rti_qp.cpp",
+                    "f1tenth_mpc/src/mpc_rti_internal.hpp",
+                    "f1tenth_mpc/src/vehicle_model.cpp",
                     "f1tenth_mpc/src/unity_source_plant.cpp")),
+            },
+            "controller_runtime": {
+                "files": [
+                    "f1tenth_mpc/src/mpc_controller_node.cpp",
+                    "f1tenth_mpc/src/mpc_controller_node_impl.hpp",
+                    "f1tenth_mpc/src/mpc_controller_diagnostics.cpp",
+                    "f1tenth_mpc/src/mpc_controller_recovery.cpp",
+                    "f1tenth_mpc/src/mpc_diagnostic_worker.cpp",
+                    "f1tenth_mpc/src/mpc_diagnostic_worker.hpp",
+                ],
+                "sha256": source_set_sha256(root, (
+                    "f1tenth_mpc/src/mpc_controller_node.cpp",
+                    "f1tenth_mpc/src/mpc_controller_node_impl.hpp",
+                    "f1tenth_mpc/src/mpc_controller_diagnostics.cpp",
+                    "f1tenth_mpc/src/mpc_controller_recovery.cpp",
+                    "f1tenth_mpc/src/mpc_diagnostic_worker.cpp",
+                    "f1tenth_mpc/src/mpc_diagnostic_worker.hpp")),
             },
             "solver_and_scaling": {
                 "files": [
                     "f1tenth_mpc/include/riccati_solver.h",
                     "f1tenth_mpc/include/riccati_state_polygon.h",
-                    "f1tenth_mpc/src/riccati_solver.c",
+                    "f1tenth_mpc/src/riccati_solver.cpp",
+                    "f1tenth_mpc/src/riccati_factorization.cpp",
+                    "f1tenth_mpc/src/riccati_scaling.cpp",
+                    "f1tenth_mpc/src/riccati_solver_internal.hpp",
                 ],
                 "sha256": source_set_sha256(root, (
                     "f1tenth_mpc/include/riccati_solver.h",
                     "f1tenth_mpc/include/riccati_state_polygon.h",
-                    "f1tenth_mpc/src/riccati_solver.c")),
+                    "f1tenth_mpc/src/riccati_solver.cpp",
+                    "f1tenth_mpc/src/riccati_factorization.cpp",
+                    "f1tenth_mpc/src/riccati_scaling.cpp",
+                    "f1tenth_mpc/src/riccati_solver_internal.hpp")),
             },
         },
         "machine": {

@@ -253,7 +253,8 @@ def build_manifest(args: argparse.Namespace, root: Path) -> dict:
         "selected_environment": {
             key: os.environ.get(key) for key in (
                 "ROS_DOMAIN_ID", "SDU_APEX_MPC_NATIVE_TUNING",
-                "OMP_NUM_THREADS", "OMP_PROC_BIND", "OMP_PLACES")
+                "OMP_NUM_THREADS", "OMP_PROC_BIND", "OMP_PLACES",
+                "GOMP_SPINCOUNT", "OMP_WAIT_POLICY")
             if os.environ.get(key) is not None
         },
         "build": build_record,

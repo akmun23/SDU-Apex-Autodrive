@@ -35,7 +35,7 @@ def _load_osqp():
 
 
 def decode_problem(payload: bytes) -> dict:
-    parse_payload(payload)  # schema, finite values, bounds, and exact EOF.
+    metadata=parse_payload(payload)  # schema, finite values, bounds, and exact EOF.
     cursor = Cursor(payload)
     cursor.offset = HEADER_SIZE
     steps = []
@@ -45,14 +45,17 @@ def decode_problem(payload: bytes) -> dict:
         d = np.asarray(cursor.f32_array(NX))
         Q = np.asarray(cursor.f32_array(NX))
         q = np.asarray(cursor.f32_array(NX))
+        Q_offdiag = np.asarray(cursor.f32_array(NX * NX)).reshape(NX, NX)
         N = np.asarray(cursor.f32_array(NX * NU)).reshape(NX, NU)
         R = np.asarray(cursor.f32_array(NU))
         r = np.asarray(cursor.f32_array(NU))
+        R_cross = cursor.f32_array(1)[0]
         x_lb = np.asarray(cursor.f32_array(NX))
         x_ub = np.asarray(cursor.f32_array(NX))
         u_lb = np.asarray(cursor.f32_array(NU))
         u_ub = np.asarray(cursor.f32_array(NU))
-        steps.append((A, B, d, Q, q, N, R, r, x_lb, x_ub, u_lb, u_ub))
+        steps.append((A, B, d, Q, q, N, R, r, x_lb, x_ub, u_lb, u_ub,
+                      Q_offdiag, R_cross))
     terminal_Q = np.asarray(cursor.f32_array(NX))
     terminal_q = np.asarray(cursor.f32_array(NX))
     terminal_lb = np.asarray(cursor.f32_array(NX))
@@ -65,7 +68,8 @@ def decode_problem(payload: bytes) -> dict:
         polygons.append(planes[:count])
     return {"steps": steps, "terminal_Q": terminal_Q,
             "terminal_q": terminal_q, "terminal_lb": terminal_lb,
-            "terminal_ub": terminal_ub, "x0": x0, "state_polygons": polygons}
+            "terminal_ub": terminal_ub, "x0": x0, "state_polygons": polygons,
+            "terminal_constraints": metadata["terminal_constraints"]}
 
 
 def build_osqp_matrices(problem: dict):
@@ -93,12 +97,17 @@ def build_osqp_matrices(problem: dict):
 
     for k, step in enumerate(problem["steps"]):
         _, _, _, Q, q, N, R, r, *_ = step
+        Q_offdiag,R_cross = step[12:]
         for i in range(nx):
-            add_hessian(xidx(k, i), xidx(k, i), Q[i])
+            add_hessian(xidx(k, i), xidx(k, i), Q[i] + Q_offdiag[i,i])
             linear[xidx(k, i)] += q[i]
+            for j in range(i+1,nx):
+                add_hessian(xidx(k,i),xidx(k,j),
+                    .5*(Q_offdiag[i,j]+Q_offdiag[j,i]))
         for a in range(nu):
             add_hessian(uidx(k, a), uidx(k, a), R[a])
             linear[uidx(k, a)] += r[a]
+        add_hessian(uidx(k,0),uidx(k,1),R_cross)
         for i in range(nx):
             for a in range(nu):
                 add_hessian(xidx(k, i), uidx(k, a), N[i, a])
@@ -136,14 +145,23 @@ def build_osqp_matrices(problem: dict):
     # Riccati ADMM deliberately excludes x0 from the split box constraints.
     # Its constrained state slots are x1..x(H-1) using step_data[k] bounds,
     # then xH using terminal bounds; step 0's state bounds are metadata only.
+    # The Riccati solver treats +/-BIG_BOUND as UNCONSTRAINED SENTINELS,
+    # not real physical ±50m or ±50rad/s limits. Wheel angular speed
+    # frequently exceeds 50rad/s in healthy high-speed source trajectories.
+    def solver_bound(lb, ub):
+        return (lb if lb > -50. else -np.inf,
+                ub if ub < 50. else np.inf)
     for k in range(1, horizon):
         step = problem["steps"][k]
         for i in range(nx):
-            add_constraint([(xidx(k, i), 1.0)], step[8][i], step[9][i])
+            lb,ub=solver_bound(step[8][i],step[9][i])
+            if np.isfinite(lb) or np.isfinite(ub):
+                add_constraint([(xidx(k, i), 1.0)], lb,ub)
     for i in range(nx):
-        add_constraint([(xidx(horizon, i), 1.0)],
-                       problem["terminal_lb"][i],
-                       problem["terminal_ub"][i])
+        lb,ub=solver_bound(problem["terminal_lb"][i],
+                           problem["terminal_ub"][i])
+        if np.isfinite(lb) or np.isfinite(ub):
+            add_constraint([(xidx(horizon, i), 1.0)],lb,ub)
     for k, step in enumerate(problem["steps"]):
         for a in range(nu):
             add_constraint([(uidx(k, a), 1.0)], step[10][a], step[11][a])
@@ -153,6 +171,9 @@ def build_osqp_matrices(problem: dict):
         for normal0, normal1, bound in polygon:
             add_constraint([(xidx(k, 0), normal0), (xidx(k, 1), normal1)],
                            -np.inf, bound)
+    for plane in problem.get("terminal_constraints", []):
+        add_constraint([(xidx(horizon,i),v) for i,v in enumerate(plane["normal"])],
+                       -np.inf,plane["upper"])
     Acon = sparse.coo_matrix((vals, (rows, cols)),
                              shape=(len(lower), nvar)).tocsc()
     return P, linear, Acon, np.asarray(lower), np.asarray(upper)
@@ -230,8 +251,9 @@ def solve(path: Path, max_iter: int = 25_000,
         raise FixtureError(f"OSQP failed on {path.name}: {status}")
     stage_hessian_min_eigenvalue = min(
         float(np.linalg.eigvalsh(np.block([
-            [np.diag(step[3]), step[5]],
-            [step[5].T, np.diag(step[6])],
+            [np.diag(step[3])+step[12], step[5]],
+            [step[5].T, np.diag(step[6])+
+                np.array([[0.,step[13]],[step[13],0.]])],
         ])).min()) for step in problem["steps"])
     stage_hessian_min_eigenvalue = min(
         stage_hessian_min_eigenvalue,

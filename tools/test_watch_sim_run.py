@@ -18,6 +18,49 @@ class MpcViabilityStatusTest(unittest.TestCase):
         self.assertTrue(watcher.mpc_active)
 
 
+class SimulationNonfatalMpcDiagnosticTest(unittest.TestCase):
+    def test_rejected_corridor_is_recorded_without_disabling_mpc(self):
+        import io
+        import json
+        from types import SimpleNamespace
+        from contextlib import redirect_stdout
+        from tools.watch_sim_run import SimRunWatcher
+
+        message=SimpleNamespace(data=json.dumps({
+            "status":"rejected_nonlinear_rollout",
+            "nonlinear_failure_reason":"corridor",
+            "nonlinear_failure_stage":25}))
+        watcher=SimpleNamespace(
+            mpc_fault_reason=None, mpc_active=True,
+            continue_after_mpc_rejection=True, mpc_rejection_count=0)
+        output=io.StringIO()
+        with redirect_stdout(output):
+            SimRunWatcher._mpc_diagnostics_callback(watcher,message)
+        self.assertEqual(watcher.mpc_rejection_count,1)
+        self.assertTrue(watcher.mpc_active)
+        self.assertIn("MPC_REJECTION_OBSERVED",output.getvalue())
+        self.assertNotIn("SCREEN_ABORT",output.getvalue())
+
+    def test_default_supervisor_remains_fatal_on_rejection(self):
+        import io
+        import json
+        from types import SimpleNamespace
+        from contextlib import redirect_stdout
+        from tools.watch_sim_run import SimRunWatcher
+        watcher=SimpleNamespace(
+            mpc_fault_reason=None,mpc_active=False,
+            continue_after_mpc_rejection=False,mpc_rejection_count=0)
+        message=SimpleNamespace(data=json.dumps({
+            "status":"rejected_nonlinear_rollout",
+            "nonlinear_failure_reason":"corridor",
+            "nonlinear_failure_stage":4}))
+        with redirect_stdout(io.StringIO()):
+            SimRunWatcher._mpc_diagnostics_callback(watcher,message)
+        self.assertEqual(watcher.mpc_fault_reason,
+                         "rejected_nonlinear_rollout; nonlinear=corridor@4")
+        self.assertEqual(watcher.mpc_rejection_count,1)
+
+
 class LapTargetDistanceGuardTest(unittest.TestCase):
     def test_counter_alone_is_not_a_completed_lap(self):
         self.assertFalse(lap_target_satisfied(2, 8, 6, 14.8, 20.0))

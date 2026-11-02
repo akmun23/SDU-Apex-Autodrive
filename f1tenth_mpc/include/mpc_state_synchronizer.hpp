@@ -100,6 +100,11 @@ public:
     MpcSyncStatus set_map_pose(const MpcMapPoseAnchor &anchor);
     MpcSyncStatus synchronize(int64_t command_time_ns,
                               MpcSynchronizedState *state) const;
+    /* Apply the current map/odom rigid transform to an explicitly bracketed
+     * historical odometry epoch. Used to place delayed mechanical snapshots
+     * in tracking coordinates at THEIR timestamp, before propagation. */
+    MpcSyncStatus state_at_odometry_epoch(int64_t stamp_ns,
+                                         MpcSynchronizedState *state) const;
     void reset();
     static const char *status_name(MpcSyncStatus status);
 

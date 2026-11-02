@@ -4,6 +4,7 @@
 // Unknown cells and map edges are obstacles. Map data are ROS OccupancyGrid
 // row-major bottom-left, not vertically inverted PGM image rows.
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -53,7 +54,28 @@ public:
             edt1d(f.data(),height,d.data());
             for(int y=0;y<height;++y)
                 p->distances_[static_cast<std::size_t>(y)*width+x]=
-                    static_cast<float>(std::sqrt(std::max(0.0,d[y]))*resolution);
+                    std::nextafter(static_cast<float>(
+                        std::sqrt(std::max(0.0,d[y]))*resolution),-INFINITY);
+        }
+        // One-time, 64x64 fractional grid-cell offset table. Every entry
+        // stores an UPPER bound on the distance from a query inside that
+        // fraction bin to each of its four neighboring cell centers.
+        // The runtime never computes square roots for field interpolation.
+        for (int by=0;by<kFractionBins;++by) {
+            for (int bx=0;bx<kFractionBins;++bx) {
+                for (int j=0;j<=1;++j)for(int i=0;i<=1;++i) {
+                    const double fx0=double(bx)/kFractionBins;
+                    const double fx1=double(bx+1)/kFractionBins;
+                    const double fy0=double(by)/kFractionBins;
+                    const double fy1=double(by+1)/kFractionBins;
+                    const double rx=std::max(std::abs(fx0-i),std::abs(fx1-i));
+                    const double ry=std::max(std::abs(fy0-j),std::abs(fy1-j));
+                    const double upper=resolution*std::sqrt(rx*rx+ry*ry);
+                    p->upper_center_offset_[
+                        (by*kFractionBins+bx)*4+j*2+i]=
+                        std::nextafter(static_cast<float>(upper),INFINITY);
+                }
+            }
         }
         return p;
     }
@@ -68,14 +90,21 @@ public:
         const double row=(-s_*dx+c_*dy)/resolution_-0.5;
         if (!(col>=0&&row>=0&&col<width_-1&&row<height_-1))return -INFINITY;
         const int ix=static_cast<int>(col),iy=static_cast<int>(row);
-        double lower=-INFINITY;
-        for(int j=0;j<=1;++j)for(int i=0;i<=1;++i){
-            const double rx=col-(ix+i),ry=row-(iy+j);
-            const double center_distance=distances_[
-                static_cast<std::size_t>(iy+j)*width_+ix+i];
-            lower=std::max(lower,center_distance-
-                resolution_*std::sqrt(rx*rx+ry*ry));
-        }
+        const int bx=std::min(kFractionBins-1,
+            static_cast<int>((col-ix)*kFractionBins));
+        const int by=std::min(kFractionBins-1,
+            static_cast<int>((row-iy)*kFractionBins));
+        const float *const upper=&upper_center_offset_[
+            (by*kFractionBins+bx)*4];
+        const std::size_t base=static_cast<std::size_t>(iy)*width_+ix;
+        // Distance-to-obstacle is 1-Lipschitz. Subtracting an UPPER bound
+        // on each center-to-query offset yields a certified lower bound.
+        // Unlike bilinear interpolation this can never overestimate safety.
+        const double lower=std::max(
+            std::max(double(distances_[base])-upper[0],
+                     double(distances_[base+1])-upper[1]),
+            std::max(double(distances_[base+width_])-upper[2],
+                     double(distances_[base+width_+1])-upper[3]));
         // Occupied CELL extends one half diagonal beyond its center.
         return lower-0.7071067811865476*resolution_;
     }
@@ -132,8 +161,17 @@ public:
         for(int k=0;k<=steps;++k){
             const double t=double(k)/steps;
             const MpcBodyPose pose{a.x+t*dx,a.y+t*dy,a.yaw+t*dyaw};
-            const double d=footprint_clearance_lower_bound(pose)-
-                required_clearance_m-segment_bound;
+            // Rectangle circumscribed by radius <0.290m around its
+            // geometric center (0.175m in front of the rear axle).
+            // For open regions one EDT query certifies the *entire* rigid
+            // footprint; otherwise retain all dense perimeter probes.
+            const double c=std::cos(pose.yaw),s=std::sin(pose.yaw);
+            const double center_lower=point_clearance_lower_bound(
+                pose.x+0.175*c,pose.y+0.175*s)-0.290;
+            const double safe_threshold=required_clearance_m+segment_bound;
+            const double footprint_lower=center_lower>=safe_threshold
+                ? center_lower : footprint_clearance_lower_bound(pose);
+            const double d=footprint_lower-safe_threshold;
             slack=std::min(slack,d);
             if(d<0){
                 if(min_slack)*min_slack=slack;
@@ -169,8 +207,10 @@ private:
             d[q]=dx*dx+f[v[k]];
         }
     }
+    static constexpr int kFractionBins=64;
     int width_{},height_{};
     double resolution_{},origin_x_{},origin_y_{},c_{},s_{};
+    std::array<float,kFractionBins*kFractionBins*4> upper_center_offset_{};
     std::vector<float> distances_;
 };
 } // namespace f1tenth_mpc

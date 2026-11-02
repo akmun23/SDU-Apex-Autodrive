@@ -13,6 +13,7 @@ namespace f1tenth_mpc {
 
 constexpr std::size_t kMpcCommandHistoryCapacity = 16;
 
+
 struct MpcCommandHistoryEntry {
     int64_t stamp_ns{};
     double steering_command_rad{};
@@ -20,8 +21,9 @@ struct MpcCommandHistoryEntry {
     bool throttle_valid{};
 };
 
-/* Fixed-capacity causal command history. Entries must be strictly ordered by
- * their ROS header timestamp; overflow replaces the oldest entry. */
+/* Fixed-capacity causal command history. Runtime entries come from exact
+ * /odom/bridge_request_command payloads, never ROS publication receipts.
+ * Entries must be ordered by request stamp; overflow replaces the oldest. */
 class MpcCommandHistory {
 public:
     bool push(const MpcCommandHistoryEntry &entry);
@@ -61,9 +63,9 @@ struct MpcControlTimePredictorConfig {
      * budget a second time. */
     double maximum_prediction_lead_s{0.500};
     double model_integration_step_s{0.025};
-    /* Commands are timestamped when published by the controller, while the
-     * simulator may apply them later after the bridge transport backlog. The
-     * effective command timeline is shifted forward by this measured delay. */
+    /* Optional measured delay AFTER the command-history event. Runtime uses
+     * confirmed host Bridge-request epochs, with zero extra delay. A nonzero
+     * value requires independent evidence of request-to-application lag. */
     double command_actuation_delay_s{0.0};
 };
 

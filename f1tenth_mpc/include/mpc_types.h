@@ -183,7 +183,8 @@ typedef struct
 /**
  * @brief Per-stage dynamics, cost, and box-constraint data for Riccati-ADMM.
  * @details Represents one prediction step used by the constrained LQR solve.
- *          Q and R are diagonal weights; N is the state/input cross term.
+ *          Q_diag/Q_offdiag and R_diag/R_cross represent symmetric state
+ *          and control Hessians; N is the complete state-input cross term.
  *          x/u bounds define box constraints for ADMM projection.
  */
 typedef struct
@@ -192,9 +193,13 @@ typedef struct
     float B[RICCATI_MAX_NX][RICCATI_MAX_NU];
     float d[RICCATI_MAX_NX];
     float Q_diag[RICCATI_MAX_NX];
+    /* Symmetric OFF-diagonal state Hessian (diagonal is only Q_diag). */
+    float Q_offdiag[RICCATI_MAX_NX][RICCATI_MAX_NX];
     float q[RICCATI_MAX_NX];
     float N[RICCATI_MAX_NX][RICCATI_MAX_NU];
     float R_diag[RICCATI_MAX_NU];
+    /* Full 2-input curvature; diagonal remains only in R_diag. */
+    float R_cross;
     float r[RICCATI_MAX_NU];
     float x_lb[RICCATI_MAX_NX];
     float x_ub[RICCATI_MAX_NX];
@@ -212,14 +217,25 @@ typedef struct
  */
 enum { RICCATI_STATE_POLYGON_MAX_PLANES = 8 };
 
-/* Affine half-planes in optimizer coordinates 0 and 1 (e_y, e_psi).
- * They constrain an ADMM split, not additional optimizer/dynamic states. */
+/* Affine half-planes in e_y, e_psi; the original nonlinear source-plant
+ * rollout and exact body-footprint checker remain the collision authority. */
 typedef struct
 {
     int count;
     float normal[RICCATI_STATE_POLYGON_MAX_PLANES][2];
     float upper[RICCATI_STATE_POLYGON_MAX_PLANES];
 } RiccatiStatePolygon_t;
+
+/* General terminal halfspaces C*x[N] <= upper. Split independently in
+ * ADMM so the Riccati recursion retains its block structure. */
+enum { RICCATI_TERMINAL_MAX_PLANES = 10 };
+typedef struct
+{
+    int count;
+    float normal[RICCATI_TERMINAL_MAX_PLANES][RICCATI_MAX_NX];
+    float upper[RICCATI_TERMINAL_MAX_PLANES];
+    float rho;
+} RiccatiTerminalConstraints_t;
 
 typedef struct
 {
@@ -255,6 +271,7 @@ typedef struct
     float state_scale[RICCATI_MAX_NX];
     float input_scale[RICCATI_MAX_NU];
     RiccatiStatePolygon_t state_polygons[RICCATI_HORIZON + 1];
+    RiccatiTerminalConstraints_t terminal_constraints;
 } RiccatiAdmmConfig_t;
 
 /**

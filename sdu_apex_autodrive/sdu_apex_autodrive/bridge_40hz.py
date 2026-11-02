@@ -27,8 +27,8 @@ import rclpy
 from gevent.event import Event
 from gevent.lock import Semaphore
 from std_msgs.msg import Bool
-from std_msgs.msg import Float32
 from std_msgs.msg import String
+from sdu_apex_msgs.msg import DriveCommand
 from rclpy.qos import (
     QoSDurabilityPolicy,
     QoSHistoryPolicy,
@@ -42,6 +42,10 @@ from autodrive_roboracer import autodrive_bridge as official_bridge
 EXPECTED_RATE_HZ = 40.0
 DEFAULT_RATE_HZ = EXPECTED_RATE_HZ
 PACKET_TIMING_TOPIC = "/autodrive/roboracer_1/bridge_packet_timing"
+# Team-generated, request-stamped source of truth for actuator input.
+BRIDGE_REQUEST_COMMAND_TOPIC = "/odom/bridge_request_command"
+BRIDGE_ACTUATOR_FEEDBACK_TOPIC = "/odom/bridge_actuator_feedback"
+_bridge_actuator_feedback_publisher: Any = None
 TIMING_FAULT_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault"
 TIMING_FAULT_DETAIL_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault_detail"
 DEV_SIM_RESET_ENABLE_ENV = "SDU_APEX_DEV_SIM_RESET_ENABLED"
@@ -125,6 +129,7 @@ _command_listener_node: Any = None
 _packet_timing_lock = Semaphore()
 _packet_handler_lock = Semaphore(1)
 _packet_timing_publisher: Any = None
+_bridge_request_command_publisher: Any = None
 _timing_fault_publisher: Any = None
 _timing_fault_detail_publisher: Any = None
 _packet_sequence = 0
@@ -151,27 +156,27 @@ def _set_pending_request(
         generation: int,
         request_sequence: int,
         command: dict[str, str],
-        steering_update_monotonic_ns: int | None) -> bool:
+        steering_update_monotonic_ns: int | None) -> Any | None:
     """Record one request boundary for FIFO response association."""
     global _pending_request_started_ns, _first_request_sent
     node = getattr(official_bridge, "autodrive_bridge", None)
     if node is None:
-        return False
+        return None
     try:
         stamp = node.get_clock().now().to_msg()
     except Exception:
-        return False
+        return None
     request_ns = time.monotonic_ns()
     with _pending_request_lock:
         if (not _client_connected.is_set() or
                 generation != _connection_generation):
-            return False
+            return None
         _pending_requests.append((_copy_stamp(stamp), request_ns, slot_pool,
                                   generation, request_sequence, dict(command),
                                   steering_update_monotonic_ns))
         _pending_request_started_ns = _pending_requests[0][1]
         _first_request_sent = True
-    return True
+    return _copy_stamp(stamp)
 
 
 def _discard_pending_request() -> None:
@@ -279,6 +284,79 @@ def _packet_timing_pub() -> Any:
             _timing_fault_detail_publisher = node.create_publisher(
                 String, TIMING_FAULT_DETAIL_TOPIC, 10)
         return _packet_timing_publisher
+
+
+def _publish_exact_request_command(stamp: Any, command: dict[str, str]) -> None:
+    """Publish the SAME discretized command the Bridge is sending to Unity.
+
+    This runs before the Socket.IO request, giving the sensor odometry
+    subscriber the same request stamp and values before the response arrives.
+    The message uses DriveCommand's established physical-steering convention.
+    Unlike the development-only packet timing stream this is always enabled.
+    """
+    global _bridge_request_command_publisher, _bridge_actuator_feedback_publisher
+    node = getattr(official_bridge, "autodrive_bridge", None)
+    if node is None:
+        raise RuntimeError("cannot publish request command without Bridge node")
+    if _bridge_request_command_publisher is None:
+        _bridge_request_command_publisher = node.create_publisher(
+            DriveCommand, BRIDGE_REQUEST_COMMAND_TOPIC, 100)
+    # Discover the feedback endpoint before the first sensor response. Lazy
+    # creation at that response loses initial samples in volatile recorders.
+    if _bridge_actuator_feedback_publisher is None:
+        _bridge_actuator_feedback_publisher = node.create_publisher(
+            DriveCommand, BRIDGE_ACTUATOR_FEEDBACK_TOPIC, 100)
+    steering_normalized = float(command["V1 Steering"])
+    throttle_normalized = float(command["V1 Throttle"])
+    if (not math.isfinite(steering_normalized) or
+            not math.isfinite(throttle_normalized) or
+            abs(steering_normalized) > 1.0 or
+            not 0.0 <= throttle_normalized <= 1.0):
+        raise RuntimeError("Bridge command outside source-model input range")
+    message = DriveCommand()
+    message.header.stamp = _copy_stamp(stamp)
+    message.steering_angle_rad = steering_normalized * (math.pi / 6.0)
+    message.throttle_normalized = throttle_normalized
+    _bridge_request_command_publisher.publish(message)
+
+
+def _publish_packet_actuator_feedback(stamp: Any, data: dict[str, Any]) -> None:
+    """Preserve legal actuator feedback at its associated sensor epoch.
+
+    The stock Float32 topics lose this association. Publish before the stock
+    decoder emits encoder/IMU messages; odometry also joins by exact stamp so
+    independent DDS callback ordering cannot substitute a later sample.
+    """
+    global _bridge_actuator_feedback_publisher
+    steering = float(data["V1 Steering"])
+    throttle = float(data["V1 Throttle"])
+    # Unlike the normalized outgoing COMMAND, V1 Steering feedback is in
+    # radians. The official decoder publishes this value unchanged and uses
+    # it directly in its wheel-angle tan() calculation.
+    # Socket.cs emits CurrentSteeringAngle.ToString("F4"). The legal physical
+    # limit pi/6 rounds from 0.5235987756 to 0.5236; testing F4 feedback
+    # against a 1e-6 tolerance falsely kills the entire 40 Hz sensor stream
+    # precisely when the car reaches steering saturation in a corner. Accept
+    # half of the 1e-4 serialization quantum; still reject a genuine excess.
+    feedback_quantization_tolerance_rad = 0.5e-4 + 1e-7
+    if (not math.isfinite(steering) or
+            abs(steering) > math.pi / 6.0 + feedback_quantization_tolerance_rad or
+            not math.isfinite(throttle) or not 0.0 <= throttle <= 1.0):
+        raise RuntimeError(
+            f"Bridge actuator feedback outside physical range "
+            f"(steering_rad={steering:.9g}, throttle={throttle:.9g})")
+    node = getattr(official_bridge, "autodrive_bridge", None)
+    if node is None:
+        raise RuntimeError("cannot publish actuator feedback without Bridge node")
+    if _bridge_actuator_feedback_publisher is None:
+        _bridge_actuator_feedback_publisher = node.create_publisher(
+            DriveCommand, BRIDGE_ACTUATOR_FEEDBACK_TOPIC, 100)
+    message = DriveCommand()
+    message.header.stamp = _copy_stamp(stamp)
+    message.header.frame_id = "actuator_feedback"
+    message.steering_angle_rad = max(-math.pi / 6.0, min(math.pi / 6.0, steering))
+    message.throttle_normalized = throttle
+    _bridge_actuator_feedback_publisher.publish(message)
 
 
 def _trigger_timing_fault(reason: str) -> None:
@@ -689,11 +767,16 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
             command["V1 Reset"] = "True" if _reset_level else "False"
 
         request_sequence = _next_request_sequence()
-        if not _set_pending_request(
-                None, generation, request_sequence, command,
-                steering_update_monotonic_ns):
+        request_stamp = _set_pending_request(
+            None, generation, request_sequence, command,
+            steering_update_monotonic_ns)
+        if request_stamp is None:
             continue
         try:
+            # The exact payload snapshot, and the same integer ROS stamp as
+            # the forthcoming IMU/encoder packet, are emitted BEFORE the
+            # request. A later arrival-time command may differ at a corner.
+            _publish_exact_request_command(request_stamp, command)
             # Keep all outgoing Socket.IO calls serialized. The official bridge
             # runs a gevent server and this pacing loop is a greenlet.
             with _emit_lock:
@@ -758,6 +841,7 @@ def _install_packet_contract() -> None:
                 )
                 return None
             try:
+                _publish_packet_actuator_feedback(_active_request_stamp, data)
                 result = original_handler(sid, data)
             except Exception as exc:
                 # Do not let a decoder/publication exception silently kill
@@ -811,8 +895,8 @@ def _disable_restricted_bridge_subscriptions() -> None:
     and handles actuator command callbacks in the same ROS executor that is
     fed by the large numeric packet decoder.  Under load that executor can
     make legal steering/throttle commands stale.  Remove all three stock
-    subscribers; the small dedicated command listener below owns only the two
-    legal actuator command topics, while reset control remains disabled.
+    subscribers; the small dedicated command listener below owns the atomic
+    validated actuator command topic, while reset control remains disabled.
     """
     config = getattr(official_bridge, "config", None)
     pub_sub_dict = getattr(config, "pub_sub_dict", None)
@@ -832,18 +916,24 @@ def _disable_restricted_bridge_subscriptions() -> None:
         raise RuntimeError("stock bridge control subscription remained in bridge config")
 
 
-def _update_command_field(field: str, value: float) -> None:
+def _update_drive_command(message: Any) -> None:
+    """Capture one validated physical command pair under the request lock."""
     global _latest_steering_update_monotonic_ns
-    if not math.isfinite(value):
+    steering = float(message.steering_angle_rad)
+    throttle = float(message.throttle_normalized)
+    maximum_steering = math.pi / 6.0
+    if (not math.isfinite(steering) or abs(steering) > maximum_steering + 1.e-6 or
+            not math.isfinite(throttle) or not 0.0 <= throttle <= 1.0):
         return
     with _command_lock:
-        _latest_command[field] = str(round(value, 3))
-        if field == "V1 Steering":
-            _latest_steering_update_monotonic_ns = time.monotonic_ns()
+        _latest_command["V1 Steering"] = str(round(
+            max(-1.0, min(1.0, steering / maximum_steering)), 3))
+        _latest_command["V1 Throttle"] = str(round(throttle, 3))
+        _latest_steering_update_monotonic_ns = time.monotonic_ns()
 
 
 def _run_command_listener() -> None:
-    """Receive actuator commands separately from the numeric decoder."""
+    """Receive atomic actuator command pairs separately from the numeric decoder."""
     global _command_listener_executor, _command_listener_node
     while not _command_listener_stop.is_set():
         if not rclpy.ok():
@@ -862,19 +952,7 @@ def _run_command_listener() -> None:
                 history=QoSHistoryPolicy.KEEP_LAST,
             )
             node.create_subscription(
-                Float32,
-                "/autodrive/roboracer_1/throttle_command",
-                lambda message: _update_command_field(
-                    "V1 Throttle", float(message.data)),
-                qos,
-            )
-            node.create_subscription(
-                Float32,
-                "/autodrive/roboracer_1/steering_command",
-                lambda message: _update_command_field(
-                    "V1 Steering", float(message.data)),
-                qos,
-            )
+                DriveCommand, "/actuators/drive_command", _update_drive_command, qos)
             if _env_enabled(DEV_SIM_RESET_ENABLE_ENV, False):
                 node.create_subscription(
                     Bool, DEV_SIM_RESET_TOPIC, _on_reset_command, qos)

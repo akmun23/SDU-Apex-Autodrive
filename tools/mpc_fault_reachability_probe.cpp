@@ -74,8 +74,6 @@ static MpcRtiCycleConfiguration_t configuration(const json &j) {
   m.weight_throttle_command=.001f;
   m.weight_steering_slew=1.f;
   m.weight_throttle_slew=.1f;
-  m.sqp_steering_trust_region_rad=.08f;
-  m.sqp_throttle_trust_region=.10f;
   return c;
 }
 static Controls from_json(const json &a) {

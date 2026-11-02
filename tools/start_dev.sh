@@ -96,6 +96,15 @@ ros_domain_args=()
 if [[ -n "${ROS_DOMAIN_ID:-}" ]]; then
   ros_domain_args+=(-e "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}")
 fi
+openmp_wait_args=()
+if [[ -n "${GOMP_SPINCOUNT:-}" ]]; then
+  [[ "${GOMP_SPINCOUNT}" =~ ^[0-9]+$ ]] || {
+    echo 'GOMP_SPINCOUNT must be a nonnegative integer' >&2
+    exit 2
+  }
+  # Explicit timing experiment only; preserve libgomp defaults when unset.
+  openmp_wait_args+=(-e "GOMP_SPINCOUNT=${GOMP_SPINCOUNT}")
+fi
 
 controller_cpuset_args=()
 if [[ -n "${SDU_APEX_CPUSET_CPUS:-}" ]]; then
@@ -155,6 +164,7 @@ exec docker run --rm --name "${container}" \
   --network=host --ipc=host --privileged --gpus all \
   --log-opt max-size=10m --log-opt max-file=3 \
   "${ros_domain_args[@]}" \
+  "${openmp_wait_args[@]}" \
   -e SDU_APEX_AUTOSTART=1 \
   -e SDU_APEX_WITH_RVIZ="${SDU_APEX_WITH_RVIZ:-false}" \
   -e SDU_APEX_MPC_NATIVE_TUNING="${SDU_APEX_MPC_NATIVE_TUNING:-false}" \

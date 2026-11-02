@@ -36,13 +36,13 @@ def _bool(value: str) -> bool:
 
 
 def _mpc_parameter_files(mpc_share: str, map_path: str, overlay: str) -> list[str]:
-    # Practice tuning is not a generic vehicle default. In particular its
-    # tighter SQP correction radii must not leak into a newly mapped circuit.
-    parameters = [os.path.join(mpc_share, 'config', 'mpc_competition.yaml')]
-    if os.path.basename(map_path) == MAP_NAME:
-        parameters.append(os.path.join(mpc_share, 'config', 'mpc_practice_fastline.yaml'))
+    # Mutually exclusive profiles: never layer competition weights beneath
+    # the frozen, five-race-qualified practice configuration.
+    profile = ('mpc_practice.yaml' if os.path.basename(map_path) == MAP_NAME
+               else 'mpc_competition.yaml')
+    parameters = [os.path.join(mpc_share, 'config', profile)]
     if overlay:
-        parameters.append(overlay)
+        parameters.append(overlay)  # Explicit experimental A/B only.
     return parameters
 
 

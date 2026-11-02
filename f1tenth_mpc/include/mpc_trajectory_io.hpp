@@ -74,5 +74,25 @@ inline std::vector<MpcTrajectorySample_t> read_mpc_trajectory(
     return points;
 }
 
+// Production controller contract: accept a 15-column optimizer file only
+// as a *geometric racing reference*. Offline IPOPT commands, yaw/side-slip,
+// actual steering and open-loop physics witness are NOT controller inputs.
+// The physical predictor uses the measured car state and its own source plant.
+inline std::vector<MpcTrajectorySample_t> read_mpc_controller_trajectory(
+    std::istream &input, double *lap_length)
+{
+    auto points=read_mpc_trajectory(input,lap_length);
+    for(auto &p:points) {
+        p.source_witness_valid=0;
+        p.source_heading_error=0.;
+        p.source_v_rear=0.;
+        p.source_yaw_rate=0.;
+        p.source_physical_steering=0.;
+        p.source_steering_target=0.;
+        p.source_throttle=0.;
+    }
+    return points;
+}
+
 }  // namespace f1tenth_mpc
 #endif

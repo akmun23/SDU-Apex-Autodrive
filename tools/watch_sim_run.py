@@ -32,7 +32,8 @@ def stall_watch_armed(watch_mpc_run: bool, mpc_active: bool) -> bool:
 class SimRunWatcher(Node):
     def __init__(self, watch_mpc_run: bool = False,
                  watch_csv_command_test: bool = False,
-                 watch_csv_path_follow: bool = False) -> None:
+                 watch_csv_path_follow: bool = False,
+                 continue_after_mpc_rejection: bool = False) -> None:
         super().__init__("development_sim_run_watcher")
         self.lap_count: int | None = None
         self.initial_lap_count: int | None = None
@@ -43,6 +44,8 @@ class SimRunWatcher(Node):
         self.last_progress_time: float | None = None
         self.mpc_fault_reason: str | None = None
         self.mpc_active = False
+        self.continue_after_mpc_rejection = continue_after_mpc_rejection
+        self.mpc_rejection_count = 0
         self.csv_command_event: str | None = None
         self.create_subscription(
             Int32,
@@ -108,7 +111,7 @@ class SimRunWatcher(Node):
             diagnostic = json.loads(message.data)
         except (TypeError, json.JSONDecodeError):
             self.mpc_fault_reason = "invalid MPC diagnostics JSON"
-            print("MPC_DIAGNOSTICS_INVALID_JSON: aborting supervised run",
+            print("MPC_DIAGNOSTICS_INVALID_JSON: invalid diagnostics recorded",
                   flush=True)
             return
         status = diagnostic.get("status")
@@ -124,7 +127,16 @@ class SimRunWatcher(Node):
             reason = diagnostic.get("nonlinear_failure_reason", "none")
             stage = diagnostic.get("nonlinear_failure_stage", -1)
             self.mpc_fault_reason = f"{status}; nonlinear={reason}@{stage}"
-            print(f"MPC_CYCLE_REJECTED: {message.data}", flush=True)
+            self.mpc_rejection_count += 1
+            if self.continue_after_mpc_rejection:
+                # The complete diagnostic stays in the recorded ROS bag.
+                if (self.mpc_rejection_count <= 5 or
+                        self.mpc_rejection_count % 100 == 0):
+                    print(f"MPC_REJECTION_OBSERVED: count="
+                          f"{self.mpc_rejection_count} "
+                          f"{self.mpc_fault_reason}", flush=True)
+            else:
+                print(f"MPC_CYCLE_REJECTED: {message.data}", flush=True)
             return
         if status in (
                 "accepted_optimal", "accepted_feasible",
@@ -153,7 +165,10 @@ def main() -> int:
     parser.add_argument("--target-lap", type=int, default=0)
     parser.add_argument("--collision-only", action="store_true")
     parser.add_argument("--mpc-run", action="store_true",
-                        help="abort the simulator on the first rejected MPC cycle")
+                        help="monitor MPC diagnostics; normally abort on first rejection")
+    parser.add_argument("--continue-after-mpc-rejection", action="store_true",
+                        help="SIMULATION-ONLY: record rejected cycles and continue "
+                             "to collision, completed target laps or time limit")
     parser.add_argument("--csv-command-test", action="store_true",
                         help="watch GT-indexed CSV replay completion or abort")
     parser.add_argument("--csv-path-follow", action="store_true",
@@ -189,13 +204,15 @@ def main() -> int:
             args.timeout_s <= 0.0 or args.stall_timeout_s <= 0.0 or
             args.mpc_startup_timeout_s <= 0.0 or
             args.post_target_lap_guard_s < 0.0 or
-            args.minimum_lap_distance_m < 0.0):
+            args.minimum_lap_distance_m < 0.0 or
+            (args.continue_after_mpc_rejection and not args.mpc_run)):
         parser.error(
             "set a positive target-lap or collision-only, and a positive timeout-s")
 
     rclpy.init()
     watcher = SimRunWatcher(
-        args.mpc_run, args.csv_command_test, args.csv_path_follow)
+        args.mpc_run, args.csv_command_test, args.csv_path_follow,
+        args.continue_after_mpc_rejection)
     print("WATCHER_READY: collision, lap, odometry"
           + (", and MPC rejection" if args.mpc_run else "")
           + (", and CSV replay completion" if args.csv_command_test else "")
@@ -214,13 +231,15 @@ def main() -> int:
                 print("SCREEN_ABORT: collision", flush=True)
                 result = 3
                 break
-            if watcher.mpc_fault_reason is not None:
+            if (not args.continue_after_mpc_rejection and
+                    watcher.mpc_fault_reason is not None):
                 print(f"SCREEN_ABORT: MPC fault ({watcher.mpc_fault_reason})",
                       flush=True)
                 result = 5
                 break
-            if args.mpc_run and not watcher.mpc_active and (
-                    time.monotonic() - started >= args.mpc_startup_timeout_s):
+            if (args.mpc_run and not args.continue_after_mpc_rejection and
+                    not watcher.mpc_active and (
+                    time.monotonic() - started >= args.mpc_startup_timeout_s)):
                 print("SCREEN_ABORT: MPC startup timeout; no accepted controller "
                       "cycle or localized pose", flush=True)
                 result = 5
@@ -247,6 +266,7 @@ def main() -> int:
                     result = 0
                     break
             if (not args.collision_only and
+                    not args.continue_after_mpc_rejection and
                     stall_watch_armed(args.mpc_run, watcher.mpc_active) and
                     watcher.last_progress_time is not None and
                     time.monotonic() - watcher.last_progress_time >=

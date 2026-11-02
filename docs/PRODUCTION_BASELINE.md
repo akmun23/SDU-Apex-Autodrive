@@ -1,4 +1,27 @@
-# Practice racing baseline — 2026-10-29
+# Production baseline — November 1, 2026
+
+Current practice map configuration: f1tenth_mpc/config/mpc_practice.yaml.
+It is standalone: the launch does not load competition weights underneath.
+
+Five independent ten-scored-lap races: **49.162, 49.091, 49.175,
+49.291, 49.092 s**. Mean **49.1622 s**, all clean, 0 hard
+publication-deadline misses; lateral=4500, heading=1450,
+source-feedback rollout gain=0.75.
+
+Competition has a completely separate profile:
+f1tenth_mpc/config/mpc_competition.yaml. The current fastest offline
+source-only IPOPT line is 6.925 s, with the exact pinned CSV under
+f1tenth_planning/trajectories/autodrive_iros_2026_compete.
+Its closed-loop ten-lap race completion is NOT qualified. No current
+competition configuration should be promoted based on incomplete races.
+
+To view and select a track use tools/run_mpc_trial.sh show, or pass
+practice / competition and a unique run ID to the same entrypoint.
+
+---
+
+## Historical (superseded) October 29 practice data
+
 
 ## Active setup
 

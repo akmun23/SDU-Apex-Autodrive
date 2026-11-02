@@ -364,7 +364,7 @@ def sample_path(points: list[dict[str, float]], length: float,
 def sample_corridor_bounds(points: list[dict[str, float]], length: float,
                            progress: float,
                            preview_halfwidth_m: float) -> tuple[float, float]:
-    """Match mpc_rti.c's periodic minimum-bound preview exactly.
+    """Match mpc_rti.cpp's periodic minimum-bound preview exactly.
 
     Bounds are piecewise linear, so the minimum over the preview interval is
     attained at an endpoint or at a trajectory knot. Evaluate the endpoints,
@@ -672,7 +672,7 @@ def _source_rollout(diag: dict[str, Any], points: list[dict[str, float]],
         plant_input = evaluator.UnitySourcePlantInputC()
         plant_input.state[:] = state
         plant_input.wheel_rotation_angle_rad[:] = wheel_angles
-        # Match vehicle_model.c's exact source-boundary clamp. The optimizer
+        # Match vehicle_model.cpp's exact source-boundary clamp. The optimizer
         # stores the legal float32 representation of 30 degrees, which is a
         # few ulps above the source double constant.
         plant_input.steering_target_rad = max(

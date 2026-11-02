@@ -542,6 +542,12 @@ def _cycle_row(
         "sqp_iterations_accepted": solver.get("sqp_iterations_accepted"),
         "line_search_selected_alpha": _finite_number(solver.get("line_search_selected_alpha")),
         "line_search_merit_triggered": solver.get("line_search_merit_triggered"),
+        "line_search_trials": solver.get("line_search_trials"),
+        "line_search_us": _finite_number(solver.get("line_search_us")),
+        "refinement_full_horizon_selected_pass": solver.get(
+            "refinement_full_horizon_selected_pass"),
+        "refinement_nominal_build_us": _finite_number(
+            solver.get("refinement_nominal_build_us")),
         "refinement_prefix_selected_pass": solver.get("refinement_prefix_selected_pass"),
         "refinement_first_prefix_objective": _finite_number(
             solver.get("refinement_first_prefix_objective")),
@@ -1268,6 +1274,8 @@ def write_cycle_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "solver_stop_reason", "iterations", "primal_residual", "dual_residual",
         "sqp_iterations_attempted", "sqp_iterations_completed", "sqp_iterations_accepted",
         "line_search_selected_alpha", "line_search_merit_triggered",
+        "line_search_trials", "line_search_us",
+        "refinement_full_horizon_selected_pass", "refinement_nominal_build_us",
         "refinement_prefix_selected_pass", "refinement_first_prefix_objective",
         "refinement_second_prefix_objective", "refinement_prefix_validation_us",
         "state_primal_residual", "state_primal_stage", "state_primal_coordinate",

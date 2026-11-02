@@ -1,9 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
-project(f1tenth_mpc LANGUAGES C CXX)
+project(f1tenth_mpc LANGUAGES CXX)
 
-set(CMAKE_C_STANDARD 99)
-set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(NOT MSVC)
@@ -16,10 +14,9 @@ option(SDU_APEX_MPC_NATIVE_TUNING
   "Build this MPC for the CPU doing the build (not portable to other CPUs)"
   OFF)
 if(SDU_APEX_MPC_NATIVE_TUNING)
-  if(NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR
-     NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     message(FATAL_ERROR
-      "SDU_APEX_MPC_NATIVE_TUNING requires GCC or Clang for C and C++")
+      "SDU_APEX_MPC_NATIVE_TUNING requires GCC or Clang for C++")
   endif()
   # Native ISA vectorization improved the measured Jacobian on the build host.
   # Disable contraction: FMA changed borderline QP statuses/commands on the
@@ -31,12 +28,7 @@ option(SDU_APEX_MPC_RICCATI_PROFILE
   "Collect fine-grained Riccati timing counters (development only)"
   OFF)
 
-# Fixed-QP Riccati affine cache is mathematically equivalent up to float
-# rounding. Keep it opt-in until it clears the full racing repeatability gate.
-option(SDU_APEX_MPC_FIXED_QP_AFFINE_CACHE
-  "Cache P[k+1]*d[k] within one fixed-QP ADMM solve (experimental)"
-  OFF)
-
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -45,31 +37,35 @@ find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sdu_apex_msgs REQUIRED)
-find_package(OpenMP QUIET COMPONENTS C)
+find_package(OpenMP QUIET COMPONENTS CXX)
 
 # BachelorProject Riccati-ADMM core.  The package deliberately contains one
 # prediction path.  Historic replay plants and report-pinned manifest checks
 # are not part of the controller build.
 add_library(mpc_core STATIC
-  src/mpc_reference.c
-  src/vehicle_model.c
+  src/mpc_reference.cpp
+  src/vehicle_model.cpp
   src/unity_source_plant.cpp
   src/unity_source_plant_c.cpp
-  src/mpc_linearization.c
-  src/mpc_rti.c
-  src/riccati_solver.c)
+  src/mpc_linearization.cpp
+  src/mpc_rti.cpp
+  src/mpc_rti_qp.cpp
+  src/mpc_terminal_viability.cpp
+  src/mpc_source_adjoint.cpp
+  src/mpc_source_nonlinear_optimizer.cpp
+  src/riccati_solver.cpp
+  src/riccati_factorization.cpp
+  src/riccati_scaling.cpp
+  src/riccati_eigen_kernels.cpp)
 target_include_directories(mpc_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-target_link_libraries(mpc_core PUBLIC m)
-if(OpenMP_C_FOUND)
-  target_link_libraries(mpc_core PUBLIC OpenMP::OpenMP_C)
+target_link_libraries(mpc_core PUBLIC m PRIVATE Eigen3::Eigen)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(mpc_core PUBLIC OpenMP::OpenMP_CXX)
 endif()
 if(SDU_APEX_MPC_RICCATI_PROFILE)
   target_compile_definitions(mpc_core PRIVATE MPC_ENABLE_RICCATI_PROFILE)
-endif()
-if(SDU_APEX_MPC_FIXED_QP_AFFINE_CACHE)
-  target_compile_definitions(mpc_core PRIVATE MPC_ENABLE_RICCATI_FIXED_QP_AFFINE_CACHE)
 endif()
 set_target_properties(mpc_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -111,7 +107,11 @@ set_target_properties(mpc_control_time PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # The only ROS layer in this package. It publishes the MPC's steering and
 # normalized-throttle decision through the team actuator command message.
-add_library(mpc_controller_node SHARED src/mpc_controller_node.cpp)
+add_library(mpc_controller_node SHARED
+  src/mpc_controller_node.cpp
+  src/mpc_controller_diagnostics.cpp
+  src/mpc_controller_recovery.cpp
+  src/mpc_diagnostic_worker.cpp)
 target_link_libraries(mpc_controller_node mpc_core mpc_state_sync mpc_control_time)
 ament_target_dependencies(mpc_controller_node
   ament_index_cpp
@@ -139,7 +139,8 @@ if(BUILD_TESTING)
   ament_add_gtest(test_vehicle_model_source_rollout
     test/test_vehicle_model_source_rollout.cpp)
   target_link_libraries(test_vehicle_model_source_rollout mpc_core)
-  target_include_directories(test_vehicle_model_source_rollout PRIVATE include)
+  # The test deliberately exercises internal normal-SQP cost equivalence.
+  target_include_directories(test_vehicle_model_source_rollout PRIVATE include src)
   ament_add_gtest(test_mpc_control_time_predictor
     test/test_mpc_control_time_predictor.cpp)
   target_link_libraries(test_mpc_control_time_predictor mpc_control_time)
@@ -173,6 +174,9 @@ if(BUILD_TESTING)
   ament_add_gtest(test_mpc_fallback_episode
     test/test_mpc_fallback_episode.cpp)
   target_include_directories(test_mpc_fallback_episode PRIVATE include)
+  ament_add_gtest(test_mpc_sqp_convergence test/test_mpc_sqp_convergence.cpp)
+  target_include_directories(test_mpc_sqp_convergence PRIVATE include)
+  target_link_libraries(test_mpc_sqp_convergence mpc_core)
   ament_add_gtest(test_mpc_feasibility_restoration
     test/test_mpc_feasibility_restoration.cpp)
   target_include_directories(test_mpc_feasibility_restoration PRIVATE include)
@@ -184,6 +188,10 @@ if(BUILD_TESTING)
     test/test_mpc_qp_fixture_roundtrip.cpp)
   target_link_libraries(test_mpc_qp_fixture_roundtrip mpc_core)
   target_include_directories(test_mpc_qp_fixture_roundtrip PRIVATE include)
+  ament_add_gtest(test_riccati_denormal_scope
+    test/test_riccati_denormal_scope.cpp)
+  target_link_libraries(test_riccati_denormal_scope mpc_core)
+  target_include_directories(test_riccati_denormal_scope PRIVATE include)
   ament_add_gtest(test_mpc_corridor_polygon test/test_mpc_corridor_polygon.cpp)
   target_link_libraries(test_mpc_corridor_polygon mpc_core)
   target_include_directories(test_mpc_corridor_polygon PRIVATE include)
@@ -209,7 +217,7 @@ install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node
 install(DIRECTORY include/ DESTINATION include)
 install(FILES
   config/mpc_competition.yaml
-  config/mpc_practice_fastline.yaml
+  config/mpc_practice.yaml
   DESTINATION share/${PROJECT_NAME}/config)
 
 ament_export_include_directories(include)

@@ -159,3 +159,50 @@ TEST(MpcViabilityRecovery, BlendRetainsFastNominalWithoutBypassingBounds)
     EXPECT_FALSE(f1tenth_mpc::blended_viability_controls(
         geo,nominal,PREDICTION_HORIZON,.75f,.5235987f,mixed));
 }
+
+TEST(MpcViabilityRecovery, SourceWitnessRecoveryPreservesLegalCommands)
+{
+    MpcModelControl_t native[PREDICTION_HORIZON]{};
+    MpcModelControl_t corrected[PREDICTION_HORIZON]{};
+    for (int k=0; k<PREDICTION_HORIZON; ++k) {
+        native[k].steering_target_rad = k<15 ? .15f : -.15f;
+        native[k].throttle_command = .4f;
+    }
+    ASSERT_TRUE(f1tenth_mpc::witness_recovery_controls(
+        native,corrected,PREDICTION_HORIZON,-.10f,-.10f,
+        .4f,.6f,.75f,.5235988f));
+    EXPECT_NEAR(corrected[0].steering_target_rad,.25f,1.e-6f);
+    EXPECT_NEAR(corrected[0].throttle_command,.30f,1.e-6f);
+    EXPECT_GT(corrected[16].steering_target_rad,native[16].steering_target_rad);
+    EXPECT_GT(corrected[16].steering_target_rad,corrected[29].steering_target_rad);
+    EXPECT_GE(corrected[29].throttle_command,MPC_THROTTLE_MIN_DRIVE);
+    EXPECT_NEAR(corrected[29].steering_target_rad,-.15f,0.01f);
+    EXPECT_FALSE(f1tenth_mpc::witness_recovery_controls(
+        native,corrected,30,-.1f,0.f,.4f,.6f,1.05f,.5235988f));
+    native[7].throttle_command=1.1f;
+    EXPECT_FALSE(f1tenth_mpc::witness_recovery_controls(
+        native,corrected,30,-.1f,0.f,.4f,.6f,.75f,.5235988f));
+}
+
+TEST(MpcViabilityRecovery, FullHorizonReserveRanksSafeSuccessor)
+{
+    MpcRtiNominal_t plan{};
+    plan.valid=1; plan.horizon=PREDICTION_HORIZON;
+    plan.states[plan.horizon].plant.u=5.0f;
+    plan.states[plan.horizon].plant.e_y=0.0f;
+    plan.states[plan.horizon].plant.e_psi=0.0f;
+    plan.states[plan.horizon].plant.v=0.0f;
+    plan.validation_minimum_corridor_slack_m=.004f;
+    const double near_wall=f1tenth_mpc::viability_score_with_reserve(
+        plan,5.f,true,.05f);
+    EXPECT_NEAR(f1tenth_mpc::viability_score_with_reserve(
+        plan,5.f,false,.05f),f1tenth_mpc::viability_score(plan,5.f),1.e-9);
+    plan.validation_minimum_corridor_slack_m=.045f;
+    const double clear=f1tenth_mpc::viability_score_with_reserve(
+        plan,5.f,true,.05f);
+    EXPECT_LT(clear, near_wall);
+    EXPECT_GT(near_wall-clear,1.0);
+    plan.valid=0;
+    EXPECT_TRUE(std::isinf(f1tenth_mpc::viability_score_with_reserve(
+        plan,5.f,true,.05f)));
+}
