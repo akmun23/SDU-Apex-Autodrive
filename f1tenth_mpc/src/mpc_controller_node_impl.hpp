@@ -475,6 +475,10 @@ public:
         rti_config_.prefer_terminal_continuable_refinement =
             declare_parameter<bool>(
                 "prefer_terminal_continuable_refinement", false) ? 1:0;
+        rti_config_.minimum_sqp_model_agreement_ratio = static_cast<float>(
+            declare_parameter<double>("minimum_sqp_model_agreement_ratio", 0.0));
+        rti_config_.capture_sqp_prediction_metrics = declare_parameter<bool>(
+            "capture_sqp_prediction_metrics", false) ? 1 : 0;
         rti_config_.model.max_speed_mps = static_cast<float>(max_speed_mps_);
         rti_config_.model.active_speed_ceiling_mps =
             static_cast<float>(max_speed_mps_);

@@ -8,8 +8,11 @@
 #include "mpc_tracking_tolerance.h"
 #include "vehicle_model.h"
 
+#include <algorithm>
+#include <cmath>
 #include <math.h>
 #include <string.h>
+#include <vector>
 #ifdef __linux__
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -1582,6 +1585,11 @@ static int valid_cycle_configuration(
         (configuration->terminal_viability == 0 || configuration->terminal_viability == 1) &&
         (configuration->prefer_terminal_continuable_refinement == 0 ||
          configuration->prefer_terminal_continuable_refinement == 1) &&
+        isfinite(configuration->minimum_sqp_model_agreement_ratio) &&
+        configuration->minimum_sqp_model_agreement_ratio >= 0.f &&
+        configuration->minimum_sqp_model_agreement_ratio <= 1.f &&
+        (configuration->capture_sqp_prediction_metrics == 0 ||
+         configuration->capture_sqp_prediction_metrics == 1) &&
         (!configuration->enable_nonlinear_line_search ||
          configuration->line_search_max_backtracks > 0) &&
         (configuration->line_search_command_epoch_valid == 0 ||
@@ -1644,6 +1652,7 @@ typedef struct
     int line_search_merit_triggered;
     int line_search_nominal_exact_valid;
     double line_search_nominal_objective;
+    MpcRtiSqpStepMetrics_t sqp_step_metrics;
     float line_search_selected_alpha;
     double line_search_us;
     int diagnostic_output_count;
@@ -1767,7 +1776,8 @@ static int evaluate_nonlinear_candidate(
     int *lateral_accel_proxy_stage,
     float lateral_accel_proxy_by_stage[PREDICTION_HORIZON + 1],
     const MpcRtiCandidatePathDelta_t *verified_path_delta,
-    MpcRtiRolloutStatus_t *evaluation_failure=nullptr)
+    MpcRtiRolloutStatus_t *evaluation_failure=nullptr,
+    int allow_hard_constraint_violations_for_metrics=0)
 {
     if (!candidate || !trajectory || !configuration || !objective ||
         !minimum_corridor_slack || !lateral_accel_proxy ||
@@ -1842,11 +1852,13 @@ static int evaluate_nonlinear_candidate(
                 if (!world_sweep_clearance(model,trajectory,trajectory_count,
                         lap_length,candidate->progress[k-1],
                         &candidate->states[k-1].plant,candidate->progress[k],
-                        &candidate->states[k].plant,k,&world_slack))
+                        &candidate->states[k].plant,k,&world_slack) &&
+                    !allow_hard_constraint_violations_for_metrics)
                     return 0;
                 min_slack=fminf(min_slack,world_slack);
             } else {
-                if (!frenet_ok) return 0;
+                if (!frenet_ok && !allow_hard_constraint_violations_for_metrics)
+                    return 0;
                 min_slack=fminf(min_slack,fminf(lower_slack,upper_slack));
             }
         }
@@ -1919,7 +1931,8 @@ static int evaluate_nonlinear_candidate(
     }
     if (!isfinite(cost) || !isfinite(min_slack) ||
         !isfinite(max_lateral_accel)) return 0;
-    if(configuration->terminal_viability && candidate->horizon==PREDICTION_HORIZON) {
+    if(configuration->terminal_viability && candidate->horizon==PREDICTION_HORIZON &&
+       !allow_hard_constraint_violations_for_metrics) {
         double terminal_cost=0.;
         if(!mpc_rti_terminal_value(candidate,trajectory,trajectory_count,lap_length,
             model,schedule,&terminal_cost,1)) {
@@ -2208,6 +2221,269 @@ static void add_source_curvature(MpcRtiProblem_t *problem,
     }
 }
 
+static double qp_objective_for_controls(
+    const MpcRtiProblem_t &problem,
+    const MpcModelControl_t controls[PREDICTION_HORIZON],
+    int command_increments)
+{
+    double x[RICCATI_MAX_NX]{};
+    std::copy_n(problem.x0, RICCATI_MAX_NX, x);
+    double cost = 0.;
+    for (int k = 0; k < RICCATI_HORIZON; ++k) {
+        const RiccatiStepData_t &stage = problem.steps[k];
+        const double u[2] = {
+            controls[k].steering_target_rad - (command_increments
+                ? x[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND] : 0.),
+            controls[k].throttle_command - (command_increments
+                ? x[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND] : 0.)};
+        for (int i = 0; i < RICCATI_MAX_NX; ++i) {
+            cost += .5 * stage.Q_diag[i] * x[i] * x[i] + stage.q[i] * x[i];
+            for (int j = 0; j < RICCATI_MAX_NX; ++j)
+                cost += .5 * stage.Q_offdiag[i][j] * x[i] * x[j];
+            for (int a = 0; a < RICCATI_MAX_NU; ++a)
+                cost += x[i] * stage.N[i][a] * u[a];
+        }
+        for (int a = 0; a < RICCATI_MAX_NU; ++a)
+            cost += .5 * stage.R_diag[a] * u[a] * u[a] +
+                stage.r[a] * u[a];
+        cost += stage.R_cross * u[0] * u[1];
+
+        double next[RICCATI_MAX_NX]{};
+        for (int i = 0; i < RICCATI_MAX_NX; ++i) {
+            next[i] = stage.d[i];
+            for (int j = 0; j < RICCATI_MAX_NX; ++j)
+                next[i] += stage.A[i][j] * x[j];
+            for (int a = 0; a < RICCATI_MAX_NU; ++a)
+                next[i] += stage.B[i][a] * u[a];
+        }
+        std::copy_n(next, RICCATI_MAX_NX, x);
+    }
+    for (int i = 0; i < RICCATI_MAX_NX; ++i)
+        cost += .5 * problem.terminal_Q[i] * x[i] * x[i] +
+            problem.terminal_q[i] * x[i];
+    return cost;
+}
+
+static double agreement_ratio(double predicted, double actual)
+{
+    if (predicted > 1.e-9) return actual / predicted;
+    return actual > 1.e-9 ? 1. : -1.;
+}
+
+static void initialize_step_metrics(MpcRtiSqpStepMetrics_t *metrics)
+{
+    if (!metrics) return;
+    memset(metrics, 0, sizeof(*metrics));
+    metrics->selected_alpha = NAN;
+    metrics->source_exact_rollout_status = -1;
+    metrics->source_exact_failure_stage = -1;
+    metrics->maximum_state_error_stage = -1;
+    metrics->maximum_state_error_index = -1;
+    metrics->maximum_footprint_error_stage = -1;
+    metrics->maximum_source_footprint_violation_stage = -1;
+    metrics->qp_predicted_cost_reduction = NAN;
+    metrics->unscaled_qp_predicted_cost_reduction = NAN;
+    metrics->source_exact_cost_reduction = NAN;
+    metrics->realized_source_exact_cost_reduction = NAN;
+    metrics->selected_qp_predicted_cost_reduction = NAN;
+    metrics->selected_source_exact_cost_reduction = NAN;
+    metrics->model_agreement_ratio = NAN;
+    metrics->realized_model_agreement_ratio = NAN;
+    metrics->selected_model_agreement_ratio = NAN;
+    metrics->trust_region_scale_before = NAN;
+    metrics->trust_region_scale_after = NAN;
+    metrics->maximum_state_error = NAN;
+    metrics->maximum_footprint_constraint_error_m = NAN;
+    metrics->maximum_source_footprint_violation_m = NAN;
+    for (int k = 0; k <= PREDICTION_HORIZON; ++k) {
+        metrics->state_error_by_stage[k] = NAN;
+        metrics->state_error_index_by_stage[k] = -1;
+        metrics->footprint_constraint_error_by_stage_m[k] = NAN;
+        metrics->source_footprint_violation_by_stage_m[k] = NAN;
+    }
+}
+
+static void finalize_step_metrics(MpcRtiPassResult_t *pass,
+    MpcRtiMemory_t *memory,
+    const MpcRtiCycleConfiguration_t *configuration)
+{
+    if (!pass || !pass->sqp_step_metrics.valid) return;
+    auto &metrics = pass->sqp_step_metrics;
+    metrics.accepted = pass->sqp_accepted;
+    metrics.line_search_attempted = pass->line_search_attempted;
+    metrics.line_search_trials = pass->line_search_trials;
+    metrics.line_search_accepted = pass->line_search_accepted;
+    metrics.line_search_merit_triggered = pass->line_search_merit_triggered;
+    if (isfinite(pass->line_search_selected_alpha))
+        metrics.selected_alpha = pass->line_search_selected_alpha;
+
+    /* The agreement-controlled radius is an upper bound on the next SQP
+     * correction. It is adjusted only when the caller enables the ratio gate;
+     * zero-initialized memory therefore preserves the historical full step. */
+    if (!memory || !configuration ||
+        configuration->minimum_sqp_model_agreement_ratio <= 0.f)
+        return;
+    const float before = isfinite(metrics.trust_region_scale_before) &&
+        metrics.trust_region_scale_before > 0.f
+        ? metrics.trust_region_scale_before
+        : (memory->sqp_trust_region_scale > 0.f
+            ? memory->sqp_trust_region_scale : 1.f);
+    float after = before;
+    if (!pass->sqp_accepted) {
+        after = fmaxf(.0625f, .5f * before);
+    } else {
+        const float alpha = isfinite(metrics.selected_alpha)
+            ? metrics.selected_alpha : 1.f;
+        if (alpha <= 0.f) {
+            after = fmaxf(.0625f, .5f * before);
+        } else if (alpha < 1.f) {
+            after = fminf(after, alpha);
+        }
+        if (isfinite(metrics.selected_model_agreement_ratio)) {
+            if (metrics.selected_model_agreement_ratio <
+                    configuration->minimum_sqp_model_agreement_ratio) {
+                after = fmaxf(.0625f, .5f * after);
+            } else if (metrics.selected_model_agreement_ratio >= .75) {
+                after = fminf(1.f, 1.5f * after);
+            }
+        }
+    }
+    memory->sqp_trust_region_scale = after;
+    metrics.trust_region_scale_before = before;
+    metrics.trust_region_scale_after = after;
+}
+
+static double polygon_signed_slack_m(
+    const RiccatiStatePolygon_t &polygon, double ey, double epsi)
+{
+    if (polygon.count <= 0 || polygon.count >
+            RICCATI_STATE_POLYGON_MAX_PLANES) return NAN;
+    double slack = INFINITY;
+    for (int i = 0; i < polygon.count; ++i) {
+        const double n0 = polygon.normal[i][0];
+        const double n1 = polygon.normal[i][1];
+        const double norm = std::hypot(n0, n1);
+        if (!(norm > 0.) || !std::isfinite(norm)) return NAN;
+        slack = std::min(slack, (polygon.upper[i] - n0 * ey - n1 * epsi) / norm);
+    }
+    return slack;
+}
+
+static void measure_qp_source_prediction(
+    const MpcRtiProblem_t &problem,
+    const MpcRtiNominal_t &linearization,
+    const MpcRtiNominal_t &source_plan,
+    int source_stage_count,
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
+    const MpcRtiConfiguration_t &model,
+    MpcRtiSqpStepMetrics_t *metrics)
+{
+    if (!metrics || !trajectory || source_stage_count < 0) return;
+    source_stage_count = std::min(source_stage_count, PREDICTION_HORIZON);
+    double x[RICCATI_MAX_NX]{};
+    std::copy_n(problem.x0, RICCATI_MAX_NX, x);
+    for (int k = 0; k <= source_stage_count; ++k) {
+        float exact_state[MPC_RTI_NX]{};
+        serialize_state(&source_plan.states[k], exact_state);
+        exact_state[MPC_OPT_IDX_PROGRESS_DEVIATION] = static_cast<float>(
+            source_plan.progress[k] - linearization.progress[k]);
+        exact_state[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND] =
+            source_plan.states[k].plant.delayed_steering_command_2;
+        exact_state[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND] =
+            source_plan.states[k].plant.delayed_throttle_command_2;
+        double maximum = -1.;
+        int index = -1;
+        for (int i = 0; i < MPC_RTI_NX; ++i) {
+            const double error = std::abs(x[i] - exact_state[i]);
+            if (error > maximum) { maximum = error; index = i; }
+        }
+        metrics->state_error_by_stage[k] = static_cast<float>(maximum);
+        metrics->state_error_index_by_stage[k] = index;
+        ++metrics->state_sample_count;
+        if (maximum > metrics->maximum_state_error ||
+            !std::isfinite(metrics->maximum_state_error)) {
+            metrics->maximum_state_error = maximum;
+            metrics->maximum_state_error_stage = k;
+            metrics->maximum_state_error_index = index;
+        }
+
+        if (k > 0) {
+            MpcRtiReference_t source_reference{}, qp_reference{};
+            const double qp_progress = linearization.progress[k] +
+                x[MPC_OPT_IDX_PROGRESS_DEVIATION];
+            const int source_reference_ok = mpc_rti_reference_at_progress(
+                trajectory, trajectory_count, lap_length,
+                source_plan.progress[k], &model, &source_reference);
+            const int qp_reference_ok = mpc_rti_reference_at_progress(
+                trajectory, trajectory_count, lap_length,
+                qp_progress, &model, &qp_reference);
+            MpcModelState_t qp_state{};
+            qp_state.e_y = static_cast<float>(x[MPC_OPT_IDX_EY]);
+            qp_state.e_psi = static_cast<float>(x[MPC_OPT_IDX_EPSI]);
+            float source_lower = NAN, source_upper = NAN;
+            double linearized_slack = polygon_signed_slack_m(
+                problem.state_polygons[k], x[MPC_OPT_IDX_EY],
+                x[MPC_OPT_IDX_EPSI]);
+            const int source_slack_ok = source_reference_ok &&
+                mpc_rti_compute_corridor_slack(
+                    &source_plan.states[k].plant,
+                    source_reference.left_bound, source_reference.right_bound,
+                    &model, k, &source_lower, &source_upper);
+            float qp_lower = NAN, qp_upper = NAN;
+            const int qp_slack_ok = qp_reference_ok &&
+                mpc_rti_compute_corridor_slack(&qp_state,
+                    qp_reference.left_bound, qp_reference.right_bound,
+                    &model, k, &qp_lower, &qp_upper);
+            if (source_slack_ok) {
+                const double source_slack = std::min(source_lower, source_upper);
+                const double violation = std::max(0., -source_slack);
+                metrics->source_footprint_violation_by_stage_m[k] =
+                    static_cast<float>(violation);
+                ++metrics->footprint_sample_count;
+                if (violation > metrics->maximum_source_footprint_violation_m ||
+                    !std::isfinite(metrics->maximum_source_footprint_violation_m)) {
+                    metrics->maximum_source_footprint_violation_m = violation;
+                    metrics->maximum_source_footprint_violation_stage = k;
+                }
+                if (qp_slack_ok && std::isfinite(linearized_slack)) {
+                    const double exact_qp_slack = std::min(qp_lower, qp_upper);
+                    const double error = std::max(
+                        std::abs(linearized_slack - exact_qp_slack),
+                        std::abs(exact_qp_slack - source_slack));
+                    metrics->footprint_constraint_error_by_stage_m[k] =
+                        static_cast<float>(error);
+                    if (error > metrics->maximum_footprint_constraint_error_m ||
+                        !std::isfinite(metrics->maximum_footprint_constraint_error_m)) {
+                        metrics->maximum_footprint_constraint_error_m = error;
+                        metrics->maximum_footprint_error_stage = k;
+                    }
+                }
+            }
+        }
+
+        if (k == source_stage_count) break;
+        const RiccatiStepData_t &stage = problem.steps[k];
+        const double u[2] = {
+            source_plan.controls[k].steering_target_rad -
+                (model.command_increment_qp_enabled
+                    ? x[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND] : 0.),
+            source_plan.controls[k].throttle_command -
+                (model.command_increment_qp_enabled
+                    ? x[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND] : 0.)};
+        double next[RICCATI_MAX_NX]{};
+        for (int i = 0; i < RICCATI_MAX_NX; ++i) {
+            next[i] = stage.d[i];
+            for (int j = 0; j < RICCATI_MAX_NX; ++j)
+                next[i] += stage.A[i][j] * x[j];
+            for (int a = 0; a < RICCATI_MAX_NU; ++a)
+                next[i] += stage.B[i][a] * u[a];
+        }
+        std::copy_n(next, RICCATI_MAX_NX, x);
+    }
+}
+
 static MpcRtiCycleStatus_t solve_rti_pass(
     const MpcRtiState_t *current_state,
     double current_progress,
@@ -2227,6 +2503,7 @@ static MpcRtiCycleStatus_t solve_rti_pass(
     MpcRtiPassResult_t *pass)
 {
     *pass = {};
+    initialize_step_metrics(&pass->sqp_step_metrics);
     /* Every SQP pass must share the cycle's frozen exact-source merit.
      * The caller constructs it once before R1; R2 relinearizes only physical
      * dynamics and geometry. Removing the per-pass schedule-rebuild branch
@@ -2511,6 +2788,41 @@ static MpcRtiCycleStatus_t solve_rti_pass(
                 solution.u[k][1],command_stage->u_lb[1],command_stage->u_ub[1]);
         }
     }
+    MpcModelControl_t unscaled_qp_controls[PREDICTION_HORIZON];
+    memcpy(unscaled_qp_controls, candidate_controls,
+        sizeof(unscaled_qp_controls));
+    const double nominal_qp_objective = qp_objective_for_controls(
+        problem, nominal->controls,
+        configuration->model.command_increment_qp_enabled);
+    const double unscaled_proposed_qp_objective = qp_objective_for_controls(
+        problem, unscaled_qp_controls,
+        configuration->model.command_increment_qp_enabled);
+    float trust_region_scale = 1.f;
+    if (configuration->minimum_sqp_model_agreement_ratio > 0.f && memory &&
+        memory->sqp_trust_region_scale > 0.f &&
+        isfinite(memory->sqp_trust_region_scale))
+        trust_region_scale = clampf_rti(memory->sqp_trust_region_scale,
+            .0625f, 1.f);
+    if (configuration->minimum_sqp_model_agreement_ratio > 0.f) {
+        for (int k = 0; k < RICCATI_HORIZON; ++k) {
+            candidate_controls[k].steering_target_rad = clampf_rti(
+                nominal->controls[k].steering_target_rad + trust_region_scale *
+                    (unscaled_qp_controls[k].steering_target_rad -
+                     nominal->controls[k].steering_target_rad),
+                -configuration->model.max_steering_rad,
+                configuration->model.max_steering_rad);
+            candidate_controls[k].throttle_command = clampf_rti(
+                nominal->controls[k].throttle_command + trust_region_scale *
+                    (unscaled_qp_controls[k].throttle_command -
+                     nominal->controls[k].throttle_command),
+                MPC_THROTTLE_MIN_DRIVE, MPC_THROTTLE_MAX);
+        }
+    }
+    MpcModelControl_t qp_controls[PREDICTION_HORIZON];
+    memcpy(qp_controls, candidate_controls, sizeof(qp_controls));
+    const double proposed_qp_objective = qp_objective_for_controls(
+        problem, qp_controls,
+        configuration->model.command_increment_qp_enabled);
     cycle_result->source_directional_derivative=0.;
     for(int k=0;k<PREDICTION_HORIZON;++k) {
         cycle_result->source_directional_derivative += source_gradient[k][0]*
@@ -2518,8 +2830,15 @@ static MpcRtiCycleStatus_t solve_rti_pass(
             source_gradient[k][1]*(candidate_controls[k].throttle_command-
                 nominal->controls[k].throttle_command);
     }
-    MpcModelControl_t qp_controls[PREDICTION_HORIZON];
-    memcpy(qp_controls, candidate_controls, sizeof(qp_controls));
+    pass->sqp_step_metrics.valid = 1;
+    pass->sqp_step_metrics.qp_predicted_cost_reduction =
+        nominal_qp_objective - proposed_qp_objective;
+    pass->sqp_step_metrics.unscaled_qp_predicted_cost_reduction =
+        nominal_qp_objective - unscaled_proposed_qp_objective;
+    pass->sqp_step_metrics.trust_region_scale_before = trust_region_scale;
+    pass->sqp_step_metrics.comparison_includes_feedback =
+        configuration->feedback_rollout &&
+        !configuration->capture_sqp_prediction_metrics;
     MpcRtiRolloutPolicy_t policy;
     if (configuration->feedback_rollout) {
         if (configuration->model.command_increment_qp_enabled &&
@@ -2602,27 +2921,166 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         pass->nonlinear_validation_us =
             monotonic_microseconds() - phase_start_us;
     }
+    pass->sqp_step_metrics.source_exact_rollout_status =
+        rollout_status == MPC_RTI_ROLLOUT_OK
+            ? (candidate_valid ? MPC_RTI_ROLLOUT_OK
+                               : candidate_evaluation_failure)
+            : rollout_status;
+    pass->sqp_step_metrics.source_exact_failure_stage =
+        pass->nonlinear_failure_stage;
+    pass->sqp_step_metrics.source_exact_rollout_complete = candidate_valid;
     int merit_regression = 0;
-    if (configuration->enable_nonlinear_line_search) {
-        phase_start_us = monotonic_microseconds();
-        pass->line_search_nominal_exact_valid =
-            evaluate_nonlinear_candidate(nominal, trajectory,
-                trajectory_count, lap_length, configuration,
-                &nominal_objective, &nominal_minimum_corridor_slack,
-                &nominal_lateral_accel_proxy,
-                &nominal_lateral_accel_proxy_stage,
-                nominal_lateral_accel_proxy_by_stage,NULL);
-        pass->nonlinear_validation_us +=
-            monotonic_microseconds() - phase_start_us;
-        if (pass->line_search_nominal_exact_valid) {
-            pass->line_search_nominal_objective = nominal_objective;
-            merit_regression = !first_is_restoration && candidate_valid &&
-                pass->nonlinear_objective > nominal_objective;
+    phase_start_us = monotonic_microseconds();
+    pass->line_search_nominal_exact_valid =
+        evaluate_nonlinear_candidate(nominal, trajectory,
+            trajectory_count, lap_length, configuration,
+            &nominal_objective, &nominal_minimum_corridor_slack,
+            &nominal_lateral_accel_proxy,
+            &nominal_lateral_accel_proxy_stage,
+            nominal_lateral_accel_proxy_by_stage,NULL);
+    pass->nonlinear_validation_us +=
+        monotonic_microseconds() - phase_start_us;
+    if (pass->line_search_nominal_exact_valid) {
+        pass->line_search_nominal_objective = nominal_objective;
+        if (candidate_valid) {
+            const double actual_reduction = nominal_objective -
+                pass->nonlinear_objective;
+            const double applied_ratio = agreement_ratio(
+                pass->sqp_step_metrics.qp_predicted_cost_reduction,
+                actual_reduction);
+            pass->sqp_step_metrics.realized_source_exact_cost_reduction =
+                actual_reduction;
+            pass->sqp_step_metrics.realized_model_agreement_ratio = applied_ratio;
+            merit_regression = !first_is_restoration &&
+                (pass->nonlinear_objective > nominal_objective ||
+                 (configuration->minimum_sqp_model_agreement_ratio > 0.f &&
+                  applied_ratio < configuration->minimum_sqp_model_agreement_ratio));
             pass->line_search_merit_triggered = merit_regression;
         }
     }
+
+    /* The ordinary rollout is the exact trajectory of the command that the
+     * controller would use (including its optional feedback correction). In
+     * diagnostic mode, separately roll the raw QP proposal through the exact
+     * source plant with wide map bounds so a corridor rejection still yields
+     * complete cost/state evidence. The hard original-corridor result above
+     * remains the only acceptance authority. */
+    MpcRtiNominal_t raw_source_plan{};
+    const MpcRtiNominal_t *measured_source_plan = nullptr;
+    int measured_source_stage_count = candidate_valid ? horizon :
+        (pass->path_delta.sample_count > 0
+            ? pass->path_delta.sample_count - 1 : 0);
+    if (configuration->capture_sqp_prediction_metrics) {
+        std::vector<MpcTrajectorySample_t> wide_trajectory(
+            trajectory, trajectory + trajectory_count);
+        for (auto &sample : wide_trajectory)
+            sample.left_bound = sample.right_bound = 100.f;
+        MpcRtiCycleConfiguration_t metric_configuration = *configuration;
+        metric_configuration.model.world_sweep_check = nullptr;
+        metric_configuration.model.world_sweep_context = nullptr;
+        metric_configuration.model.world_map_rejection_only = 0;
+        MpcRtiRolloutStatus_t source_status = MPC_RTI_ROLLOUT_INVALID_INPUT;
+        int source_failure_stage = -1;
+        source_status = mpc_rti_validate_candidate_plan(
+            current_state, current_progress, qp_controls,
+            wide_trajectory.data(), wide_trajectory.size(), lap_length,
+            horizon, prediction_dt, &metric_configuration,
+            &raw_source_plan, &source_failure_stage);
+        memcpy(raw_source_plan.controls, qp_controls,
+            (size_t)horizon * sizeof(qp_controls[0]));
+        pass->sqp_step_metrics.source_exact_rollout_status = source_status;
+        pass->sqp_step_metrics.source_exact_failure_stage = source_failure_stage;
+        pass->sqp_step_metrics.source_exact_rollout_complete =
+            source_status == MPC_RTI_ROLLOUT_OK;
+        measured_source_stage_count = source_status == MPC_RTI_ROLLOUT_OK
+            ? horizon : std::clamp(source_failure_stage + 1, 0, horizon);
+        if (measured_source_stage_count > 0 || source_status == MPC_RTI_ROLLOUT_OK)
+            measured_source_plan = &raw_source_plan;
+
+        double source_nominal_objective = NAN;
+        double source_proposal_objective = NAN;
+        float metric_clearance = NAN;
+        float metric_lateral = NAN;
+        int metric_lateral_stage = -1;
+        float metric_lateral_by_stage[PREDICTION_HORIZON + 1]{};
+        /* Keep the original frozen objective and corridor references for the
+         * cost comparison. The widened trajectory is used only to continue
+         * the physical rollout after a rejected footprint proposal. The
+         * metric evaluator may score that rejected point outside the hard
+         * corridor, but the production acceptance path remains unchanged. */
+        const int source_nominal_scored = evaluate_nonlinear_candidate(
+            nominal, trajectory, trajectory_count, lap_length,
+            &metric_configuration, &source_nominal_objective,
+            &metric_clearance, &metric_lateral, &metric_lateral_stage,
+            metric_lateral_by_stage, nullptr, nullptr, 1);
+        const int source_proposal_scored = source_status == MPC_RTI_ROLLOUT_OK &&
+            evaluate_nonlinear_candidate(&raw_source_plan, trajectory,
+                trajectory_count, lap_length, &metric_configuration,
+                &source_proposal_objective, &metric_clearance, &metric_lateral,
+                &metric_lateral_stage, metric_lateral_by_stage, nullptr,
+                nullptr, 1);
+        if (source_nominal_scored && source_proposal_scored) {
+            pass->sqp_step_metrics.source_exact_cost_reduction =
+                source_nominal_objective - source_proposal_objective;
+            pass->sqp_step_metrics.model_agreement_ratio = agreement_ratio(
+                pass->sqp_step_metrics.qp_predicted_cost_reduction,
+                pass->sqp_step_metrics.source_exact_cost_reduction);
+        }
+    } else if (pass->line_search_nominal_exact_valid && candidate_valid) {
+        pass->sqp_step_metrics.source_exact_rollout_complete = 1;
+        pass->sqp_step_metrics.source_exact_rollout_status = MPC_RTI_ROLLOUT_OK;
+        pass->sqp_step_metrics.source_exact_cost_reduction =
+            pass->sqp_step_metrics.realized_source_exact_cost_reduction;
+        pass->sqp_step_metrics.model_agreement_ratio =
+            pass->sqp_step_metrics.realized_model_agreement_ratio;
+        measured_source_plan = &pass->candidate;
+        measured_source_stage_count = horizon;
+    } else {
+        /* Preserve stagewise model-error evidence even when the full proposal
+         * exits the source plant's hard corridor before reaching the horizon.
+         * rollout_candidate_impl has filled states/progress through the first
+         * failing transition; these partial diagnostics never authorize the
+         * action and do not pretend to have a complete-horizon cost. */
+        MpcRtiNominal_t partial_source_plan{};
+        partial_source_plan.valid = 1;
+        partial_source_plan.horizon = horizon;
+        memcpy(partial_source_plan.controls, candidate_controls,
+            (size_t)horizon * sizeof(candidate_controls[0]));
+        memcpy(partial_source_plan.states, candidate_states,
+            (size_t)(horizon + 1) * sizeof(candidate_states[0]));
+        memcpy(partial_source_plan.progress, candidate_progress,
+            (size_t)(horizon + 1) * sizeof(candidate_progress[0]));
+        measured_source_stage_count = rollout_status == MPC_RTI_ROLLOUT_OK
+            ? horizon
+            : std::clamp(pass->nonlinear_failure_stage + 1, 0, horizon);
+        measured_source_plan = &partial_source_plan;
+        measure_qp_source_prediction(problem, *nominal,
+            *measured_source_plan, measured_source_stage_count,
+            trajectory, trajectory_count, lap_length,
+            configuration->model, &pass->sqp_step_metrics);
+        /* The partial plan is stack-backed, so metrics are copied above and
+         * must not be dereferenced later. */
+        measured_source_plan = nullptr;
+    }
+    if (measured_source_plan) {
+        measure_qp_source_prediction(problem, *nominal,
+            *measured_source_plan, measured_source_stage_count,
+            trajectory, trajectory_count, lap_length,
+            configuration->model, &pass->sqp_step_metrics);
+    } else {
+        pass->sqp_step_metrics.state_sample_count = 0;
+        pass->sqp_step_metrics.footprint_sample_count = 0;
+    }
     if (candidate_valid && !merit_regression) {
         pass->line_search_selected_alpha = 1.0f;
+        if (pass->line_search_nominal_exact_valid) {
+            pass->sqp_step_metrics.selected_qp_predicted_cost_reduction =
+                pass->sqp_step_metrics.qp_predicted_cost_reduction;
+            pass->sqp_step_metrics.selected_source_exact_cost_reduction =
+                nominal_objective - pass->nonlinear_objective;
+            pass->sqp_step_metrics.selected_model_agreement_ratio =
+                pass->sqp_step_metrics.realized_model_agreement_ratio;
+        }
         pass->status = solver_status == RICCATI_STATUS_OPTIMAL
             ? MPC_RTI_CYCLE_ACCEPTED_OPTIMAL
             : MPC_RTI_CYCLE_ACCEPTED_FEASIBLE;
@@ -2631,6 +3089,7 @@ static MpcRtiCycleStatus_t solve_rti_pass(
             pass->restoration_accepted = 1;
             riccati_admm_state_init(&memory->solver_state);
         }
+        finalize_step_metrics(pass, memory, configuration);
         pass->solve_us = monotonic_microseconds() - start_us;
         return pass->status;
     }
@@ -2659,9 +3118,10 @@ static MpcRtiCycleStatus_t solve_rti_pass(
     const int should_backtrack = mpc_rti_line_search_should_backtrack(
         rollout_status==MPC_RTI_ROLLOUT_OK && !candidate_valid
             ? candidate_evaluation_failure : rollout_status, candidate_valid,
-        pass->line_search_nominal_exact_valid, merit_regression);
+            pass->line_search_nominal_exact_valid, merit_regression);
     if (!should_backtrack || !configuration->enable_nonlinear_line_search) {
         pass->status = MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT;
+        finalize_step_metrics(pass, memory, configuration);
         pass->solve_us = monotonic_microseconds() - start_us;
         return pass->status;
     }
@@ -2670,6 +3130,7 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         !configuration->line_search_command_epoch_valid) {
         pass->line_search_skipped_command_epoch = 1;
         pass->status = MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT;
+        finalize_step_metrics(pass, memory, configuration);
         pass->solve_us = monotonic_microseconds() - start_us;
         return pass->status;
     }
@@ -2694,6 +3155,9 @@ static MpcRtiCycleStatus_t solve_rti_pass(
     float best_trial_lateral_accel_proxy_by_stage[
         PREDICTION_HORIZON + 1] = {};
     float best_trial_alpha = 0.0f;
+    double best_trial_predicted_reduction = NAN;
+    double best_trial_actual_reduction = NAN;
+    double best_trial_agreement = NAN;
     int best_trial_valid = 0;
     /* If BOTH endpoints of the backtracking segment are physically outside
      * the corridor, spending several exact source rollouts on smaller alphas
@@ -2756,6 +3220,8 @@ static MpcRtiCycleStatus_t solve_rti_pass(
                      nominal_throttle),
                 MPC_THROTTLE_MIN_DRIVE, MPC_THROTTLE_MAX);
         }
+        MpcModelControl_t qp_trial_controls[PREDICTION_HORIZON];
+        memcpy(qp_trial_controls, trial_controls, sizeof(qp_trial_controls));
 
         MpcRtiCandidatePathDelta_t trial_path_delta = {};
         MpcRtiRolloutFailure_t trial_failure = {};
@@ -2815,9 +3281,23 @@ static MpcRtiCycleStatus_t solve_rti_pass(
             }
         }
 
+        const double trial_actual_reduction =
+            pass->line_search_nominal_exact_valid && trial_exact_valid
+                ? nominal_objective - pass->nonlinear_objective : NAN;
+        const double trial_predicted_reduction =
+            nominal_qp_objective - qp_objective_for_controls(
+                problem, qp_trial_controls,
+                configuration->model.command_increment_qp_enabled);
+        const double trial_agreement = agreement_ratio(
+            trial_predicted_reduction, trial_actual_reduction);
+        const int trial_agreement_ok =
+            configuration->minimum_sqp_model_agreement_ratio <= 0.f ||
+            trial_agreement >=
+                configuration->minimum_sqp_model_agreement_ratio;
         if (mpc_rti_refinement_improves_action(
                 pass->line_search_nominal_exact_valid, nominal_objective,
-                trial_exact_valid, pass->nonlinear_objective)) {
+                trial_exact_valid, pass->nonlinear_objective) &&
+            trial_agreement_ok) {
             best_trial_candidate = pass->candidate;
             best_trial_candidate.validation_objective =
                 pass->nonlinear_objective;
@@ -2834,6 +3314,9 @@ static MpcRtiCycleStatus_t solve_rti_pass(
                 pass->lateral_accel_proxy_by_stage,
                 sizeof(best_trial_lateral_accel_proxy_by_stage));
             best_trial_alpha = alpha;
+            best_trial_predicted_reduction = trial_predicted_reduction;
+            best_trial_actual_reduction = trial_actual_reduction;
+            best_trial_agreement = trial_agreement;
             best_trial_valid = 1;
             best_trial_diagnostic_output_count =
                 pass->diagnostic_output_count;
@@ -2869,6 +3352,12 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         pass->first_action_valid = 1;
         pass->line_search_accepted = 1;
         pass->line_search_selected_alpha = best_trial_alpha;
+        pass->sqp_step_metrics.selected_qp_predicted_cost_reduction =
+            best_trial_predicted_reduction;
+        pass->sqp_step_metrics.selected_source_exact_cost_reduction =
+            best_trial_actual_reduction;
+        pass->sqp_step_metrics.selected_model_agreement_ratio =
+            best_trial_agreement;
         pass->line_search_last_failure_reason = -1;
         pass->line_search_last_failure_stage = -1;
         pass->diagnostic_output_count = best_trial_diagnostic_output_count;
@@ -2883,6 +3372,7 @@ static MpcRtiCycleStatus_t solve_rti_pass(
             riccati_admm_state_init(&memory->solver_state);
         }
         pass->status = MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH;
+        finalize_step_metrics(pass, memory, configuration);
         pass->solve_us = monotonic_microseconds() - start_us;
         return pass->status;
     }
@@ -2922,8 +3412,11 @@ static MpcRtiCycleStatus_t solve_rti_pass(
             pass->diagnostic_output_count = 0;
             pass->line_search_accepted = 1;
             pass->line_search_selected_alpha = 0.0f;
+            pass->sqp_step_metrics.selected_qp_predicted_cost_reduction = 0.0;
+            pass->sqp_step_metrics.selected_source_exact_cost_reduction = 0.0;
             pass->sqp_accepted = 1;
             pass->status = MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH;
+            finalize_step_metrics(pass, memory, configuration);
             pass->solve_us = monotonic_microseconds() - start_us;
             return pass->status;
         }
@@ -3036,6 +3529,7 @@ static MpcRtiCycleStatus_t solve_rti_pass(
                     /* Do not carry ADMM duals from a temporarily relaxed
                      * projection into the next hard-constrained MPC cycle. */
                     riccati_admm_state_init(&memory->solver_state);
+                    finalize_step_metrics(pass, memory, configuration);
                     pass->solve_us = monotonic_microseconds() - start_us;
                     return pass->status;
                 }
@@ -3050,6 +3544,7 @@ static MpcRtiCycleStatus_t solve_rti_pass(
         (size_t)horizon * sizeof(candidate_controls[0]));
     pass->line_search_us = monotonic_microseconds() - line_search_start_us;
     pass->status = MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT;
+    finalize_step_metrics(pass, memory, configuration);
     pass->solve_us = monotonic_microseconds() - start_us;
     return pass->status;
 }
@@ -3112,6 +3607,8 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         result->nonlinear_objective = NAN;
         result->first_pass_objective=NAN;
         result->second_pass_objective=NAN;
+        initialize_step_metrics(&result->r1_step_metrics);
+        initialize_step_metrics(&result->r2_step_metrics);
         result->refinement_first_prefix_objective = NAN;
         result->refinement_second_prefix_objective = NAN;
         result->total_cycle_us = 0.0;
@@ -3224,6 +3721,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         trajectory, trajectory_count, lap_length, prediction_dt, horizon,
         &comparison_configuration, memory, first_deadline,
         (double)MPC_RTI_POST_SOLVE_RESERVE_US, &curvature, result, &pass);
+    result->r1_step_metrics = pass.sqp_step_metrics;
     result->first_pass_objective=pass.nonlinear_objective;
     result->second_pass_objective=NAN;
     /* Normal SQP iteration: when R1 provides an exact, physically feasible
@@ -3310,6 +3808,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
                 deadline_us,
                 (double)MPC_RTI_REFINEMENT_SOLVE_RESERVE_US,
                 &curvature, result, &refined_pass);
+            result->r2_step_metrics = refined_pass.sqp_step_metrics;
             result->second_pass_objective=refined_pass.nonlinear_objective;
             const int refined_action_valid = refined_pass.sqp_accepted &&
                 refined_pass.first_action_valid;

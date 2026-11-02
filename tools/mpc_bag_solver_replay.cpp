@@ -355,6 +355,87 @@ double audit_ltv_objective(const MpcRtiProblem_t &problem,
     return cost;
 }
 
+void emit_sqp_step_metrics(std::size_t row, const char *pass,
+    const MpcRtiSqpStepMetrics_t &m)
+{
+    if (!m.valid) return;
+    const auto number = [](double value) {
+        if (std::isfinite(value)) std::cerr << std::setprecision(10) << value;
+        else std::cerr << "null";
+    };
+    std::cerr << "SQP_STEP_METRICS {\"row\":" << row
+        << ",\"pass\":\"" << pass
+        << "\",\"accepted\":" << (m.accepted ? "true" : "false")
+        << ",\"source_exact_rollout_complete\":"
+        << (m.source_exact_rollout_complete ? "true" : "false")
+        << ",\"source_exact_rollout_status\":"
+        << m.source_exact_rollout_status
+        << ",\"source_exact_failure_stage\":"
+        << m.source_exact_failure_stage
+        << ",\"comparison_includes_feedback\":"
+        << (m.comparison_includes_feedback ? "true" : "false")
+        << ",\"line_search_attempted\":"
+        << (m.line_search_attempted ? "true" : "false")
+        << ",\"line_search_trials\":" << m.line_search_trials
+        << ",\"line_search_accepted\":"
+        << (m.line_search_accepted ? "true" : "false")
+        << ",\"line_search_merit_triggered\":"
+        << (m.line_search_merit_triggered ? "true" : "false")
+        << ",\"selected_alpha\":";
+    number(m.selected_alpha);
+    std::cerr << ",\"qp_predicted_cost_reduction\":";
+    number(m.qp_predicted_cost_reduction);
+    std::cerr << ",\"unscaled_qp_predicted_cost_reduction\":";
+    number(m.unscaled_qp_predicted_cost_reduction);
+    std::cerr << ",\"source_exact_cost_reduction\":";
+    number(m.source_exact_cost_reduction);
+    std::cerr << ",\"realized_source_exact_cost_reduction\":";
+    number(m.realized_source_exact_cost_reduction);
+    std::cerr << ",\"selected_qp_predicted_cost_reduction\":";
+    number(m.selected_qp_predicted_cost_reduction);
+    std::cerr << ",\"selected_source_exact_cost_reduction\":";
+    number(m.selected_source_exact_cost_reduction);
+    std::cerr << ",\"model_agreement_ratio\":";
+    number(m.model_agreement_ratio);
+    std::cerr << ",\"realized_model_agreement_ratio\":";
+    number(m.realized_model_agreement_ratio);
+    std::cerr << ",\"selected_model_agreement_ratio\":";
+    number(m.selected_model_agreement_ratio);
+    std::cerr << ",\"trust_region_scale_before\":";
+    number(m.trust_region_scale_before);
+    std::cerr << ",\"trust_region_scale_after\":";
+    number(m.trust_region_scale_after);
+    std::cerr << ",\"maximum_state_error\":";
+    number(m.maximum_state_error);
+    std::cerr << ",\"maximum_state_error_stage\":"
+        << m.maximum_state_error_stage
+        << ",\"maximum_state_error_index\":"
+        << m.maximum_state_error_index
+        << ",\"maximum_footprint_constraint_error_m\":";
+    number(m.maximum_footprint_constraint_error_m);
+    std::cerr << ",\"maximum_footprint_error_stage\":"
+        << m.maximum_footprint_error_stage
+        << ",\"maximum_source_footprint_violation_m\":";
+    number(m.maximum_source_footprint_violation_m);
+    std::cerr << ",\"maximum_source_footprint_violation_stage\":"
+        << m.maximum_source_footprint_violation_stage
+        << ",\"stage_metrics\":[";
+    for (int stage = 0; stage <= PREDICTION_HORIZON; ++stage) {
+        if (stage) std::cerr << ',';
+        std::cerr << "{\"stage\":" << stage
+            << ",\"maximum_state_error\":";
+        number(m.state_error_by_stage[stage]);
+        std::cerr << ",\"dominant_state_index\":"
+            << m.state_error_index_by_stage[stage]
+            << ",\"footprint_constraint_error_m\":";
+        number(m.footprint_constraint_error_by_stage_m[stage]);
+        std::cerr << ",\"source_footprint_violation_m\":";
+        number(m.source_footprint_violation_by_stage_m[stage]);
+        std::cerr << '}';
+    }
+    std::cerr << "]}\n";
+}
+
 
 // Accuracy-first OFFLINE solver experiment: true same-epoch nonlinear
 // single-shooting SQP. Every SQP nominal and every proposed trajectory is
@@ -1749,6 +1830,8 @@ int main(int argc, char **argv)
         if (!input) throw std::runtime_error("cannot open input CSV");
         const auto nominal_seed_controls = load_nominal_seed_controls(
             std::getenv("MPC_REPLAY_NOMINAL_SEED_CSV"));
+        const auto fixed_plan_controls = load_nominal_seed_controls(
+            std::getenv("MPC_REPLAY_FIXED_PLAN_CSV"));
         std::set<std::size_t> consumed_nominal_seed_rows;
 
         MpcRtiCycleConfiguration_t config{};
@@ -1779,6 +1862,10 @@ int main(int argc, char **argv)
         }
         config.terminal_viability=std::getenv("MPC_REPLAY_TERMINAL_VIABILITY")?1:0;
         config.source_informed_sqp=std::getenv("MPC_REPLAY_SOURCE_INFORMED_SQP")?1:0;
+        if (const char *ratio = std::getenv("MPC_REPLAY_MIN_MODEL_AGREEMENT_RATIO"))
+            config.minimum_sqp_model_agreement_ratio = std::strtof(ratio, nullptr);
+        config.capture_sqp_prediction_metrics =
+            std::getenv("MPC_REPLAY_CAPTURE_SQP_PREDICTIONS") ? 1 : 0;
         config.prefer_terminal_continuable_refinement =
             std::getenv("MPC_REPLAY_TERMINAL_REFINEMENT") ? 1 : 0;
         // Offline parity with live increment-QP controller. These switches
@@ -2019,6 +2106,25 @@ int main(int argc, char **argv)
                 &operating_reference) != 0;
 
             config.model.active_speed_ceiling_mps = static_cast<float>(row[2]);
+            if (const auto fixed = fixed_plan_controls.find(row_index);
+                fixed != fixed_plan_controls.end()) {
+                MpcRtiNominal_t fixed_plan{};
+                int fixed_failure_stage = -1;
+                const MpcRtiRolloutStatus_t fixed_status =
+                    mpc_rti_validate_candidate_plan(
+                        &state, row[1], fixed->second.data(),
+                        trajectory.data(), trajectory.size(), lap_length,
+                        PREDICTION_HORIZON, PREDICTION_DT_SECONDS, &config,
+                        &fixed_plan, &fixed_failure_stage);
+                std::cerr << std::setprecision(10)
+                    << "FIXED_SOURCE_PLAN row=" << row_index
+                    << " status=" << static_cast<int>(fixed_status)
+                    << " failure_stage=" << fixed_failure_stage
+                    << " valid=" << (fixed_status == MPC_RTI_ROLLOUT_OK)
+                    << " exact_cost=" << fixed_plan.validation_objective
+                    << " minimum_clearance_m="
+                    << fixed_plan.validation_minimum_corridor_slack_m << '\n';
+            }
             const bool capture_this_qp = qp_capture_enabled &&
                 ((qp_capture_row < 0 && qp_capture_rows.empty()) ||
                  qp_capture_row == static_cast<long>(row_index) ||
@@ -2123,6 +2229,8 @@ int main(int argc, char **argv)
                 &state, row[1], trajectory.data(), trajectory.size(),
                 lap_length, PREDICTION_DT_SECONDS, PREDICTION_HORIZON,
                 &config, &memory, &result);
+            emit_sqp_step_metrics(row_index, "R1", result.r1_step_metrics);
+            emit_sqp_step_metrics(row_index, "R2", result.r2_step_metrics);
             if(static_cast<long>(row_index)==gradient_row)
                 audit_candidate_merit(state,row[1],trajectory,lap_length,config,result,
                     g_qp_capture.valid ? &g_qp_capture : nullptr);

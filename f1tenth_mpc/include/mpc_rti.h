@@ -367,6 +367,17 @@ typedef struct
      * Never accepts an unchecked action or discards both valid solutions.
      * Default disabled pending repeated full-race validation. */
     int prefer_terminal_continuable_refinement;
+    /* Standard trust-region agreement gate. A positive threshold requires
+     * the exact source improvement to explain at least this fraction of the
+     * QP-predicted improvement before accepting a step. It also enables an
+     * adaptive step radius: weak agreement or failed source validation shrinks
+     * the next R1/R2 correction, while strong agreement can grow it. Zero
+     * disables both and preserves the existing cost-decrease-only policy. */
+    float minimum_sqp_model_agreement_ratio;
+    /* Expensive diagnostic mode: exactly roll out each raw QP proposal with
+     * relaxed map bounds and compare all stages against its own QP nominal.
+     * Never changes acceptance; intended for replay and failure forensics. */
+    int capture_sqp_prediction_metrics;
     /* Optional one extra Phase-I ADMM solve on the SAME 30-stage Jacobians
      * after a rejected full nonlinear corridor rollout. QP constraints may
      * be softened; a published action MUST pass the untouched source-plant
@@ -392,6 +403,45 @@ typedef struct
 
 typedef struct
 {
+    int valid;
+    int accepted;
+    int source_exact_rollout_complete;
+    int source_exact_rollout_status;
+    int source_exact_failure_stage;
+    int comparison_includes_feedback;
+    int line_search_attempted;
+    int line_search_trials;
+    int line_search_accepted;
+    int line_search_merit_triggered;
+    float selected_alpha;
+    int state_sample_count;
+    int footprint_sample_count;
+    int maximum_state_error_stage;
+    int maximum_state_error_index;
+    int maximum_footprint_error_stage;
+    int maximum_source_footprint_violation_stage;
+    double qp_predicted_cost_reduction;
+    double unscaled_qp_predicted_cost_reduction;
+    double source_exact_cost_reduction;
+    double realized_source_exact_cost_reduction;
+    double selected_qp_predicted_cost_reduction;
+    double selected_source_exact_cost_reduction;
+    double model_agreement_ratio;
+    double realized_model_agreement_ratio;
+    double selected_model_agreement_ratio;
+    float trust_region_scale_before;
+    float trust_region_scale_after;
+    double maximum_state_error;
+    double maximum_footprint_constraint_error_m;
+    double maximum_source_footprint_violation_m;
+    float state_error_by_stage[PREDICTION_HORIZON + 1];
+    int state_error_index_by_stage[PREDICTION_HORIZON + 1];
+    float footprint_constraint_error_by_stage_m[PREDICTION_HORIZON + 1];
+    float source_footprint_violation_by_stage_m[PREDICTION_HORIZON + 1];
+} MpcRtiSqpStepMetrics_t;
+
+typedef struct
+{
     RiccatiAdmmState_t solver_state;
     /* Last full-horizon nominal retained for progress seeding. This is not
      * the certified plan that may be replayed after a rejected solve. */
@@ -402,6 +452,9 @@ typedef struct
     int warm_start_control_count;
     int warm_start_controls_valid;
     int64_t command_epoch_ns;
+    /* Optional agreement-controlled SQP step radius. Zero means the initial
+     * full radius (1.0), preserving zero-initialized caller compatibility. */
+    float sqp_trust_region_scale;
     double solver_nominal_progress[PREDICTION_HORIZON + 1];
     int solver_nominal_progress_valid;
 } MpcRtiMemory_t;
@@ -492,6 +545,8 @@ typedef struct
     double exact_objective_improvement;
     double source_directional_derivative;
     double source_curvature_regularization[2];
+    MpcRtiSqpStepMetrics_t r1_step_metrics;
+    MpcRtiSqpStepMetrics_t r2_step_metrics;
     int admm_status;
     float primal_residual;
     float dual_residual;

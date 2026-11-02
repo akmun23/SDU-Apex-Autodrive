@@ -48,6 +48,10 @@ void MpcControllerNode::publish_cycle_diagnostics(const MpcRtiState_t &state,
         json_number(failure.state.plant.delayed_steering_command_2);
         json << ',';
         json_number(failure.state.plant.actual_steering_angle);
+        json << ',';
+        json_number(failure.state.plant.delayed_throttle_command_1);
+        json << ',';
+        json_number(failure.state.plant.delayed_throttle_command_2);
         json << "],\"reference\":[";
         json_number(failure.reference.e_y);
         json << ',';
@@ -64,7 +68,112 @@ void MpcControllerNode::publish_cycle_diagnostics(const MpcRtiState_t &state,
         json_number(failure.lower_bound_m);
         json << ",\"upper_bound_m\":";
         json_number(failure.upper_bound_m);
+        json << ",\"actuator_queue\":{\"delayed_steering_rad\":[";
+        json_number(failure.state.plant.delayed_steering_command_1);
+        json << ',';
+        json_number(failure.state.plant.delayed_steering_command_2);
+        json << "],\"delayed_throttle\":[";
+        json_number(failure.state.plant.delayed_throttle_command_1);
+        json << ',';
+        json_number(failure.state.plant.delayed_throttle_command_2);
+        json << "]},\"source_plant_internal_state\":[";
+        for (int i = 0; i < MPC_PLANT_INTERNAL_STATE_COUNT; ++i) {
+            if (i > 0) json << ',';
+            json_number(failure.state.plant.source_plant_internal_state[i]);
+        }
+        json << "],\"plant_state_flags\":["
+             << failure.state.plant.source_plant_initialized << ','
+             << failure.state.plant.source_suspension_history_initialized << ','
+             << failure.state.plant.source_imu_state_initialized
+             << "],\"incoming_branch_flags\":"
+             << failure.state.incoming_branch_flags
+             << ",\"incoming_transition_valid\":"
+             << (failure.state.incoming_transition_valid ? "true" : "false")
+             << ",\"incoming_wheel_slip_excess_mps\":[";
+        for (int i = 0; i < 4; ++i) {
+            if (i > 0) json << ',';
+            json_number(failure.state.incoming_wheel_slip_excess_mps[i]);
+        }
+        json << ']';
         json << '}';
+    };
+    const auto append_sqp_step_metrics =
+        [&json, &json_number](const char *name,
+            const MpcRtiSqpStepMetrics_t &metrics) {
+        json << ",\"" << name << "\":{\"valid\":"
+             << (metrics.valid ? "true" : "false")
+             << ",\"accepted\":"
+             << (metrics.accepted ? "true" : "false")
+             << ",\"source_exact_rollout_complete\":"
+             << (metrics.source_exact_rollout_complete ? "true" : "false")
+             << ",\"source_exact_rollout_status\":"
+             << metrics.source_exact_rollout_status
+             << ",\"source_exact_failure_stage\":"
+             << metrics.source_exact_failure_stage
+             << ",\"comparison_includes_feedback\":"
+             << (metrics.comparison_includes_feedback ? "true" : "false")
+             << ",\"line_search_attempted\":"
+             << (metrics.line_search_attempted ? "true" : "false")
+             << ",\"line_search_trials\":" << metrics.line_search_trials
+             << ",\"line_search_accepted\":"
+             << (metrics.line_search_accepted ? "true" : "false")
+             << ",\"line_search_merit_triggered\":"
+             << (metrics.line_search_merit_triggered ? "true" : "false")
+             << ",\"selected_alpha\":";
+        json_number(metrics.selected_alpha);
+        json << ",\"qp_predicted_cost_reduction\":";
+        json_number(metrics.qp_predicted_cost_reduction);
+        json << ",\"unscaled_qp_predicted_cost_reduction\":";
+        json_number(metrics.unscaled_qp_predicted_cost_reduction);
+        json << ",\"source_exact_cost_reduction\":";
+        json_number(metrics.source_exact_cost_reduction);
+        json << ",\"realized_source_exact_cost_reduction\":";
+        json_number(metrics.realized_source_exact_cost_reduction);
+        json << ",\"selected_qp_predicted_cost_reduction\":";
+        json_number(metrics.selected_qp_predicted_cost_reduction);
+        json << ",\"selected_source_exact_cost_reduction\":";
+        json_number(metrics.selected_source_exact_cost_reduction);
+        json << ",\"model_agreement_ratio\":";
+        json_number(metrics.model_agreement_ratio);
+        json << ",\"realized_model_agreement_ratio\":";
+        json_number(metrics.realized_model_agreement_ratio);
+        json << ",\"selected_model_agreement_ratio\":";
+        json_number(metrics.selected_model_agreement_ratio);
+        json << ",\"trust_region_scale_before\":";
+        json_number(metrics.trust_region_scale_before);
+        json << ",\"trust_region_scale_after\":";
+        json_number(metrics.trust_region_scale_after);
+        json << ",\"maximum_state_error\":";
+        json_number(metrics.maximum_state_error);
+        json << ",\"maximum_state_error_stage\":"
+             << metrics.maximum_state_error_stage
+             << ",\"maximum_state_error_index\":"
+             << metrics.maximum_state_error_index
+             << ",\"maximum_footprint_constraint_error_m\":";
+        json_number(metrics.maximum_footprint_constraint_error_m);
+        json << ",\"maximum_footprint_error_stage\":"
+             << metrics.maximum_footprint_error_stage
+             << ",\"maximum_source_footprint_violation_m\":";
+        json_number(metrics.maximum_source_footprint_violation_m);
+        json << ",\"maximum_source_footprint_violation_stage\":"
+             << metrics.maximum_source_footprint_violation_stage
+             << ",\"state_samples\":" << metrics.state_sample_count
+             << ",\"footprint_samples\":" << metrics.footprint_sample_count
+             << ",\"stage_metrics\":[";
+        for (int stage = 0; stage <= PREDICTION_HORIZON; ++stage) {
+            if (stage > 0) json << ',';
+            json << "{\"stage\":" << stage
+                 << ",\"maximum_state_error\":";
+            json_number(metrics.state_error_by_stage[stage]);
+            json << ",\"dominant_state_index\":"
+                 << metrics.state_error_index_by_stage[stage]
+                 << ",\"footprint_constraint_error_m\":";
+            json_number(metrics.footprint_constraint_error_by_stage_m[stage]);
+            json << ",\"source_footprint_violation_m\":";
+            json_number(metrics.source_footprint_violation_by_stage_m[stage]);
+            json << '}';
+        }
+        json << "]}";
     };
     MpcTrajectorySample_t current_path_sample{};
     const bool current_path_sample_valid = mpc_trajectory_sample(
@@ -603,6 +712,10 @@ void MpcControllerNode::publish_cycle_diagnostics(const MpcRtiState_t &state,
         << result.source_nonlinear_terminal_rejected
         << ",\"source_nonlinear_timed_out\":"
         << (result.source_nonlinear_timed_out ? "true" : "false")
+        ;
+    append_sqp_step_metrics("r1_sqp_step_metrics", result.r1_step_metrics);
+    append_sqp_step_metrics("r2_sqp_step_metrics", result.r2_step_metrics);
+    json
         << ",\"sqp_iterations_attempted\":"
         << result.sqp_iterations_attempted
         << ",\"sqp_iterations_completed\":"
