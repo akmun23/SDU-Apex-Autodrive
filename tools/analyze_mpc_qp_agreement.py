@@ -89,6 +89,7 @@ def report(path: pathlib.Path, *, wall_threshold_m2: float=1.e-5,
                             row.get("candidate_command_stamp_ns"))
             progress=number(row.get("progress_m"))
             agreement=solver.get("native_source_sqp_full_step_model_agreement")
+            full_cost_recorded=False
             if isinstance(agreement,list):
                 telemetry_cycles+=1
                 for idx,step in enumerate(agreement[:2]):
@@ -107,14 +108,31 @@ def report(path: pathlib.Path, *, wall_threshold_m2: float=1.e-5,
                         signed_wall_prediction_error_m2=exact-pred,
                         max_wall_model_defect_m=defect,
                         accepted_alpha=number(step.get("accepted_alpha")),
+                        racing_cost_model_valid=step.get("racing_cost_model_valid") is True,
+                        racing_cost_prediction_error=(
+                            number(step.get("racing_cost_prediction_error"))
+                            if step.get("racing_cost_model_valid") is True else None),
                         false_safe_prediction=pred<=wall_threshold_m2 and
                             exact>wall_threshold_m2,
                         large_clearance_defect=defect>defect_threshold_m,
                     )
                     stages[idx].append(event)
+                    if event["racing_cost_model_valid"]:
+                        predicted=number(step.get("qp_predicted_racing_cost_change"))
+                        actual=number(step.get("exact_source_racing_cost_change"))
+                        if predicted is not None and actual is not None:
+                            full_cost_recorded=True
+                            cost.append(dict(
+                                line=lineno,stamp_ns=stamp,progress_m=progress,
+                                pass_index=idx,predicted_delta=predicted,
+                                actual_delta=actual,error=actual-predicted))
                     if event["false_safe_prediction"] or event["large_clearance_defect"]:
                         traces.append(event)
-            if solver.get("native_source_sqp_cost_prediction_valid") is True:
+            # Older logs provide only accepted-alpha first-pass cost
+            # comparisons. Avoid counting those twice when the new full-
+            # step physical-source cost model is available in this epoch.
+            if (not full_cost_recorded and
+                solver.get("native_source_sqp_cost_prediction_valid") is True):
                 predicted=number(solver.get("native_source_sqp_predicted_cost_change"))
                 actual=number(solver.get("native_source_sqp_actual_cost_change"))
                 if predicted is not None and actual is not None:
@@ -145,6 +163,11 @@ def report(path: pathlib.Path, *, wall_threshold_m2: float=1.e-5,
                 e["max_wall_model_defect_m"] for e in events]),
             selected_alpha=summary([
                 e["accepted_alpha"] for e in events if e["accepted_alpha"] is not None]),
+            racing_cost_prediction_samples=sum(
+                e["racing_cost_prediction_error"] is not None for e in events),
+            racing_cost_prediction_abs_error=summary([
+                abs(e["racing_cost_prediction_error"]) for e in events
+                if e["racing_cost_prediction_error"] is not None]),
         )
     traces.sort(
         key=lambda e:(e["false_safe_prediction"],abs(e["signed_wall_prediction_error_m2"]),

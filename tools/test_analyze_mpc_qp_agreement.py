@@ -15,7 +15,11 @@ class AgreementAuditTests(unittest.TestCase):
                          dict(valid=True,predicted_wall_violation_m2=0.,
                               exact_source_wall_violation_m2=.06,
                               maximum_wall_linearization_defect_m=.34,
-                              accepted_alpha=.0625),
+                              accepted_alpha=.0625,
+                              racing_cost_model_valid=True,
+                              qp_predicted_racing_cost_change=-10.,
+                              exact_source_racing_cost_change=-4.,
+                              racing_cost_prediction_error=6.),
                          dict(valid=False)])),
             dict(status="waiting_for_solver_budget",command_published=False,
                  solver=dict(native_source_sqp_enabled=True,
@@ -47,8 +51,10 @@ class AgreementAuditTests(unittest.TestCase):
         self.assertEqual(data["per_pass"]["SQP_1"]["false_safe_count"],1)
         self.assertEqual(data["per_pass"]["SQP_2"]["samples"],1)
         self.assertEqual(data["per_pass"]["SQP_2"]["false_safe_count"],0)
-        self.assertEqual(data["cost_model"]["samples"],1)
-        self.assertEqual(data["cost_model"]["absolute_cost_error"]["median"],4.)
+        self.assertEqual(data["cost_model"]["samples"],2)
+        self.assertEqual(data["cost_model"]["absolute_cost_error"]["median"],5.)
+        self.assertEqual(data["per_pass"]["SQP_1"]["racing_cost_prediction_samples"],1)
+        self.assertEqual(data["per_pass"]["SQP_2"]["racing_cost_prediction_samples"],0)
         self.assertEqual(len(data["worst_disagreement_epochs"]),1)
 
     def test_uninstrumented_is_not_misclassified_as_agreement(self):
