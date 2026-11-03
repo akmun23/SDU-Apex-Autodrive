@@ -14,6 +14,8 @@ namespace sdu_apex::qp_fixture {
 
 constexpr std::uint32_t kSchemaVersion = 5;
 constexpr char kMagic[8] = {'S', 'D', 'U', 'F', 'Q', 'P', '5', '\n'};
+constexpr char kMagicProgress[8] = {'S','D','U','F','Q','P','6','\n'};
+constexpr char kMagicElastic[8] = {'S','D','U','F','Q','P','7','\n'};
 
 class Writer {
  public:
@@ -136,9 +138,24 @@ inline bool write_capture(const std::string &path,
   if (!capture.valid || capture.problem.horizon != RICCATI_HORIZON)
     return false;
 
+  /* Keep pre-existing v5 captures bit-compatible. Emit v6 only when
+   * progress-coupled hard planes are present. Forensic replay must record the
+   * actual physical QP, including the third state-polygon coordinate. */
+  bool has_progress=false;
+  for(const auto &poly:capture.solver_config.state_polygons)
+    for(int face=0;face<poly.count;++face)
+      has_progress |= poly.progress_normal[face]!=0.f;
+  bool has_elastic=false;
+  for(const auto &poly:capture.solver_config.state_polygons) {
+    if(!std::isfinite(poly.elastic_weight) || poly.elastic_weight<0.f ||
+       poly.elastic_weight>1.e7f)return false;
+    has_elastic |= poly.elastic_weight>0.f;
+  }
   Writer writer(path);
-  if (!writer.good() || !writer.bytes(kMagic, sizeof(kMagic)) ||
-      !writer.u32(kSchemaVersion) || !writer.u32(0x01020304u) ||
+  if (!writer.good() ||
+      !writer.bytes(has_elastic?kMagicElastic:
+                     has_progress?kMagicProgress:kMagic,sizeof(kMagic)) ||
+      !writer.u32(has_elastic?7u:has_progress?6u:kSchemaVersion) || !writer.u32(0x01020304u) ||
       !writer.u32(RICCATI_MAX_NX) || !writer.u32(RICCATI_MAX_NU) ||
       !writer.u32(static_cast<std::uint32_t>(capture.problem.horizon)) ||
       !writer.u32(static_cast<std::uint32_t>(capture.capture_count)) ||
@@ -179,7 +196,11 @@ inline bool write_capture(const std::string &path,
     if (!writer.i32(polygon.count)) return false;
     for (int face = 0; face < RICCATI_STATE_POLYGON_MAX_PLANES; ++face)
       if (!write_f32_array(writer, polygon.normal[face], 2) ||
-          !writer.f32(polygon.upper[face])) return false;
+          !writer.f32(polygon.upper[face]) ||
+          ((has_progress || has_elastic) &&
+           !writer.f32(polygon.progress_normal[face])))
+        return false;
+    if(has_elastic && !writer.f32(polygon.elastic_weight))return false;
   }
   if (!writer.f32(config.rho) || !writer.f32(config.rho_u) ||
       !write_f32_array(writer, config.rho_x_by_state, RICCATI_MAX_NX) ||
@@ -313,10 +334,16 @@ inline bool read_capture(const std::string &path,
   std::uint32_t passes = 0;
   std::int32_t raw_status = 0;
   if (!reader.good() || !reader.bytes(magic, sizeof(magic)) ||
-      std::memcmp(magic, kMagic, sizeof(kMagic)) != 0 ||
+      (std::memcmp(magic,kMagic,sizeof(kMagic))!=0 &&
+       std::memcmp(magic,kMagicProgress,sizeof(kMagic))!=0 &&
+       std::memcmp(magic,kMagicElastic,sizeof(kMagic))!=0) ||
       !reader.u32(&version) || !reader.u32(&endian) || !reader.u32(&nx) ||
       !reader.u32(&nu) || !reader.u32(&horizon) || !reader.u32(&passes) ||
-      !reader.i32(&raw_status) || version != kSchemaVersion ||
+      !reader.i32(&raw_status) ||
+      (version!=kSchemaVersion && version!=6u && version!=7u) ||
+      (version==7u && std::memcmp(magic,kMagicElastic,sizeof(kMagic))!=0) ||
+      (version==6u && std::memcmp(magic,kMagicProgress,sizeof(kMagic))!=0) ||
+      (version==kSchemaVersion && std::memcmp(magic,kMagic,sizeof(kMagic))!=0) ||
       endian != 0x01020304u || nx != RICCATI_MAX_NX ||
       nu != RICCATI_MAX_NU || horizon != RICCATI_HORIZON || passes == 0)
     return false;
@@ -358,12 +385,21 @@ inline bool read_capture(const std::string &path,
         polygon.count > RICCATI_STATE_POLYGON_MAX_PLANES) return false;
     for (int face = 0; face < RICCATI_STATE_POLYGON_MAX_PLANES; ++face) {
       if (!read_f32_array(reader, polygon.normal[face], 2) ||
-          !reader.f32(&polygon.upper[face])) return false;
+          !reader.f32(&polygon.upper[face]) ||
+          (version>=6u && !reader.f32(&polygon.progress_normal[face])))
+        return false;
       if (!std::isfinite(polygon.normal[face][0]) ||
           !std::isfinite(polygon.normal[face][1]) ||
-          !std::isfinite(polygon.upper[face])) return false;
+          !std::isfinite(polygon.upper[face]) ||
+          !std::isfinite(polygon.progress_normal[face])) return false;
       if (face < polygon.count &&
           !(std::hypot(polygon.normal[face][0], polygon.normal[face][1]) > 0.f)) return false;
+    }
+    if(version>=7u) {
+      if(!reader.f32(&polygon.elastic_weight) ||
+          !std::isfinite(polygon.elastic_weight) ||
+          polygon.elastic_weight<0.f ||
+          polygon.elastic_weight>1.e7f)return false;
     }
     problem.state_polygons[k] = polygon;
   }
@@ -541,7 +577,7 @@ inline bool read_capture(const std::string &path,
   if (!finite_solver_config || !(config.rho > 0.0f) ||
       !(config.rho_u > 0.0f) || config.rho_max < 1.0f ||
       config.rho_max > 127.0f || !(config.tolerance > 0.0f) ||
-      config.max_iterations < 1 || config.max_iterations > 200 ||
+      config.max_iterations < 1 || config.max_iterations > 10000 ||
       config.adaptive_rho < 0 || config.adaptive_rho > 1 ||
       config.cold_start_each_solve < 0 || config.cold_start_each_solve > 1 ||
       config.reuse_same_epoch < 0 || config.reuse_same_epoch > 1 ||

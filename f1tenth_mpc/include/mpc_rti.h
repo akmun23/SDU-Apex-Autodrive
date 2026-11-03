@@ -67,6 +67,16 @@ typedef struct
     int terminal_targets_valid;
     int horizon;
     int valid;
+    /* Frozen controlled terminal policy shared by R1, R2 and every exact
+     * nonlinear acceptance. Expressed as delta from the horizon's previous
+     * absolute command, so source sensitivities include actuator coupling.
+     * Appended for backwards-compatible versioned .mctx migration. */
+    int successor_recourse_valid;
+    int successor_recourse_horizon;
+    float successor_recourse_dt;
+    float successor_recourse_weight;
+    float successor_recourse_reserve_m;
+    MpcModelControl_t successor_recourse_deltas[8];
 } MpcRtiObjectiveSchedule_t;
 
 typedef struct
@@ -156,6 +166,23 @@ typedef struct
      * admitted stages and only ask map authority to rescue a false reject.
      * Never skip the map on a stage that Frenet considers invalid. */
     int world_map_rejection_only;
+    /* Experimental full-footprint reserve cost, consistent in QP and exact
+     * source merit. Append at the former ABI padding at the END of this
+     * struct so all earlier replay model offsets remain unchanged.
+     * Older v1/v2 .mctx reader initializes it to zero explicitly. */
+    float weight_source_corridor_reserve;
+    /* Opt-in Unity-source lateral tire saturation merit. Applies to exact
+     * source WheelHit-equivalent instantaneous front contact slip (radians)
+     * and the identical GN approximation in normal QP, not bicycle slip. */
+    float weight_source_lateral_slip;
+    /* Source-exact steering-actuator decision coordinates: optimize the
+     * reachable physical rack increment instead of an arbitrary target that
+     * the Unity rate limiter may not attain in this 25ms plant stage. QP
+     * target = physical_steer + rack_increment; the command sent to Unity
+     * remains an ordinary absolute steering target. Requires the existing
+     * command-increment QP for causal input/box constraints. Experimental
+     * until strict full races pass, defaults off. */
+    int source_reachable_steering_qp;
 } MpcRtiConfiguration_t;
 
 typedef enum
@@ -280,6 +307,16 @@ typedef struct
     float raw_primal_u[RICCATI_HORIZON][RICCATI_MAX_NU];
     RiccatiSolution_t raw_solution;
     RiccatiDebugInfo_t debug_info;
+    /* Exact source controls on this pass's own linearization and the controls
+     * actually applied during its nonlinear source rollout (after feedback,
+     * if enabled). These are replay context; the QP remains the authority for
+     * the decision variables and pre/post ADMM state. */
+    MpcModelControl_t linearization_controls[PREDICTION_HORIZON];
+    MpcModelControl_t unscaled_proposal_controls[PREDICTION_HORIZON];
+    MpcModelControl_t proposal_controls[PREDICTION_HORIZON];
+    MpcModelControl_t source_rollout_controls[PREDICTION_HORIZON];
+    int proposal_controls_valid;
+    int source_rollout_controls_valid;
     RiccatiStatus_t raw_status;
     int capture_count;
     int valid;
@@ -354,10 +391,54 @@ typedef struct
      * a physically certified first iterate seeds deadline-gated exact
      * nonlinear relinearization, and the better exact-valid cost wins. */
     int max_sqp_iterations;
-    /* Source-informed curvature within the normal constrained QP.
-     * Uses the exact-trajectory adjoint secant to damp finite-step model
-     * error without changing its gradient. No post-QP second controller. */
-    int source_informed_sqp;
+    /* Opt-in accuracy-first single-shooting SQP. The 60 command controls
+     * are the only QP variables; ALL hidden source states are propagated.
+     * Strict nonlinear validation remains mandatory. The legacy Riccati
+     * passes are bypassed entirely when enabled. Unqualified for live
+     * 20ms use until deterministic deadline certification is achieved. */
+    int native_source_reduced_sqp;
+    int native_source_reduced_sqp_iterations; /* 1..8 */
+    /* Optional experimentally sufficient 3-step held-command continuation
+     * from stage 30. Never claim it is a terminal invariant set.
+     * Default 0, selected mode 3 is source hard-constrained in Phase I. */
+    int native_source_sqp_terminal_lookahead_stages; /* 0 or 3 */
+    int native_source_sqp_control_decision_stages; /* 0(default 30), 20,30 */
+    int native_source_sqp_reuse_fd_prefix; /* 0 or 1 */
+    int native_source_sqp_adaptive_stop; /* 0 or 1 */
+    int native_source_sqp_full_source_forward; /* 0 or 1, experimental */
+    /* Normal SQP infeasible-start filter: before R2, select a nonpublishable
+     * source-integrated R1 intermediate iterate ONLY when the original
+     * physical footprint violation is reduced. R2 must still solve and pass
+     * strict nonlinear validation to publish anything. Off by default. */
+    int source_violation_filter_sqp;
+    /* Square-slack penalty for an INFEASIBLE normal R1/R2 corridor.
+     * Zero selects the numerically tested 500 reference penalty. This is
+     * distinct from the legacy feasibility-restoration wall weight, which
+     * must not silently change the mathematical elastic QP. */
+    float source_elastic_wall_weight;
+    /* Opt-in source-exact Phase-I initialization of an infeasible nominal,
+     * before constructing R1. It only replaces the linearization seed after
+     * complete strict-corridor certification; no alternative controller and
+     * no unsafe command publication. Budget-gated and off in race profiles. */
+    int source_nominal_feasibility_repair;
+    /* Number of exact source trial scales per Phase-I direction (1..8).
+     * Zero in programmatic test configurations uses the normal 8 trials.
+     * This controls runtime effort, not physical constraint relaxation. */
+    int source_nominal_feasibility_max_exact_trials;
+    int source_progress_aware_reserve;
+    /* Progress-aware HARD QP footprint constraint. The original exact
+     * source rollout enforces walls regardless of this experimental switch.
+     * Kept disabled in qualified race configs until full Unity qualification. */
+    int progress_coupled_hard_corridor;
+    /* Positive weight enables an 8-stage frozen source-controlled terminal
+     * recourse cost inside BOTH QP and exact nonlinear SQP merit. Zero keeps
+     * original racing objective exactly. Experimental, off by default. */
+    float successor_recourse_weight;
+    /* Optional source-exact 8-stage steering/throttle optimization of the
+     * frozen recourse policy (rather than three hand-parameterized seeds).
+     * Optimizes full hidden-state source corridor deficit; final acceptance
+     * still uses the strict original source plant. Off by default. */
+    int successor_recourse_optimize;
     /* Model a held-command 75ms source continuation inside the QP and
      * exact merit, including future footprint and dynamic constraints. */
     int terminal_viability;
@@ -367,12 +448,10 @@ typedef struct
      * Never accepts an unchecked action or discards both valid solutions.
      * Default disabled pending repeated full-race validation. */
     int prefer_terminal_continuable_refinement;
-    /* Standard trust-region agreement gate. A positive threshold requires
-     * the exact source improvement to explain at least this fraction of the
-     * QP-predicted improvement before accepting a step. It also enables an
-     * adaptive step radius: weak agreement or failed source validation shrinks
-     * the next R1/R2 correction, while strong agreement can grow it. Zero
-     * disables both and preserves the existing cost-decrease-only policy. */
+    /* Optional source-exact merit filter (not a trust region): a positive
+     * threshold requires a selected QP step's actual cost improvement to
+     * explain this fraction of the QP prediction. Zero keeps the ordinary
+     * exact cost/corridor-only policy. Never clips the full QP correction. */
     float minimum_sqp_model_agreement_ratio;
     /* Expensive diagnostic mode: exactly roll out each raw QP proposal with
      * relaxed map bounds and compare all stages against its own QP nominal.
@@ -429,6 +508,8 @@ typedef struct
     double model_agreement_ratio;
     double realized_model_agreement_ratio;
     double selected_model_agreement_ratio;
+    /* Retained only for binary compatibility with captured .mctx fixtures.
+     * The abandoned post-QP adaptive trust radius is never applied. */
     float trust_region_scale_before;
     float trust_region_scale_after;
     double maximum_state_error;
@@ -452,8 +533,8 @@ typedef struct
     int warm_start_control_count;
     int warm_start_controls_valid;
     int64_t command_epoch_ns;
-    /* Optional agreement-controlled SQP step radius. Zero means the initial
-     * full radius (1.0), preserving zero-initialized caller compatibility. */
+    /* Reserved legacy field for preexisting same-build replay snapshots.
+     * Not read or written by the production SQP. */
     float sqp_trust_region_scale;
     double solver_nominal_progress[PREDICTION_HORIZON + 1];
     int solver_nominal_progress_valid;
@@ -512,6 +593,9 @@ typedef struct
     /* Controller discarded stale ADMM iterates after publishing an exactly
      * revalidated recovery action, preserving its nominal/control seed. */
     int admm_state_reset_for_recovery;
+    /* Late unpublished solve was rolled back to the last published source
+     * nominal and ADMM state, not left as an unissued command. */
+    int solver_memory_restored_after_deadline;
     int feasibility_restoration_attempted;
     int feasibility_restoration_accepted;
     int feasibility_restoration_iterations;
@@ -520,6 +604,31 @@ typedef struct
     int sqp_iterations_attempted;
     int sqp_iterations_completed;
     int sqp_iterations_accepted;
+    int native_source_sqp_active;
+    int native_source_sqp_source_evaluations;
+    int native_source_sqp_fd_columns;
+    int native_source_sqp_qp_solves;
+    int native_source_sqp_qp_iterations;
+    int native_source_sqp_first_feasible_iteration;
+    int native_source_sqp_initial_failure_stage;
+    double native_source_sqp_initial_wall_violation_m2;
+    double native_source_sqp_final_wall_violation_m2;
+    double native_source_sqp_qp_us;
+    double native_source_sqp_source_evaluation_us;
+    double native_source_sqp_initial_rate_violation_m2;
+    double native_source_sqp_final_rate_violation_m2;
+    int native_source_sqp_initial_strict_source_valid;
+    int native_source_sqp_final_strict_source_valid;
+    int native_source_sqp_last_qp_status;
+    int native_source_sqp_full_forward_intervals;
+    int native_source_sqp_tangent_score_evaluations;
+    int source_nominal_repair_attempted;
+    int source_nominal_repair_accepted;
+    int source_nominal_repair_phase_one_iterations;
+    double source_nominal_repair_us;
+    int successor_recourse_active;
+    double successor_recourse_initialize_us;
+    double successor_recourse_qp_us;
     int experimental_source_nonlinear_selected;
     int source_nonlinear_exact_evaluations;
     int source_nonlinear_gradient_discrepancies;
@@ -543,8 +652,13 @@ typedef struct
     double first_pass_objective;
     double second_pass_objective;
     double exact_objective_improvement;
-    double source_directional_derivative;
-    double source_curvature_regularization[2];
+    /* Infeasible-source-iterate R1->R2 filter: an accepted intermediate is
+     * NEVER publishable; only the strict final horizon can be published. */
+    int source_violation_filter_attempted;
+    int source_violation_filter_selected;
+    float source_violation_filter_alpha;
+    double source_violation_initial_m2;
+    double source_violation_selected_m2;
     MpcRtiSqpStepMetrics_t r1_step_metrics;
     MpcRtiSqpStepMetrics_t r2_step_metrics;
     int admm_status;
@@ -655,11 +769,44 @@ int mpc_rti_build_objective_schedule(
     const MpcRtiConfiguration_t *configuration,
     MpcRtiObjectiveSchedule_t *schedule);
 
+/* Runtime reference/bounds interpolation at one physical path-progress point.
+ * Exposed for exact replay tooling so corridor audits use the same preview,
+ * contour and clearance policy as the controller. */
+int mpc_rti_reference_at_progress(
+    const MpcTrajectorySample_t *trajectory, size_t trajectory_count,
+    double lap_length, double progress,
+    const MpcRtiConfiguration_t *configuration,
+    MpcRtiReference_t *reference);
+
 /* Score an already propagated plan without rerunning the physical plant. */
 int mpc_rti_score_candidate_plan(
     MpcRtiNominal_t *candidate,
     const MpcTrajectorySample_t *trajectory, size_t trajectory_count,
     double lap_length, const MpcRtiCycleConfiguration_t *configuration);
+
+/* Replay/diagnostic scoring for a complete exact-source rollout whose states
+ * may violate the hard footprint constraint. This reports the original
+ * frozen objective and minimum clearance but never validates or authorizes
+ * the candidate for publication. */
+int mpc_rti_score_candidate_plan_for_diagnostics(
+    const MpcRtiNominal_t *candidate,
+    const MpcTrajectorySample_t *trajectory, size_t trajectory_count,
+    double lap_length, const MpcRtiCycleConfiguration_t *configuration,
+    double *objective, float *minimum_corridor_slack_m);
+
+/* Rebuild the complete exact source trajectories at one SQP pass's recorded
+ * linearization and proposal, then compare every QP-predicted horizon stage
+ * and footprint constraint against that source rollout. Uses wide diagnostic
+ * track bounds only to continue measuring after a hard corridor violation. */
+int mpc_rti_measure_qp_source_agreement(
+    const MpcRtiState_t *initial_state, double progress,
+    const MpcModelControl_t linearization_controls[PREDICTION_HORIZON],
+    const MpcModelControl_t proposal_controls[PREDICTION_HORIZON],
+    const MpcRtiProblem_t *problem,
+    const MpcTrajectorySample_t *trajectory, size_t trajectory_count,
+    double lap_length, float prediction_dt,
+    const MpcRtiConfiguration_t *model,
+    MpcRtiSqpStepMetrics_t *metrics);
 
 /* Build an absolute-state/input affine LTV QP from a nonlinear nominal. */
 /* Convert normal QP from absolute commands u to delta commands du.
@@ -668,7 +815,8 @@ int mpc_rti_score_candidate_plan(
  * while enforcing local command step constraints via ADMM boxes.
  * Returns 0 rather than silently discarding unsupported cross terms. */
 int mpc_rti_transform_qp_to_command_increments(
-    MpcRtiProblem_t *problem, const MpcRtiConfiguration_t *configuration);
+    MpcRtiProblem_t *problem, const MpcRtiConfiguration_t *configuration,
+    float prediction_dt);
 
 /* Stage source A/B and corridor constraints follow the physically integrated
  * nominal, while target weights follow the frozen exact nonlinear objective. */
@@ -681,6 +829,23 @@ int mpc_rti_build_ltv_qp_with_objective_schedule(
     const MpcRtiConfiguration_t *configuration,
     const MpcRtiObjectiveSchedule_t *objective_schedule,
     MpcRtiProblem_t *problem);
+
+/* Exact nominal-progress geometry for progress-dependent hard wall planes. */
+int mpc_rti_build_ltv_qp_with_progress_corridor(
+    const MpcRtiState_t nominal_states[PREDICTION_HORIZON + 1],
+    const MpcModelControl_t nominal_controls[PREDICTION_HORIZON],
+    const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
+    int horizon,
+    float prediction_dt,
+    const MpcRtiConfiguration_t *configuration,
+    const MpcRtiObjectiveSchedule_t *objective_schedule,
+    MpcRtiProblem_t *problem,
+    const double progress[PREDICTION_HORIZON+1],
+    const MpcTrajectorySample_t *trajectory, size_t trajectory_count,
+    double lap_length,
+    /* Optional preceding same-command-epoch source nominal for finite-step
+     * (rather than infinitesimal) wall-width secants. */
+    const double previous_progress[PREDICTION_HORIZON+1] = nullptr);
 
 int mpc_rti_build_ltv_qp(
     const MpcRtiState_t nominal_states[PREDICTION_HORIZON + 1],
@@ -844,6 +1009,20 @@ typedef struct
     MpcModelControl_t controls[PREDICTION_HORIZON];
 } MpcRtiSourceNonlinearResult_t;
 
+/* Shared exact-source Phase-I seed repair. Returns 1 only after a full
+ * strict source-plant rollout of the repaired controls. Used as an SQP
+ * initializer, not a publishable fallback or separate racing optimizer. */
+int mpc_rti_source_repair_infeasible_nominal(
+    const MpcRtiState_t *initial, double progress,
+    const MpcTrajectorySample_t *trajectory, size_t trajectory_count,
+    double lap_length, float prediction_dt,
+    const MpcRtiCycleConfiguration_t *configuration,
+    const MpcRtiObjectiveSchedule_t *frozen_objective,
+    const MpcModelControl_t seed[PREDICTION_HORIZON],
+    const MpcRtiSourceNonlinearOptions_t *options,
+    MpcRtiSourceNonlinearResult_t *result,
+    MpcRtiNominal_t *certified_nominal);
+
 int mpc_rti_source_nonlinear_optimize(
     const MpcRtiState_t *initial,
     double progress,
@@ -855,7 +1034,8 @@ int mpc_rti_source_nonlinear_optimize(
     const MpcRtiObjectiveSchedule_t *frozen_objective,
     const MpcModelControl_t seed[PREDICTION_HORIZON],
     const MpcRtiSourceNonlinearOptions_t *options,
-    MpcRtiSourceNonlinearResult_t *result);
+    MpcRtiSourceNonlinearResult_t *result,
+    MpcRtiNominal_t *certified_nominal);
 
 /* Recursively score a candidate at candidate progress, sampling its exact
  * nonlinear curvature and corridor instead of reusing the nominal schedule. */
@@ -880,6 +1060,17 @@ MpcRtiRolloutStatus_t mpc_rti_rollout_candidate(
 /* Validate a control sequence against the exact nonlinear plant, state and
  * full-footprint corridor checks. Used only to continue a remaining suffix
  * of a previously accepted plan after a later solve fails. */
+/* Exact-source scorer with the same physical footprint planes exported
+ * for source-SQP derivatives. Avoids re-evaluating reference interpolation
+ * and the footprint against the same 30 already scored source states.
+ * Margin rows 1..horizon populated; 0 is the caller's measured state. */
+int mpc_rti_score_candidate_plan_and_corridor_for_diagnostics(
+    const MpcRtiNominal_t *candidate,
+    const MpcTrajectorySample_t *trajectory,size_t trajectory_count,
+    double lap_length,const MpcRtiCycleConfiguration_t *configuration,
+    double *objective,float *minimum_corridor_slack_m,
+    float corridor_by_stage[PREDICTION_HORIZON+1][2]);
+
 MpcRtiRolloutStatus_t mpc_rti_validate_candidate_plan(
     const MpcRtiState_t *initial_state,
     double initial_progress,

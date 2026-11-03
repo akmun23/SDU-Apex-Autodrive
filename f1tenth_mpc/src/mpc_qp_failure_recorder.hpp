@@ -2,6 +2,7 @@
 // Opt-in forensic recorder: never performs filesystem I/O on the 40 Hz
 // controller callback. It is not enabled in production profiles.
 #include "mpc_qp_fixture_format.hpp"
+#include "mpc_qp_failure_context.hpp"
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
@@ -41,9 +42,15 @@ class MpcQpFailureRecorder {
   void submit(std::int64_t command_epoch_ns, double progress_m,
               float speed_ceiling_mps, const MpcRtiState_t &initial,
               MpcRtiCycleStatus_t status, const MpcRtiCycleResult_t &result,
+              const MpcRtiCycleConfiguration_t &configuration,
+              const MpcTrajectorySample_t *trajectory,
+              std::size_t trajectory_count, double lap_length_m,
+              float prediction_dt,
               const MpcRtiQpCapture_t *r1,
               const MpcRtiQpCapture_t *r2) {
     if ((!r1 || !r1->valid) && (!r2 || !r2->valid)) return;
+    if (!trajectory || trajectory_count < 3 ||
+        trajectory_count > 1000000) return;
     // Allocate and copy only on a failed/abnormal controller cycle, never
     // during the normal accepted 40 Hz hot path.
     auto snapshot = std::make_unique<Snapshot>();
@@ -61,6 +68,50 @@ class MpcQpFailureRecorder {
                                          0, PREDICTION_HORIZON);
     for (int i = 0; i < PREDICTION_HORIZON; ++i)
       snapshot->nominal[i] = result.nominal_controls[i];
+    auto &source = snapshot->source;
+    source.command_epoch_ns = command_epoch_ns;
+    source.progress_m = progress_m;
+    source.lap_length_m = lap_length_m;
+    source.prediction_dt = prediction_dt;
+    source.terminal_viability = configuration.terminal_viability;
+    source.world_sweep_was_configured =
+        configuration.model.world_sweep_check != nullptr;
+    source.initial_state = initial;
+    source.model = configuration.model;
+    source.model.world_sweep_check = nullptr;
+    source.model.world_sweep_context = nullptr;
+    source.objective = result.comparison_objective;
+    source.r1_metrics = result.r1_step_metrics;
+    source.r2_metrics = result.r2_step_metrics;
+    source.trajectory.assign(trajectory, trajectory + trajectory_count);
+    if (r1 && r1->valid) {
+      source.r1_captured = 1;
+      std::copy_n(r1->linearization_controls, PREDICTION_HORIZON,
+                  source.r1_nominal);
+      std::copy_n(r1->unscaled_proposal_controls, PREDICTION_HORIZON,
+                  source.r1_unscaled_proposal);
+      std::copy_n(r1->proposal_controls, PREDICTION_HORIZON,
+                  source.r1_proposal);
+      std::copy_n(r1->source_rollout_controls, PREDICTION_HORIZON,
+                  source.r1_source_rollout);
+      source.r1_controls_valid = r1->proposal_controls_valid;
+      source.r1_source_rollout_controls_valid =
+          r1->source_rollout_controls_valid;
+    }
+    if (r2 && r2->valid) {
+      source.r2_captured = 1;
+      std::copy_n(r2->linearization_controls, PREDICTION_HORIZON,
+                  source.r2_nominal);
+      std::copy_n(r2->unscaled_proposal_controls, PREDICTION_HORIZON,
+                  source.r2_unscaled_proposal);
+      std::copy_n(r2->proposal_controls, PREDICTION_HORIZON,
+                  source.r2_proposal);
+      std::copy_n(r2->source_rollout_controls, PREDICTION_HORIZON,
+                  source.r2_source_rollout);
+      source.r2_controls_valid = r2->proposal_controls_valid;
+      source.r2_source_rollout_controls_valid =
+          r2->source_rollout_controls_valid;
+    }
     if (r1 && r1->valid)
       snapshot->first = std::make_unique<MpcRtiQpCapture_t>(*r1);
     if (r2 && r2->valid)
@@ -87,6 +138,7 @@ class MpcQpFailureRecorder {
     int failure_stage{}, failure_reason{};
     int nominal_count{};
     MpcModelControl_t nominal[PREDICTION_HORIZON]{};
+    sdu_apex::qp_fixture::FailureReplayContext source{};
     std::unique_ptr<MpcRtiQpCapture_t> first, second;
   };
 
@@ -94,16 +146,36 @@ class MpcQpFailureRecorder {
                         const Snapshot &snapshot) {
     const auto &p = snapshot.initial.plant;
     std::ofstream state(base / "physical_state.csv");
-    state << std::setprecision(17)
+    state << "command_epoch_ns,progress_m,speed_ceiling_mps,e_y,e_psi,u,v,r,"
+             "actual_steering_rad,delayed_steering_1,delayed_steering_2,"
+             "delayed_throttle_1,delayed_throttle_2,plant_initialized,"
+             "suspension_history_initialized,imu_state_initialized,"
+             "incoming_branch_flags,incoming_transition_valid";
+    for (int i = 0; i < 3; ++i)
+      for (int j = 0; j < 6; ++j)
+        state << ",incoming_tracking_jacobian_" << i << '_' << j;
+    for (int i = 0; i < 4; ++i)
+      state << ",incoming_wheel_slip_excess_" << i;
+    for (int i = 0; i < MPC_PLANT_INTERNAL_STATE_COUNT; ++i)
+      state << ",source_internal_" << i;
+    state << '\n' << std::setprecision(17)
           << snapshot.epoch << ',' << snapshot.progress << ','
-          << snapshot.ceiling << ','
-          << p.e_y << ',' << p.e_psi << ',' << p.u << ','
-          << p.v << ',' << p.r << ',' << p.actual_steering_angle << ','
+          << snapshot.ceiling << ',' << p.e_y << ',' << p.e_psi << ','
+          << p.u << ',' << p.v << ',' << p.r << ','
+          << p.actual_steering_angle << ','
           << p.delayed_steering_command_1 << ','
           << p.delayed_steering_command_2 << ','
           << p.delayed_throttle_command_1 << ','
           << p.delayed_throttle_command_2 << ','
-          << p.source_suspension_history_initialized << ",0,0";
+          << p.source_plant_initialized << ','
+          << p.source_suspension_history_initialized << ','
+          << p.source_imu_state_initialized << ','
+          << snapshot.source.initial_state.incoming_branch_flags << ','
+          << snapshot.source.initial_state.incoming_transition_valid;
+    for (const auto &row : snapshot.source.initial_state.incoming_tracking_jacobian)
+      for (float value : row) state << ',' << value;
+    for (double value : snapshot.source.initial_state.incoming_wheel_slip_excess_mps)
+      state << ',' << value;
     for (double x : p.source_plant_internal_state) state << ',' << x;
     state << '\n';
     std::ofstream nominal(base / "nominal_source_seed.csv");
@@ -127,6 +199,9 @@ class MpcQpFailureRecorder {
         !sdu_apex::qp_fixture::write_capture(
             (base / "r2.fqp").string(), *snapshot.second))
       throw std::runtime_error("R2 QP fixture write failed");
+    if (!sdu_apex::qp_fixture::write_failure_context(
+            (base / "source_context.mctx").string(), snapshot.source))
+      throw std::runtime_error("source replay context write failed");
     write_csv(base, snapshot);
     std::ofstream metadata(base / "context.json");
     metadata << std::setprecision(17)

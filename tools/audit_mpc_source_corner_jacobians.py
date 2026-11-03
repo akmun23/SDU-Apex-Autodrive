@@ -109,21 +109,40 @@ def audit_bag(bag: Path, library: Path, max_rows: int, epsilon_scale: float) -> 
                 minus.throttle_normalized -= eps
             ahead = ev.UnitySourcePlantOutputC()
             behind = ev.UnitySourcePlantOutputC()
-            if not (step(ctypes.byref(plus), .025, ctypes.byref(ahead)) and
-                    step(ctypes.byref(minus), .025, ctypes.byref(behind))):
-                raise RuntimeError(f"finite-difference failed {label} {state_row['stamp_ns']}")
+            valid_plus=bool(step(ctypes.byref(plus), .025, ctypes.byref(ahead)))
+            valid_minus=bool(step(ctypes.byref(minus), .025, ctypes.byref(behind)))
+            if not (valid_plus or valid_minus):
+                raise RuntimeError(f"both perturbations invalid {label} {state_row['stamp_ns']}")
+            scheme="central"
+            baseline=ev.UnitySourcePlantOutputC()
+            if not (valid_plus and valid_minus):
+                # At saturated actuator bounds, an outward perturbation is
+                # physically invalid. Compare the actual feasible one-sided
+                # tangent; never invent an invalid full-physics derivative.
+                if not step(ctypes.byref(inp), .025, ctypes.byref(baseline)):
+                    raise RuntimeError(f"baseline invalid {label} {state_row['stamp_ns']}")
+                scheme="forward" if valid_plus else "backward"
+            def difference(attr,index=None):
+                xplus=getattr(ahead,attr) if valid_plus else None
+                xminus=getattr(behind,attr) if valid_minus else None
+                xbase=getattr(baseline,attr) if scheme!="central" else None
+                if index is not None:
+                    if xplus is not None:xplus=xplus[index]
+                    if xminus is not None:xminus=xminus[index]
+                    if xbase is not None:xbase=xbase[index]
+                if scheme=="central":return (xplus-xminus)/(2*eps)
+                if scheme=="forward":return (xplus-xbase)/eps
+                return (xbase-xminus)/eps
             components = [(f"state_{i}",jac.state[i][lane],
-                           (ahead.state[i]-behind.state[i])/(2*eps))
+                           difference("state",i))
                           for i in (0,1,2,3,4,5,6,7,9,11,13)]
             components += [
                 ("forward_integrated",jac.body_forward_displacement[lane],
-                 (ahead.integrated_body_forward_displacement_m-
-                  behind.integrated_body_forward_displacement_m)/(2*eps)),
+                 difference("integrated_body_forward_displacement_m")),
                 ("lateral_integrated",jac.body_lateral_displacement[lane],
-                 (ahead.integrated_body_lateral_displacement_m-
-                  behind.integrated_body_lateral_displacement_m)/(2*eps)),
+                 difference("integrated_body_lateral_displacement_m")),
                 ("yaw_integrated",jac.yaw_delta[lane],
-                 (ahead.integrated_yaw_delta_rad-behind.integrated_yaw_delta_rad)/(2*eps)),
+                 difference("integrated_yaw_delta_rad")),
             ]
             for component, actual, fd in components:
                 abs_error=abs(actual-fd)
@@ -137,6 +156,7 @@ def audit_bag(bag: Path, library: Path, max_rows: int, epsilon_scale: float) -> 
                     "absolute_error":abs_error,
                     "scaled_relative_error":relative_error,
                     "epsilon":eps,
+                    "difference_scheme":scheme,
                 })
     return records
 

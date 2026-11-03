@@ -1495,6 +1495,32 @@ unsigned int unity_source_wheel_substep_count(double forward_speed_mps)
       ? kWheelSubstepsBelowThreshold : kWheelSubstepsAboveThreshold;
 }
 
+bool unity_source_plant_lateral_slip_at_state(
+    const UnitySourcePlantState &state, std::array<double,4> *slip)
+{
+  if(!slip || !finite_state(state))return false;
+  AttitudeBasis<double> attitude;
+  if(!make_attitude_basis(state,&attitude))return false;
+  const auto steering=make_wheel_steering_basis(state.physical_steering_rad);
+  const Vec3 body_velocity{
+      state.u_mps,state.v_mps,body_vertical_speed(state,attitude)};
+  const Vec3 angular_velocity{
+      state.roll_rate_radps,state.pitch_rate_radps,state.yaw_rate_radps};
+  for(std::size_t wheel=0;wheel<4;++wheel) {
+    WheelContactKinematics<double> contact;
+    if(!wheel_contact_kinematics(state,attitude,body_velocity,
+            angular_velocity,wheel,steering[wheel],&contact))
+      return false;
+    (*slip)[wheel]=contact.grounded
+        ? -std::atan(contact.lateral_speed_mps /
+            (std::abs(contact.forward_speed_mps)+
+             kMinLateralSpeedForTireModelMps))
+        : 0.;
+    if(!std::isfinite((*slip)[wheel]))return false;
+  }
+  return true;
+}
+
 bool unity_source_plant_reconcile_suspension_jounce(
     UnitySourcePlantState *state)
 {

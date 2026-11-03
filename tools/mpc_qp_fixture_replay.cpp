@@ -13,6 +13,7 @@
 #include <string>
 #include <sstream>
 #include <iomanip>
+#include <fstream>
 
 namespace {
 
@@ -127,6 +128,12 @@ struct Metrics {
   float max_primal_input_bound_violation = 0.0f;
   float max_projected_input_bound_violation = 0.0f;
   float max_primal_projected_u_delta = 0.0f;
+  float max_primal_polygon_violation_m = 0.f;
+  float max_projected_polygon_violation_m = 0.f;
+  int maximum_polygon_primal_stage = -1;
+  int elastic_polygon_stages = 0;
+  double primal_elastic_slack_cost = 0.;
+  double projected_elastic_slack_cost = 0.;
 };
 
 Metrics evaluate(const MpcRtiProblem_t &problem,
@@ -140,6 +147,39 @@ Metrics evaluate(const MpcRtiProblem_t &problem,
       projected_x[k][i] = final_state.z_x[k][i] *
           (final_state.scaling_enabled ? final_state.state_scale[i] : 1.0f);
 
+  // The polygon (not the independent e_y box) is the actual active
+  // footprint envelope. x/z agreement alone is insufficient for claiming
+  // that a frozen QP's raw physical trajectory is inside that envelope.
+  for(int k=1;k<=RICCATI_HORIZON;++k) {
+    const auto &polygon=problem.state_polygons[k];
+    if(polygon.elastic_weight>0.f)++result.elastic_polygon_stages;
+    for(int f=0;f<polygon.count;++f) {
+      const float *n=polygon.normal[f];
+      const float progress=polygon.progress_normal[f];
+      const float upper=polygon.upper[f];
+      const float raw=n[0]*solution.x[k][MPC_OPT_IDX_EY]+
+                      n[1]*solution.x[k][MPC_OPT_IDX_EPSI]+
+                      progress*solution.x[k][MPC_OPT_IDX_PROGRESS_DEVIATION]-upper;
+      const float projected=n[0]*projected_x[k][MPC_OPT_IDX_EY]+
+                            n[1]*projected_x[k][MPC_OPT_IDX_EPSI]+
+                            progress*projected_x[k][MPC_OPT_IDX_PROGRESS_DEVIATION]-upper;
+      if(raw>result.max_primal_polygon_violation_m) {
+        result.max_primal_polygon_violation_m=raw;
+        result.maximum_polygon_primal_stage=k;
+      }
+      result.max_projected_polygon_violation_m=std::max(
+         result.max_projected_polygon_violation_m,projected);
+      if(polygon.elastic_weight>0.f) {
+        // The QP remains convex in the ORIGINAL wall plane, with an
+        // explicitly penalized xi=max(0,a*x-b). A positive xi is not
+        // hard QP infeasibility but it is NOT a legal source trajectory.
+        const double xi=std::max(0.,double(raw));
+        const double zi=std::max(0.,double(projected));
+        result.primal_elastic_slack_cost+=.5*polygon.elastic_weight*xi*xi;
+        result.projected_elastic_slack_cost+=.5*polygon.elastic_weight*zi*zi;
+      }
+    }
+  }
   for (int k = 0; k < problem.horizon; ++k) {
     const auto &step = problem.steps[k];
     for (int i = 0; i < RICCATI_MAX_NX; ++i) {
@@ -171,14 +211,22 @@ Metrics evaluate(const MpcRtiProblem_t &problem,
       if (k > 0) {
         const float x_primal = solution.x[k][i];
         const float x_projected = projected_x[k][i];
+        // +/-BIG_BOUND means unconstrained in the ADMM solver, NOT a
+        // physical +/-50-unit box. Wheel angular velocities can routinely
+        // exceed 50 rad/s. Report only the violations that the QP enforces.
+        const auto box_violation = [&](float state) {
+          const float lower = step.x_lb[i] > -BIG_BOUND
+              ? step.x_lb[i] - state : 0.0f;
+          const float upper = step.x_ub[i] < BIG_BOUND
+              ? state - step.x_ub[i] : 0.0f;
+          return std::max(0.0f, std::max(lower, upper));
+        };
         result.max_primal_state_bound_violation = std::max(
             result.max_primal_state_bound_violation,
-            std::max(0.0f, std::max(step.x_lb[i] - x_primal,
-                                    x_primal - step.x_ub[i])));
+            box_violation(x_primal));
         result.max_projected_state_bound_violation = std::max(
             result.max_projected_state_bound_violation,
-            std::max(0.0f, std::max(step.x_lb[i] - x_projected,
-                                    x_projected - step.x_ub[i])));
+            box_violation(x_projected));
       }
       const float x_primal = solution.x[k][i];
       const float x_projected = projected_x[k][i];
@@ -233,14 +281,19 @@ Metrics evaluate(const MpcRtiProblem_t &problem,
   for (int i = 0; i < RICCATI_MAX_NX; ++i) {
     const float x_primal = solution.x[problem.horizon][i];
     const float x_projected = projected_x[problem.horizon][i];
+    const auto terminal_box_violation = [&](float state) {
+      const float lower = problem.terminal_x_lb[i] > -BIG_BOUND
+          ? problem.terminal_x_lb[i] - state : 0.0f;
+      const float upper = problem.terminal_x_ub[i] < BIG_BOUND
+          ? state - problem.terminal_x_ub[i] : 0.0f;
+      return std::max(0.0f, std::max(lower, upper));
+    };
     result.max_primal_state_bound_violation = std::max(
         result.max_primal_state_bound_violation,
-        std::max(0.0f, std::max(problem.terminal_x_lb[i] - x_primal,
-                                x_primal - problem.terminal_x_ub[i])));
+        terminal_box_violation(x_primal));
     result.max_projected_state_bound_violation = std::max(
         result.max_projected_state_bound_violation,
-        std::max(0.0f, std::max(problem.terminal_x_lb[i] - x_projected,
-                                x_projected - problem.terminal_x_ub[i])));
+        terminal_box_violation(x_projected));
     result.primal_objective +=
         0.5 * problem.terminal_Q[i] * x_primal * x_primal +
         problem.terminal_q[i] * x_primal;
@@ -248,6 +301,8 @@ Metrics evaluate(const MpcRtiProblem_t &problem,
         0.5 * problem.terminal_Q[i] * x_projected * x_projected +
         problem.terminal_q[i] * x_projected;
   }
+  result.primal_objective+=result.primal_elastic_slack_cost;
+  result.projected_objective+=result.projected_elastic_slack_cost;
   return result;
 }
 
@@ -275,6 +330,17 @@ int main(int argc, char **argv) {
     MpcRtiQpCapture_t capture{};
     if (!sdu_apex::qp_fixture::read_capture(argv[1], &capture))
       throw std::runtime_error("fixture failed schema, bounds, or EOF checks");
+    // Diagnostic only: test whether the ORIGINAL wall polygons of an
+    // elastic frozen QP are actually feasible for the same affine model,
+    // same actuator bounds and same racing Hessian. Never change live QP.
+    if(const char *hard=std::getenv("MPC_QP_BENCH_HARD_ORIGINAL_WALLS")) {
+      if(std::string(hard)!="1")
+        throw std::runtime_error("hard-wall diagnostic must be 1");
+      for(int k=1;k<=RICCATI_HORIZON;++k) {
+        capture.solver_config.state_polygons[k].elastic_weight=0.f;
+        capture.problem.state_polygons[k].elastic_weight=0.f;
+      }
+    }
     RiccatiAdmmConfig_t config = capture.solver_config;
     RiccatiAdmmState_t state{};
     select_seed(argv[2], capture, &config, &state);
@@ -297,13 +363,20 @@ int main(int argc, char **argv) {
     config.rho_max = numeric_env("MPC_QP_BENCH_RHO_MAX", config.rho_max);
     config.over_relaxation = numeric_env(
         "MPC_QP_BENCH_OVER_RELAXATION",config.over_relaxation);
+    config.tolerance = numeric_env(
+        "MPC_QP_BENCH_TOLERANCE",config.tolerance);
     if (config.rho_max > 127.f || config.over_relaxation > 2.f)
       throw std::runtime_error("invalid bench penalty or relaxation");
     if (const char *iter = std::getenv("MPC_QP_BENCH_MAX_ITER")) {
       const int count = std::atoi(iter);
-      if (count <= 0 || count > MAX_ITERATIONS)
+      if (count <= 0 || count > 10000)
         throw std::runtime_error("invalid MPC_QP_BENCH_MAX_ITER");
       config.max_iterations = count;
+    }
+    if (const char *unbounded = std::getenv("MPC_QP_BENCH_UNBOUNDED")) {
+      if (std::string(unbounded) != "1")
+        throw std::runtime_error("MPC_QP_BENCH_UNBOUNDED must be 1 when set");
+      config.max_solve_time_us = 0.0;
     }
     if (std::getenv("MPC_QP_BENCH_STATE_RHO")) {
       const float value=numeric_env("MPC_QP_BENCH_STATE_RHO",0.f);
@@ -333,6 +406,10 @@ int main(int argc, char **argv) {
         std::getenv("MPC_QP_BENCH_INPUT_RHO") ||
         std::getenv("MPC_QP_BENCH_RHO_MAX"))
       riccati_admm_state_init(&state);
+    if (std::getenv("MPC_QP_BENCH_NO_SCALING")) {
+      config.use_scaling=0;
+      riccati_admm_state_init(&state);
+    }
     const char *period_text = std::getenv("MPC_QP_BENCH_RHO_PERIOD");
     const int bench_period = period_text ? std::atoi(period_text) : 0;
     if (bench_period > 0 && bench_period <= 150)
@@ -393,6 +470,19 @@ int main(int argc, char **argv) {
     };
     RiccatiDebugInfo_t profile{};
     riccati_debug_get_last(&profile);
+    // Diagnostic-only native raw decision output for independent OSQP
+    // vector parity. Never read by the controller or used for publication.
+    if(const char *out=std::getenv("MPC_QP_BENCH_RAW_SOLUTION_PATH")) {
+      std::ofstream stream(out);
+      if(!stream.good())throw std::runtime_error("raw QP export failed");
+      stream<<std::setprecision(15);
+      for(int k=0;k<=RICCATI_HORIZON;++k) {
+        for(int i=0;i<RICCATI_MAX_NX;++i)
+          stream<<solution.x[k][i]<<(i+1==RICCATI_MAX_NX?'\n':' ');
+      }
+      for(int k=0;k<RICCATI_HORIZON;++k)
+        stream<<solution.u[k][0]<<" "<<solution.u[k][1]<<'\n';
+    }
     const Metrics metrics = evaluate(capture.problem, solution,
         primal_u, state);
     const float parity_delta = max_abs_difference(solution,
@@ -403,6 +493,7 @@ int main(int argc, char **argv) {
         parity_delta <= 1.0e-6f;
     std::cout << "{\"schema\":\"sdu-apex-frozen-qp-replay-v1\","
               << "\"regime\":\"identical_qp\","
+              << "\"scaling_enabled\":" << config.use_scaling << ','
               << "\"seed_mode\":\"" << argv[2] << "\","
               << "\"rho_policy\":\"" << rho_policy << "\","
               << "\"status\":" << static_cast<int>(status) << ','
@@ -423,6 +514,18 @@ int main(int argc, char **argv) {
               << json_number(metrics.max_primal_input_bound_violation) << ','
               << "\"max_projected_input_bound_violation\":"
               << json_number(metrics.max_projected_input_bound_violation) << ','
+              << "\"elastic_polygon_stages\":"
+              << metrics.elastic_polygon_stages << ','
+              << "\"primal_elastic_slack_cost\":"
+              << json_number(metrics.primal_elastic_slack_cost) << ','
+              << "\"projected_elastic_slack_cost\":"
+              << json_number(metrics.projected_elastic_slack_cost) << ','
+              << "\"max_primal_polygon_violation_m\":"
+              << json_number(metrics.max_primal_polygon_violation_m) << ','
+              << "\"max_projected_polygon_violation_m\":"
+              << json_number(metrics.max_projected_polygon_violation_m) << ','
+              << "\"maximum_polygon_primal_stage\":"
+              << metrics.maximum_polygon_primal_stage << ','
               << "\"max_primal_vs_projected_input\":"
               << json_number(metrics.max_primal_projected_u_delta) << ','
               << "\"recorded_result_max_abs_delta\":" << json_number(parity_delta) << ','

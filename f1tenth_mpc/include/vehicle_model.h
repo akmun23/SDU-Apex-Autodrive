@@ -115,6 +115,19 @@ typedef struct
 extern "C" {
 #endif
 
+/* Full 26-channel source-plant tangent integration in 20 independent
+ * directions. Unlike the reduced 23-state QP Jacobian, the caller seeds and
+ * receives ALL wheel/suspension/sticky-tire history coordinates, plus body
+ * displacement and within-step slip derivatives. Requires a source-initialized
+ * full state. No physics substitution and no finite-difference plant steps. */
+int vehicle_model_full_source_interval_sensitivities(
+    const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
+    const double seed_state[26][20],
+    const double seed_control[2][20],
+    double next_state[26][20],
+    double body_motion[3][20],
+    double slip_excess[4][20]);
+
 /* Seed missing wheel/suspension state for explicit cold-start use. */
 int vehicle_model_initialize_plant_state(MpcModelState_t *state);
 
@@ -123,6 +136,14 @@ int vehicle_model_longitudinal_slip_excess(
     const MpcModelState_t *state,
     double excess_speed_mps[4],
     double excess_derivative_wheel_omega[4]);
+
+/* Front/rear lateral tire slip from the EXACT native source wheel-contact
+ * geometry at this full physical state. Optional 4x20 Jacobian is with
+ * respect to the normal QP's 20 physical coordinates (not path progress).
+ * The additional evaluation is cheap: no 25ms source integration. */
+int vehicle_model_source_lateral_slip(
+    const MpcModelState_t *state, double slip[4],
+    double derivative[4][MPC_OPT_PHYSICAL_NX]);
 
 /* One MPC horizon stage at the command-application epoch: drive the source
  * plant with this decision, then shift it into the carried command history. */

@@ -1,4 +1,4 @@
-#include "mpc_rti.h"
+#include "mpc_rti_internal.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -15,6 +15,37 @@
  * the authoritative mpc_rti_validate_candidate_plan, never from the QP's
  * linear forecast. All iterates optimize ONE immutable cost schedule.
  */
+
+// Progress is an explicit state in the Riccati QP. The original source
+// feasibility merit also depends on progress through left/right track widths.
+// This partial derivative holds the local source-frame pose fixed; the
+// independent e_y/e_psi derivatives and QP A/B carry changes in that pose.
+double mpc_rti_source_corridor_progress_derivative(
+    const MpcModelState_t &plant, double station, int stage,
+    const MpcTrajectorySample_t *trajectory, size_t count, double lap,
+    const MpcRtiConfiguration_t *model)
+{
+    if(!trajectory || count<3 || !model || !std::isfinite(station) ||
+       !std::isfinite(lap) || lap<=0. || stage<1 ||
+       stage>PREDICTION_HORIZON)return NAN;
+    constexpr double ds=.002;
+    const auto at_progress=[&](double s) {
+        MpcRtiReference_t shifted{};
+        if(!mpc_rti_reference_at_progress(trajectory,count,lap,s,model,
+                &shifted))return double(INFINITY);
+        float left=0.f,right=0.f;
+        if(!mpc_rti_compute_corridor_slack(&plant,
+                shifted.left_bound,shifted.right_bound,model,stage,
+                &left,&right))return double(INFINITY);
+        const double vl=std::min(0.,double(left));
+        const double vr=std::min(0.,double(right));
+        return vl*vl+vr*vr;
+    };
+    const double before=at_progress(station-ds);
+    const double after=at_progress(station+ds);
+    if(!std::isfinite(before)||!std::isfinite(after))return NAN;
+    return (after-before)/(2.*ds);
+}
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -107,6 +138,9 @@ double projected_directional_product(
 double corridor_violation(
     const MpcRtiNominal_t &plan,
     const MpcRtiReference_t refs[N+1],
+    const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,
+    double lap_length,
     const MpcRtiConfiguration_t &model,
     double dstate[N+1][RICCATI_MAX_NX])
 {
@@ -141,6 +175,14 @@ double corridor_violation(
             plus.e_psi+=eps;minus.e_psi-=eps;
             dstate[k][MPC_OPT_IDX_EPSI]=
                 (stage_cost(plus)-stage_cost(minus))/(2.*eps);
+
+            dstate[k][MPC_OPT_IDX_PROGRESS_DEVIATION]=
+                mpc_rti_source_corridor_progress_derivative(p,
+                    plan.progress[k],k,trajectory,trajectory_count,
+                    lap_length,&model);
+            if(!std::isfinite(
+                    dstate[k][MPC_OPT_IDX_PROGRESS_DEVIATION]))
+                return INFINITY;
         }
     }
     return merit;
@@ -158,7 +200,8 @@ bool source_corridor_phase_one(
     const MpcRtiSourceNonlinearOptions_t &options,
     const std::chrono::steady_clock::time_point begin,
     MpcModelControl_t controls[N],
-    MpcRtiSourceNonlinearResult_t *result)
+    MpcRtiSourceNonlinearResult_t *result,
+    MpcRtiNominal_t *certified_nominal)
 {
     const auto out_of_time=[&]() {
         return options.maximum_wall_time_us>0. &&
@@ -183,7 +226,8 @@ bool source_corridor_phase_one(
                 trajectory,trajectory_count,lap_length,dt,N,
                 &config.model,nominal.get(),refs))
             return double(INFINITY);
-        return corridor_violation(*nominal,refs,config.model,deriv);
+        return corridor_violation(*nominal,refs,trajectory,
+            trajectory_count,lap_length,config.model,deriv);
     };
 
     double source_gradient[N+1][RICCATI_MAX_NX]{};
@@ -191,7 +235,7 @@ bool source_corridor_phase_one(
     result->initial_corridor_violation_m2=current_violation;
     result->final_corridor_violation_m2=current_violation;
     if(!std::isfinite(current_violation))return false;
-    for(int iteration=0;iteration<4 && current_violation>1.e-12;++iteration) {
+    for(int iteration=0;iteration<std::min(4,options.max_iterations) && current_violation>1.e-12;++iteration) {
         if(out_of_time()){result->budget_exhausted=1;break;}
         ++result->feasibility_iterations_attempted;
         if(!mpc_rti_build_ltv_qp_with_objective_schedule(
@@ -225,17 +269,21 @@ bool source_corridor_phase_one(
         if(norm[0]<1.e-9 && norm[1]<1.e-9)break;
         double direction[N][MPC_RTI_NU]{};
         for(int k=0;k<N;++k) {
-            direction[k][0]=-.15*gradient[k][0]/
+            direction[k][0]=-options.steering_direction_norm_rad*gradient[k][0]/
                 std::max(norm[0],1.e-9);
-            direction[k][1]=-.25*gradient[k][1]/
+            direction[k][1]=-options.throttle_direction_norm*gradient[k][1]/
                 std::max(norm[1],1.e-9);
         }
         const double start_merit=current_violation;
         double best=start_merit;
         constexpr double bracket[]={
             .1,.2,.4,.8,.05,.025,.0125,.00625};
-        for(double scale:bracket) {
+        for(int trial_index=0;
+            trial_index<std::min<int>(std::size(bracket),
+                                     options.max_exact_trials_per_iteration);
+            ++trial_index) {
             if(out_of_time()){result->budget_exhausted=1;break;}
+            const double scale=bracket[trial_index];
             build_candidate(controls,direction,scale,config.model,trial);
             const double value=evaluate(trial,nullptr);
             if(value<best) {
@@ -257,6 +305,9 @@ bool source_corridor_phase_one(
                 lap_length,N,dt,&exact,nominal.get(),&failure)
                 ==MPC_RTI_ROLLOUT_OK) {
             result->feasible_seed_recovered=1;
+            // This complete strict-source rollout is already the desired
+            // R1 linearization. Reuse it instead of integrating again.
+            if (certified_nominal) *certified_nominal=*nominal;
             return true;
         }
         current_violation=evaluate(controls,source_gradient);
@@ -265,6 +316,67 @@ bool source_corridor_phase_one(
     return false;
 }
 } // namespace
+
+extern "C" int mpc_rti_source_repair_infeasible_nominal(
+    const MpcRtiState_t *initial, double progress,
+    const MpcTrajectorySample_t *trajectory, size_t trajectory_count,
+    double lap_length, float prediction_dt,
+    const MpcRtiCycleConfiguration_t *configuration,
+    const MpcRtiObjectiveSchedule_t *frozen_objective,
+    const MpcModelControl_t seed[PREDICTION_HORIZON],
+    const MpcRtiSourceNonlinearOptions_t *options,
+    MpcRtiSourceNonlinearResult_t *result,
+    MpcRtiNominal_t *certified_nominal)
+{
+    if (!result) return 0;
+    std::memset(result, 0, sizeof(*result));
+    result->initial_failure_stage = -1;
+    result->initial_failure_reason = MPC_RTI_ROLLOUT_INVALID_INPUT;
+    if (!initial || !trajectory || trajectory_count < 3 || !configuration ||
+        !frozen_objective || !frozen_objective->valid ||
+        frozen_objective->horizon != N || !seed || !options ||
+        !valid_options(*options) || !controls_finite(seed) ||
+        !std::isfinite(progress) || !std::isfinite(lap_length) ||
+        lap_length <= 0. || !std::isfinite(prediction_dt) ||
+        prediction_dt <= 0.f)
+        return 0;
+    const auto begin = Clock::now();
+    MpcRtiCycleConfiguration_t validation = *configuration;
+    validation.objective_schedule = frozen_objective;
+    validation.qp_capture = nullptr;
+    validation.qp_capture_second_pass = nullptr;
+    validation.capture_diagnostic_outputs = 0;
+    auto plan = std::make_unique<MpcRtiNominal_t>();
+    int failed_stage = -1;
+    const auto initial_status = mpc_rti_validate_candidate_plan(
+        initial, progress, seed, trajectory, trajectory_count, lap_length,
+        N, prediction_dt, &validation, plan.get(), &failed_stage);
+    result->initial_failure_stage = failed_stage;
+    result->initial_failure_reason = initial_status;
+    if (initial_status != MPC_RTI_ROLLOUT_CORRIDOR) return 0;
+    MpcModelControl_t repaired[N]{};
+    std::copy_n(seed, N, repaired);
+    if (!source_corridor_phase_one(initial, progress, trajectory,
+            trajectory_count, lap_length, prediction_dt, validation,
+            *frozen_objective, *options, begin, repaired, result,
+            plan.get())) {
+        result->wall_time_ms = std::chrono::duration<double,std::milli>(
+            Clock::now() - begin).count();
+        return 0;
+    }
+    // Phase-I already certified this exact physical trajectory with the
+    // original source/corridor/terminal validator. A second validation
+    // would redundantly integrate the same 30 source steps.
+    if (!plan->valid || plan->horizon != N) return 0;
+    if (certified_nominal) *certified_nominal=*plan;
+    std::copy_n(repaired, N, result->controls);
+    result->final_valid = 1;
+    result->minimum_corridor_clearance_m =
+        plan->validation_minimum_corridor_slack_m;
+    result->wall_time_ms = std::chrono::duration<double,std::milli>(
+        Clock::now() - begin).count();
+    return 1;
+}
 
 extern "C" int mpc_rti_source_nonlinear_optimize(
     const MpcRtiState_t *initial,
@@ -277,7 +389,8 @@ extern "C" int mpc_rti_source_nonlinear_optimize(
     const MpcRtiObjectiveSchedule_t *frozen_objective,
     const MpcModelControl_t seed[PREDICTION_HORIZON],
     const MpcRtiSourceNonlinearOptions_t *options,
-    MpcRtiSourceNonlinearResult_t *result)
+    MpcRtiSourceNonlinearResult_t *result,
+    MpcRtiNominal_t *certified_nominal)
 {
     if (!result) return 0;
     std::memset(result,0,sizeof(*result));
@@ -335,7 +448,7 @@ extern "C" int mpc_rti_source_nonlinear_optimize(
             !source_corridor_phase_one(
                 initial,progress,trajectory,trajectory_count,lap_length,
                 prediction_dt,*configuration,*frozen_objective,*options,
-                begin,current,result) ||
+                begin,current,result,nullptr) ||
             validate(current)!=MPC_RTI_ROLLOUT_OK) {
             result->wall_time_ms=
                 std::chrono::duration<double,std::milli>(
@@ -504,6 +617,8 @@ extern "C" int mpc_rti_source_nonlinear_optimize(
         result->accepted_step_scales[result->iterations_accepted-1]=
             best_scale;
     }
+    if (certified_nominal && result->final_valid && exact_plan->valid)
+        *certified_nominal=*exact_plan;
     result->wall_time_ms=
         std::chrono::duration<double,std::milli>(Clock::now()-begin).count();
     return 1;

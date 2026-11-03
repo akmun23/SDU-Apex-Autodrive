@@ -62,20 +62,33 @@ def decode_problem(payload: bytes) -> dict:
     terminal_ub = np.asarray(cursor.f32_array(NX))
     x0 = np.asarray(cursor.f32_array(NX))
     polygons = []
+    polygon_weights = []
     for _ in range(HORIZON + 1):
         count = cursor.signed()
-        planes = [cursor.f32_array(3) for _ in range(8)]
+        if metadata["schema_version"] >= 6:
+            planes = [cursor.f32_array(4) for _ in range(8)]
+        else:
+            planes = [(*cursor.f32_array(3),0.) for _ in range(8)]
+        elastic_weight = cursor.f32_array(1)[0] if metadata["schema_version"] >= 7 else 0.
         polygons.append(planes[:count])
+        polygon_weights.append(elastic_weight)
     return {"steps": steps, "terminal_Q": terminal_Q,
             "terminal_q": terminal_q, "terminal_lb": terminal_lb,
             "terminal_ub": terminal_ub, "x0": x0, "state_polygons": polygons,
+            "polygon_elastic_weights": polygon_weights,
             "terminal_constraints": metadata["terminal_constraints"]}
 
 
 def build_osqp_matrices(problem: dict):
     nx, nu, horizon = NX, NU, HORIZON
     x_size = (horizon + 1) * nx
-    nvar = x_size + horizon * nu
+    base_nvar = x_size + horizon * nu
+    polygon_weights = problem.get("polygon_elastic_weights", [0.]*(horizon+1))
+    elastic_planes = [(k,i) for k,poly in enumerate(problem.get("state_polygons",[]))
+                      if k>0 and polygon_weights[k]>0.
+                      for i in range(len(poly))]
+    slack_index = {pair: base_nvar + i for i,pair in enumerate(elastic_planes)}
+    nvar = base_nvar + len(elastic_planes)
 
     def xidx(k, i):
         return k * nx + i
@@ -115,6 +128,8 @@ def build_osqp_matrices(problem: dict):
         add_hessian(xidx(horizon, i), xidx(horizon, i),
                     problem["terminal_Q"][i])
         linear[xidx(horizon, i)] += problem["terminal_q"][i]
+    for (k,i),index in slack_index.items():
+        add_hessian(index,index,polygon_weights[k])
     P = sparse.coo_matrix((pv, (pr, pc)), shape=(nvar, nvar)).tocsc()
 
     rows, cols, vals = [], [], []
@@ -168,9 +183,14 @@ def build_osqp_matrices(problem: dict):
     for k, polygon in enumerate(problem.get("state_polygons", [])):
         if k == 0:
             continue  # measured initial state is immutable, just as in Riccati
-        for normal0, normal1, bound in polygon:
-            add_constraint([(xidx(k, 0), normal0), (xidx(k, 1), normal1)],
-                           -np.inf, bound)
+        for i,(normal0, normal1, bound, progress_normal) in enumerate(polygon):
+            entries=[(xidx(k, 0), normal0), (xidx(k, 1), normal1),
+                     (xidx(k, 20), progress_normal)]
+            if (k,i) in slack_index:
+                entries.append((slack_index[(k,i)],-1.))
+            add_constraint(entries,-np.inf,bound)
+    for index in slack_index.values():
+        add_constraint([(index,1.)],0.,np.inf)
     for plane in problem.get("terminal_constraints", []):
         add_constraint([(xidx(horizon,i),v) for i,v in enumerate(plane["normal"])],
                        -np.inf,plane["upper"])

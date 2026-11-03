@@ -43,7 +43,7 @@ int source_adjoint_at_nominal(
         return 0;
 
     return mpc_rti_qp_source_gradient(&problem,nominal->controls,
-        model->command_increment_qp_enabled,gradient_out);
+        mpc_rti_steering_qp_mode(model),gradient_out);
 }
 } // namespace
 
@@ -63,9 +63,10 @@ int mpc_rti_qp_source_gradient(
 
     for (int k = 0; k < N; ++k) {
         const auto &stage = problem->steps[k];
-        const float previous_steer = k
-            ? controls[k - 1].steering_target_rad
-            : problem->x0[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND];
+        const float previous_steer = increment_qp==2
+            ? static_cast<float>(state[k][MPC_OPT_IDX_ACTUAL_STEERING_ANGLE])
+            : k ? controls[k - 1].steering_target_rad
+                : problem->x0[MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND];
         const float previous_throttle = k
             ? controls[k - 1].throttle_command
             : problem->x0[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND];
@@ -88,10 +89,31 @@ int mpc_rti_qp_source_gradient(
         }
     }
 
+    /* The elastic-corridor QP uses w/2 max(0,a*x-b)^2 in the ADMM
+     * split. Include its EXACT derivative in the condensed gradient,
+     * otherwise the source informed R2 predicts a different objective
+     * from the QP it actually solves. */
+    auto add_elastic_gradient=[&](int k,double g[nx]) {
+        const auto &polygon=problem->state_polygons[k];
+        if(polygon.elastic_weight<=0.f)return;
+        for(int face=0;face<polygon.count;++face) {
+            const double n[3]={polygon.normal[face][0],
+                    polygon.normal[face][1],
+                    polygon.progress_normal[face]};
+            const int axis[3]={MPC_OPT_IDX_EY,MPC_OPT_IDX_EPSI,
+                               MPC_OPT_IDX_PROGRESS_DEVIATION};
+            double excess=-polygon.upper[face];
+            for(int a=0;a<3;++a)excess+=n[a]*state[k][axis[a]];
+            if(excess<=0.)continue;
+            for(int a=0;a<3;++a)
+                g[axis[a]]+=polygon.elastic_weight*excess*n[a];
+        }
+    };
     double costate[N + 1][nx]{};
     for (int i = 0; i < nx; ++i)
         costate[N][i] =
             problem->terminal_Q[i] * state[N][i] + problem->terminal_q[i];
+    add_elastic_gradient(N,costate[N]);
 
     double delta_gradient[N][nu]{};
     for (int k = N - 1; k >= 0; --k) {
@@ -115,6 +137,7 @@ int mpc_rti_qp_source_gradient(
                 g += stage.A[j][i] * costate[k + 1][j];
             costate[k][i] = g;
         }
+        add_elastic_gradient(k,costate[k]);
     }
 
     // With decision v[k]=u_abs[k]-u_abs[k-1], chain rule gives
@@ -130,6 +153,67 @@ int mpc_rti_qp_source_gradient(
         }
     }
     return 1;
+}
+
+int mpc_rti_qp_clearance_gradient(const MpcRtiProblem_t *problem,
+    const MpcRtiNominal_t *nominal,int increment_qp,
+    double gradient[PREDICTION_HORIZON][MPC_RTI_NU],
+    float *nominal_min_slack_m,int *limiting_stage)
+{
+    if(!problem || !nominal || !nominal->valid ||
+       nominal->horizon!=PREDICTION_HORIZON || !gradient ||
+       !nominal_min_slack_m || !limiting_stage ||
+       (increment_qp!=0 && increment_qp!=1 && increment_qp!=2))return 0;
+    double minimum=INFINITY;
+    int stage=-1,active_plane=-1;
+    for(int k=1;k<=PREDICTION_HORIZON;++k) {
+        const auto &polygon=problem->state_polygons[k];
+        if(polygon.count<1 || polygon.count>RICCATI_STATE_POLYGON_MAX_PLANES)
+            return 0;
+        const auto &state=nominal->states[k].plant;
+        for(int i=0;i<polygon.count;++i) {
+            const double slack=double(polygon.upper[i])-
+                double(polygon.normal[i][0])*state.e_y-
+                double(polygon.normal[i][1])*state.e_psi;
+            if(!std::isfinite(slack))return 0;
+            if(slack<minimum) {
+                minimum=slack;stage=k;active_plane=i;
+            }
+        }
+    }
+    if(stage<1 || !std::isfinite(minimum))return 0;
+    *nominal_min_slack_m=static_cast<float>(minimum);
+    *limiting_stage=stage;
+    const auto &wall=problem->state_polygons[stage];
+    double costate[MPC_RTI_NX]{};
+    costate[MPC_OPT_IDX_EY]=-wall.normal[active_plane][0];
+    costate[MPC_OPT_IDX_EPSI]=-wall.normal[active_plane][1];
+    // A moving raceline changes the nearest full-footprint wall as progress
+    // changes. This is the same -d(bound)/ds term used in the 3D hard QP
+    // polygon; omitting it gives an incorrect source-clearance adjoint.
+    costate[MPC_OPT_IDX_PROGRESS_DEVIATION]=
+        -wall.progress_normal[active_plane];
+    double du[PREDICTION_HORIZON][MPC_RTI_NU]{};
+    for(int k=stage-1;k>=0;--k) {
+        const auto &step=problem->steps[k];
+        for(int a=0;a<MPC_RTI_NU;++a)
+            for(int i=0;i<MPC_RTI_NX;++i)
+                du[k][a]+=step.B[i][a]*costate[i];
+        double preceding[MPC_RTI_NX]{};
+        for(int j=0;j<MPC_RTI_NX;++j)
+            for(int i=0;i<MPC_RTI_NX;++i)
+                preceding[j]+=step.A[i][j]*costate[i];
+        std::memcpy(costate,preceding,sizeof(costate));
+    }
+    double norm2=0.;
+    for(int k=0;k<PREDICTION_HORIZON;++k)
+        for(int a=0;a<MPC_RTI_NU;++a) {
+            gradient[k][a]=du[k][a]-(increment_qp &&
+                k+1<PREDICTION_HORIZON ? du[k+1][a]:0.);
+            if(!std::isfinite(gradient[k][a]))return 0;
+            norm2+=gradient[k][a]*gradient[k][a];
+        }
+    return std::isfinite(norm2) && norm2>1.e-16;
 }
 
 extern "C" int mpc_rti_source_adjoint_gradient_from_exact_nominal(

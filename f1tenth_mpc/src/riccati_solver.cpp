@@ -31,6 +31,7 @@
 
 #include "riccati_solver_internal.hpp"
 #include "riccati_state_polygon.h"
+#include "mpc_qp_elastic_polygon.hpp"
 
 #include <math.h>
 #include <stdio.h>
@@ -401,7 +402,9 @@ RiccatiStatus_t riccati_admm_solve_core(
             const float xub = (k < N) ? step_data[k].x_ub[s] : terminal_x_ub[s];
             const float xlb = (k < N) ? step_data[k].x_lb[s] : terminal_x_lb[s];
             x_is_constrained[k][s] = k > 0 &&
-                                     (xub < BIG_BOUND || xlb > -BIG_BOUND);
+                (xub < BIG_BOUND || xlb > -BIG_BOUND ||
+                 riccati_polygon_constrains_state(
+                     config ? config->state_polygons : nullptr,k,s));
         }
     }
 
@@ -467,20 +470,33 @@ RiccatiStatus_t riccati_admm_solve_core(
 
         /* Initialize z from projection of unconstrained solution */
         for (int k = 0; k <= N; k++) {
-            float polygon_projection[2] = {0.f, 0.f};
+            float polygon_projection[3] = {0.f, 0.f, 0.f};
             const int use_polygon = k > 0 && config &&
                 config->state_polygons[k].count > 0;
+            int use_progress_polygon = 0;
             if (use_polygon) {
-                const float lower[2] = {
-                    k < N ? step_data[k].x_lb[0] : terminal_x_lb[0],
-                    k < N ? step_data[k].x_lb[1] : terminal_x_lb[1]};
-                const float upper[2] = {
-                    k < N ? step_data[k].x_ub[0] : terminal_x_ub[0],
-                    k < N ? step_data[k].x_ub[1] : terminal_x_ub[1]};
-                const float metric[2] = {rho_state[k][0], rho_state[k][1]};
-                if (!riccati_project_state_polygon(&config->state_polygons[k],
-                        solution->x[k], lower, upper, metric, polygon_projection)) {
-                    solution->status = RICCATI_STATUS_ERROR;
+                const auto &poly = config->state_polygons[k];
+                for (int f=0;f<poly.count;++f)
+                    use_progress_polygon |= poly.progress_normal[f] != 0.f;
+                const int coordinate[3]={0,1,MPC_OPT_IDX_PROGRESS_DEVIATION};
+                float input[3],lower[3],upper[3],metric[3];
+                for(int j=0;j<3;++j) {
+                    const int axis=coordinate[j];
+                    input[j]=solution->x[k][axis];
+                    lower[j]=k<N?step_data[k].x_lb[axis]:terminal_x_lb[axis];
+                    upper[j]=k<N?step_data[k].x_ub[axis]:terminal_x_ub[axis];
+                    metric[j]=rho_state[k][axis];
+                }
+                const int projected=poly.elastic_weight>0.f
+                    ? riccati_elastic_polygon_prox(
+                        &poly,input,lower,upper,metric,polygon_projection)
+                    : (use_progress_polygon
+                        ? riccati_project_state_progress_polygon(
+                            &poly,input,lower,upper,metric,polygon_projection)
+                        : riccati_project_state_polygon(
+                            &poly,input,lower,upper,metric,polygon_projection));
+                if(!projected) {
+                    solution->status=RICCATI_STATUS_ERROR;
                     return RICCATI_STATUS_ERROR;
                 }
             }
@@ -489,7 +505,10 @@ RiccatiStatus_t riccati_admm_solve_core(
                 const float xlb = (k < N) ? step_data[k].x_lb[s] : terminal_x_lb[s];
                 const float xub = (k < N) ? step_data[k].x_ub[s] : terminal_x_ub[s];
                 if (x_is_constrained[k][s]) {
-                    if (use_polygon && s < 2) val = polygon_projection[s];
+                    if (use_polygon && (s < 2 ||
+                            (use_progress_polygon &&
+                             s == MPC_OPT_IDX_PROGRESS_DEVIATION)))
+                        val = polygon_projection[s < 2 ? s : 2];
                     else {
                         if (val < xlb) val = xlb;
                         if (val > xub) val = xub;
@@ -565,7 +584,8 @@ RiccatiStatus_t riccati_admm_solve_core(
             (const float (*)[RICCATI_MAX_NU])z_u,
             (const float (*)[RICCATI_MAX_NU])y_u,
             solution->x, solution->u, &factorization,
-            terminal.count ? terminal_augmentation : nullptr)) {
+            terminal.count ? terminal_augmentation : nullptr,
+            config ? config->state_polygons : nullptr)) {
             riccati_admm_state_init(admm_state);
             solution->status = RICCATI_STATUS_ERROR;
             solution->iterations = (uint16_t)iter;
@@ -603,25 +623,33 @@ RiccatiStatus_t riccati_admm_solve_core(
 
         /* State loop */
         for (int k = 0; k <= N; k++) {
-            float polygon_projection[2] = {0.f, 0.f};
+            float polygon_projection[3] = {0.f, 0.f, 0.f};
             const int use_polygon = k > 0 && config &&
                 config->state_polygons[k].count > 0;
+            int use_progress_polygon = 0;
             if (use_polygon) {
-                const float input[2] = {
-                    over_relaxation*solution->x[k][0] +
-                        (1.f-over_relaxation)*z_x[k][0] + y_x[k][0],
-                    over_relaxation*solution->x[k][1] +
-                        (1.f-over_relaxation)*z_x[k][1] + y_x[k][1]};
-                const float lower[2] = {
-                    k < N ? step_data[k].x_lb[0] : terminal_x_lb[0],
-                    k < N ? step_data[k].x_lb[1] : terminal_x_lb[1]};
-                const float upper[2] = {
-                    k < N ? step_data[k].x_ub[0] : terminal_x_ub[0],
-                    k < N ? step_data[k].x_ub[1] : terminal_x_ub[1]};
-                const float metric[2] = {rho_state[k][0], rho_state[k][1]};
-                if (!riccati_project_state_polygon(&config->state_polygons[k],
-                        input, lower, upper, metric, polygon_projection)) {
-                    solution->status = RICCATI_STATUS_ERROR;
+                const auto &poly = config->state_polygons[k];
+                for (int f=0;f<poly.count;++f)
+                    use_progress_polygon |= poly.progress_normal[f] != 0.f;
+                const int coordinate[3]={0,1,MPC_OPT_IDX_PROGRESS_DEVIATION};
+                float input[3],lower[3],upper[3],metric[3];
+                for(int j=0;j<3;++j) {
+                    const int axis=coordinate[j];
+                    input[j]=over_relaxation*solution->x[k][axis] + (1.f-over_relaxation)*z_x[k][axis] + y_x[k][axis];
+                    lower[j]=k<N?step_data[k].x_lb[axis]:terminal_x_lb[axis];
+                    upper[j]=k<N?step_data[k].x_ub[axis]:terminal_x_ub[axis];
+                    metric[j]=rho_state[k][axis];
+                }
+                const int projected=poly.elastic_weight>0.f
+                    ? riccati_elastic_polygon_prox(
+                        &poly,input,lower,upper,metric,polygon_projection)
+                    : (use_progress_polygon
+                        ? riccati_project_state_progress_polygon(
+                            &poly,input,lower,upper,metric,polygon_projection)
+                        : riccati_project_state_polygon(
+                            &poly,input,lower,upper,metric,polygon_projection));
+                if(!projected) {
+                    solution->status=RICCATI_STATUS_ERROR;
                     solution->iterations = (uint16_t)iter;
                     return RICCATI_STATUS_ERROR;
                 }
@@ -636,7 +664,10 @@ RiccatiStatus_t riccati_admm_solve_core(
                     const float xub = (k < N) ? step_data[k].x_ub[s] : terminal_x_ub[s];
 
                     /* z-update: hard constraint projection (box clipping) */
-                    if (use_polygon && s < 2) val = polygon_projection[s];
+                    if (use_polygon && (s < 2 ||
+                            (use_progress_polygon &&
+                             s == MPC_OPT_IDX_PROGRESS_DEVIATION)))
+                        val = polygon_projection[s < 2 ? s : 2];
                     else {
                         if (val < xlb) val = xlb;
                         if (val > xub) val = xub;

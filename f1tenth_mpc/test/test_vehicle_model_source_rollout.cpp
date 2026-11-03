@@ -2186,9 +2186,12 @@ TEST(MpcSourceNonlinear, ExactSourceCandidatesPreserveOriginalHardCorridor)
   options.throttle_direction_norm=.25f;
   options.directional_check_step_scale=.0003f;
   auto result=std::make_unique<MpcRtiSourceNonlinearResult_t>();
+  auto cached=std::make_unique<MpcRtiNominal_t>();
   ASSERT_TRUE(mpc_rti_source_nonlinear_optimize(
       &initial,0.,trajectory,count,length,PREDICTION_DT_SECONDS,
-      &cycle,&frozen,controls,&options,result.get()));
+      &cycle,&frozen,controls,&options,result.get(),cached.get()));
+  EXPECT_TRUE(cached->valid);
+  EXPECT_EQ(cached->horizon,PREDICTION_HORIZON);
   ASSERT_TRUE(result->initial_valid);
   ASSERT_TRUE(result->final_valid);
   EXPECT_GE(result->initial_objective,result->final_objective);
@@ -2208,6 +2211,13 @@ TEST(MpcSourceNonlinear, ExactSourceCandidatesPreserveOriginalHardCorridor)
       independent.get(),&fail),MPC_RTI_ROLLOUT_OK)<<fail;
   EXPECT_NEAR(independent->validation_objective,
               result->final_objective,1.e-5);
+  for(int k=0;k<=PREDICTION_HORIZON;++k) {
+      EXPECT_NEAR(cached->progress[k],independent->progress[k],1.e-7)<<k;
+      EXPECT_NEAR(cached->states[k].plant.e_y,
+                  independent->states[k].plant.e_y,1.e-7)<<k;
+      EXPECT_NEAR(cached->states[k].plant.r,
+                  independent->states[k].plant.r,1.e-7)<<k;
+  }
   // An exact-validated plan must give the SAME source adjoint as the old
   // independent same-epoch re-integration; otherwise caching physical
   // states would silently optimize a different plant/Jacobian.
@@ -2234,12 +2244,12 @@ TEST(MpcSourceNonlinear, ExactSourceCandidatesPreserveOriginalHardCorridor)
   frozen.valid=0;
   EXPECT_FALSE(mpc_rti_source_nonlinear_optimize(
       &initial,0.,trajectory,count,length,PREDICTION_DT_SECONDS,
-      &cycle,&frozen,controls,&options,result.get()));
+      &cycle,&frozen,controls,&options,result.get(),nullptr));
   frozen.valid=1;
   options.maximum_wall_time_us=.000001;
   ASSERT_TRUE(mpc_rti_source_nonlinear_optimize(
       &initial,0.,trajectory,count,length,PREDICTION_DT_SECONDS,
-      &cycle,&frozen,controls,&options,result.get()));
+      &cycle,&frozen,controls,&options,result.get(),nullptr));
   EXPECT_EQ(result->budget_exhausted,1);
   EXPECT_EQ(result->iterations_accepted,0);
   EXPECT_EQ(result->final_objective,result->initial_objective);
@@ -3916,7 +3926,7 @@ TEST(MpcRtiCommandIncrements, ExactQuadraticAndDynamicsCoordinateChange)
     s.B[prev[1]][1]=1.f;
   }
   after=before;
-  ASSERT_TRUE(mpc_rti_transform_qp_to_command_increments(&after,&config));
+  ASSERT_TRUE(mpc_rti_transform_qp_to_command_increments(&after,&config,PREDICTION_DT_SECONDS));
   constexpr float x_steer=.17f,x_throttle=.4f;
   const float cmd[2]={-.28f,.7f};
   const float dcmd[2]={cmd[0]-x_steer,cmd[1]-x_throttle};
@@ -3973,7 +3983,7 @@ TEST(MpcRtiCommandIncrements, MultistageFeedbackPredictionUsesIncrementCoordinat
     stage.B[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND][1] = 1.f;
   }
   after = before;
-  ASSERT_TRUE(mpc_rti_transform_qp_to_command_increments(&after, &config));
+  ASSERT_TRUE(mpc_rti_transform_qp_to_command_increments(&after, &config,PREDICTION_DT_SECONDS));
   float direct[MPC_RTI_NX]{};
   float increments[MPC_RTI_NX]{};
   direct[MPC_OPT_IDX_EY] = increments[MPC_OPT_IDX_EY] = .12f;

@@ -30,6 +30,14 @@ public:
     bool must_reseed_nominal() const {
         return consecutive_short_actions_ > 0 || recent_short_actions_ >= 2;
     }
+    /* The SOURCE-OPTIMAL normal SQP must reclaim the entire verified
+     * warm-start and its ADMM duals after ANY fresh accepted 750ms plan.
+     * The sixteen-action history is still used for safety episode limits;
+     * it is not permission to erase an already certified new nominal or
+     * keep running a restoration-first QP. */
+    bool last_published_action_was_short_prefix() const {
+        return consecutive_short_actions_ > 0;
+    }
     bool requires_full_horizon(int maximum_short_actions) const {
         return maximum_short_actions > 0 &&
             (consecutive_short_actions_ >= maximum_short_actions ||

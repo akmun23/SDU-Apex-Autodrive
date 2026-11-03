@@ -51,7 +51,11 @@ add_library(mpc_core STATIC
   src/mpc_rti.cpp
   src/mpc_rti_qp.cpp
   src/mpc_terminal_viability.cpp
+  src/mpc_successor_viability.cpp
+  src/mpc_source_first_step_viability.cpp
   src/mpc_source_adjoint.cpp
+  src/mpc_source_reduced_sqp.cpp
+  src/mpc_source_sensitivity.cpp
   src/mpc_source_nonlinear_optimizer.cpp
   src/riccati_solver.cpp
   src/riccati_factorization.cpp
@@ -80,8 +84,36 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/mpc_bag_solver_replay.cpp")
   add_executable(mpc_qp_fixture_replay EXCLUDE_FROM_ALL
     ../tools/mpc_qp_fixture_replay.cpp)
   target_link_libraries(mpc_qp_fixture_replay PRIVATE mpc_core)
+  add_executable(mpc_live_failure_replay EXCLUDE_FROM_ALL
+    ../tools/mpc_live_failure_replay.cpp)
+  target_link_libraries(mpc_live_failure_replay PRIVATE mpc_core)
+  # Source-exact second-order reduced SQP diagnostics. These tools use
+  # production source plant and frozen objective/geometry, but are NOT
+  # linked into the live controller and must never publish controls.
+  # The Python second-order QP driver invokes these two explicit binaries.
+  add_executable(mpc_offline_advance_source_epoch EXCLUDE_FROM_ALL
+    ../tools/mpc_offline_advance_source_epoch.cpp)
+  target_include_directories(mpc_offline_advance_source_epoch PRIVATE src)
+  target_link_libraries(mpc_offline_advance_source_epoch PRIVATE mpc_core)
+  add_executable(mpc_native_source_sqp_controller_epoch EXCLUDE_FROM_ALL
+    ../tools/mpc_native_source_sqp_controller_epoch.cpp)
+  target_link_libraries(mpc_native_source_sqp_controller_epoch PRIVATE mpc_core)
+  add_executable(mpc_native_source_sqp_replay EXCLUDE_FROM_ALL
+    ../tools/mpc_native_source_sqp_replay.cpp)
+  target_include_directories(mpc_native_source_sqp_replay PRIVATE src)
+  target_link_libraries(mpc_native_source_sqp_replay PRIVATE mpc_core)
+  add_executable(mpc_offline_source_merit EXCLUDE_FROM_ALL
+    ../tools/mpc_offline_source_merit.cpp)
+  target_include_directories(mpc_offline_source_merit PRIVATE src)
+  target_link_libraries(mpc_offline_source_merit PRIVATE mpc_core)
+  add_executable(mpc_offline_exact_source_relinearize EXCLUDE_FROM_ALL
+    ../tools/mpc_offline_exact_source_relinearize.cpp)
+  target_include_directories(mpc_offline_exact_source_relinearize PRIVATE src)
+  target_link_libraries(mpc_offline_exact_source_relinearize PRIVATE mpc_core)
   add_custom_target(mpc_offline_qp_tools
-    DEPENDS mpc_bag_solver_replay mpc_qp_fixture_replay)
+    DEPENDS mpc_bag_solver_replay mpc_qp_fixture_replay
+            mpc_live_failure_replay mpc_offline_source_merit
+            mpc_offline_exact_source_relinearize)
 endif()
 
 # Optional C ABI shared object used by tools/evaluate_mpc_bag.py to replay
@@ -176,7 +208,7 @@ if(BUILD_TESTING)
   target_include_directories(test_mpc_fallback_episode PRIVATE include)
   ament_add_gtest(test_mpc_sqp_convergence test/test_mpc_sqp_convergence.cpp)
   target_include_directories(test_mpc_sqp_convergence PRIVATE include)
-  target_link_libraries(test_mpc_sqp_convergence mpc_core)
+  target_link_libraries(test_mpc_sqp_convergence mpc_core Eigen3::Eigen)
   ament_add_gtest(test_mpc_feasibility_restoration
     test/test_mpc_feasibility_restoration.cpp)
   target_include_directories(test_mpc_feasibility_restoration PRIVATE include)
@@ -193,7 +225,7 @@ if(BUILD_TESTING)
   target_link_libraries(test_riccati_denormal_scope mpc_core)
   target_include_directories(test_riccati_denormal_scope PRIVATE include)
   ament_add_gtest(test_mpc_corridor_polygon test/test_mpc_corridor_polygon.cpp)
-  target_link_libraries(test_mpc_corridor_polygon mpc_core)
+  target_link_libraries(test_mpc_corridor_polygon mpc_core Eigen3::Eigen)
   target_include_directories(test_mpc_corridor_polygon PRIVATE include)
   add_test(NAME test_mpc_qp_fixture_schema
     COMMAND ${Python3_EXECUTABLE} -m unittest tools.test_mpc_qp_fixture -v)

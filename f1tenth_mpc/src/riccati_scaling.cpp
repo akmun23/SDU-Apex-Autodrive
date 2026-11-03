@@ -104,12 +104,44 @@ static RiccatiStatus_t riccati_admm_solve_impl(
             solution->status = RICCATI_STATUS_ERROR;
             return RICCATI_STATUS_ERROR;
         }
+        if(!isfinite(polygon->elastic_weight) || polygon->elastic_weight<0.f ||
+           polygon->elastic_weight>1.e7f) {
+            solution->status=RICCATI_STATUS_ERROR;
+            return RICCATI_STATUS_ERROR;
+        }
         if (polygon->count == 0) continue;
+        if(polygon->elastic_weight>0.f) {
+            // Elastic wall planes are an OBJECTIVE, not extra hard boxes.
+            // Still check all progress coefficients for finite values.
+            for(int face=0;face<polygon->count;++face)
+                if(!isfinite(polygon->progress_normal[face])) {
+                    solution->status=RICCATI_STATUS_ERROR;
+                    return RICCATI_STATUS_ERROR;
+                }
+            continue;
+        }
         for (int axis = 0; axis < 2; ++axis) {
             const float lo = k < N ? step_data[k].x_lb[axis] : terminal_x_lb[axis];
             const float hi = k < N ? step_data[k].x_ub[axis] : terminal_x_ub[axis];
             if (!(lo > -BIG_BOUND || hi < BIG_BOUND)) {
                 solution->status = RICCATI_STATUS_ERROR;
+                return RICCATI_STATUS_ERROR;
+            }
+        }
+        int has_progress=0;
+        for(int f=0;f<polygon->count;++f) {
+            if(!isfinite(polygon->progress_normal[f])) {
+                solution->status=RICCATI_STATUS_ERROR;
+                return RICCATI_STATUS_ERROR;
+            }
+            has_progress|=polygon->progress_normal[f]!=0.f;
+        }
+        if(has_progress) {
+            const int axis=MPC_OPT_IDX_PROGRESS_DEVIATION;
+            const float lo=k<N?step_data[k].x_lb[axis]:terminal_x_lb[axis];
+            const float hi=k<N?step_data[k].x_ub[axis]:terminal_x_ub[axis];
+            if(!(lo>-BIG_BOUND || hi<BIG_BOUND)) {
+                solution->status=RICCATI_STATUS_ERROR;
                 return RICCATI_STATUS_ERROR;
             }
         }
@@ -227,9 +259,13 @@ static RiccatiStatus_t riccati_admm_solve_impl(
     scaled_config.use_scaling = 0;
     for (int k = 1; k <= N; ++k)
         for (int face = 0; face < scaled_config.state_polygons[k].count; ++face)
+        {
+            scaled_config.state_polygons[k].progress_normal[face] *=
+                config->state_scale[MPC_OPT_IDX_PROGRESS_DEVIATION];
             for (int axis = 0; axis < 2; ++axis)
                 scaled_config.state_polygons[k].normal[face][axis] *=
                     config->state_scale[axis];
+        }
     for (int f=0;f<scaled_config.terminal_constraints.count;++f)
         for(int i=0;i<nx;++i)
             scaled_config.terminal_constraints.normal[f][i] *= config->state_scale[i];

@@ -120,6 +120,11 @@ int unity_source_plant_step_sensitivity_c(
     const UnitySourcePlantSensitivitySeedsC *seeds,
     UnitySourcePlantSensitivityC *sensitivity);
 
+/* Exact source wheel-contact lateral slip at this state, without
+ * advancing the plant. No ABI changes to existing step/sensitivity structs. */
+int unity_source_plant_instantaneous_lateral_slip_c(
+    const double state[UNITY_SOURCE_PLANT_STATE_SIZE], double slip[4]);
+
 /* Evaluate Unity's source slip equation at the supplied physical plant state.
  * The excess is wheel-surface-speed mismatch beyond the source curve's force
  * extremum, in m/s; its derivative is with respect to wheel omega. */

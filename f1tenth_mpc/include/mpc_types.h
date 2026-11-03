@@ -224,6 +224,15 @@ typedef struct
     int count;
     float normal[RICCATI_STATE_POLYGON_MAX_PLANES][2];
     float upper[RICCATI_STATE_POLYGON_MAX_PLANES];
+    /* Optional local derivative of each physical footprint plane with
+     * respect to progress deviation (optimizer coordinate 20).
+     * Zero preserves the original exact 2D projection and old fixtures. */
+    float progress_normal[RICCATI_STATE_POLYGON_MAX_PLANES];
+    /* Zero: original HARD halfplanes. Positive: convex elastic-QP halfplanes,
+     * min_{xi>=0, a*z<=b+xi} (w/2) sum xi^2.
+     * ADMM eliminates xi EXACTLY in the split proximal objective:
+     * w/2 sum max(0,a*z-b)^2. Never makes source validation elastic. */
+    float elastic_weight;
 } RiccatiStatePolygon_t;
 
 /* General terminal halfspaces C*x[N] <= upper. Split independently in

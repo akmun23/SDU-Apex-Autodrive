@@ -4,6 +4,7 @@
 #include "mpc_steering_variation.hpp"
 #include "mpc_tracking_tolerance.h"
 #include "vehicle_model.h"
+#include "mpc_qp_convexity.hpp"
 #include <math.h>
 #include <string.h>
 #ifdef __linux__
@@ -119,6 +120,106 @@ float steering_reference_increment(
     return next->steering_command-current->steering_command;
 }
 
+/* PSD Gauss-Newton model for the ACTIVE physical footprint corner's
+ * squared reserve deficit. The exact source merit uses the minimum of all
+ * corners at the actual nonlinear heading; the QP linearizes this single
+ * currently limiting plane at the already-integrated source nominal.
+ * No new hard wall box and no extra source rollout. At the terminal state
+ * Riccati stores only a diagonal Hessian, so use a diagonal PSD majorizer
+ * with the SAME exact first derivative. */
+static void add_footprint_reserve_merit(
+    float Q[MPC_RTI_NX],
+    float q[MPC_RTI_NX],
+    float (*Qcross)[MPC_RTI_NX],
+    const RiccatiStatePolygon_t *polygon,
+    const MpcModelState_t *nominal,
+    const MpcRtiConfiguration_t *model)
+{
+    if(!polygon || !nominal || !model ||
+       model->weight_source_corridor_reserve<=0.f ||
+       model->near_wall_tracking_reserve_m<=0.f)return;
+    float slack=INFINITY;
+    int active=-1;
+    for(int i=0;i<polygon->count;++i) {
+        const float candidate=polygon->upper[i]-
+            polygon->normal[i][0]*nominal->e_y-
+            polygon->normal[i][1]*nominal->e_psi;
+        if(candidate<slack) {slack=candidate;active=i;}
+    }
+    if(active<0 || !(slack<model->near_wall_tracking_reserve_m))return;
+    const float a=polygon->normal[active][0];
+    const float b=polygon->normal[active][1];
+    const float w2=2.f*model->weight_source_corridor_reserve;
+    const float residual=model->near_wall_tracking_reserve_m-slack;
+    if(Qcross) {
+        Q[MPC_STATE_IDX_EY]+=w2*a*a;
+        Q[MPC_STATE_IDX_EPSI]+=w2*b*b;
+        Qcross[MPC_STATE_IDX_EY][MPC_STATE_IDX_EPSI]+=w2*a*b;
+        Qcross[MPC_STATE_IDX_EPSI][MPC_STATE_IDX_EY]+=w2*a*b;
+        const float affine=model->near_wall_tracking_reserve_m-
+            polygon->upper[active];
+        q[MPC_STATE_IDX_EY]+=w2*affine*a;
+        q[MPC_STATE_IDX_EPSI]+=w2*affine*b;
+    } else {
+        const float cross=fabsf(a*b);
+        const float qa=w2*(a*a+cross);
+        const float qb=w2*(b*b+cross);
+        Q[MPC_STATE_IDX_EY]+=qa;
+        Q[MPC_STATE_IDX_EPSI]+=qb;
+        q[MPC_STATE_IDX_EY]+=w2*residual*a-qa*nominal->e_y;
+        q[MPC_STATE_IDX_EPSI]+=w2*residual*b-qb*nominal->e_psi;
+    }
+}
+
+// Source-consistent front tire saturation penalty. The instantaneous source
+// wheel-contact kinematics are exactly the ones used by the 1ms tire callback.
+// The full 20-physical-state derivative is evaluated at each already
+// integrated nominal. This is a PSD GN Hessian and preserves the exact
+// nominal gradient even at the Riccati terminal (diagonal majorizer).
+static int add_source_front_lateral_slip_merit(
+    float Q[MPC_RTI_NX],float q[MPC_RTI_NX],
+    float (*Qcross)[MPC_RTI_NX],
+    const MpcModelState_t *physical,
+    const float nominal_x[MPC_RTI_NX],
+    const MpcRtiConfiguration_t *model,float multiplier)
+{
+    if(!model || model->weight_source_lateral_slip<=0.f)return 1;
+    if(!physical || !nominal_x)return 0;
+    double slip[4]{};
+    double J[4][MPC_OPT_PHYSICAL_NX]{};
+    if(!vehicle_model_source_lateral_slip(physical,slip,J))return 0;
+    const double w2=2.*model->weight_source_lateral_slip*multiplier;
+    for(int front=0;front<2;++front) {
+        const double magnitude=std::abs(slip[front]);
+        if(magnitude<=kMpcSourceFrontLateralSlipReserveRad)continue;
+        const double r=slip[front]-std::copysign(
+            kMpcSourceFrontLateralSlipReserveRad,slip[front]);
+        for(int i=0;i<MPC_OPT_PHYSICAL_NX;++i) {
+            if(J[front][i]==0.)continue;
+            double affine=r;
+            for(int j=0;j<MPC_OPT_PHYSICAL_NX;++j)
+                affine-=J[front][j]*nominal_x[j];
+            if(Qcross) {
+                Q[i]+=(float)(w2*J[front][i]*J[front][i]);
+                q[i]+=(float)(w2*J[front][i]*affine);
+                for(int j=0;j<MPC_OPT_PHYSICAL_NX;++j)
+                    if(i!=j)
+                        Qcross[i][j]+=
+                           (float)(w2*J[front][i]*J[front][j]);
+            } else {
+                double sum=0.;
+                for(int j=0;j<MPC_OPT_PHYSICAL_NX;++j)
+                    sum+=std::abs(J[front][j]);
+                const double diagonal=w2*std::abs(J[front][i])*sum;
+                Q[i]+=(float)diagonal;
+                q[i]+=(float)(w2*J[front][i]*r-
+                    diagonal*nominal_x[i]);
+            }
+        }
+    }
+    return 1;
+}
+
 static void add_tracking_cost(
     float Q[MPC_RTI_NX],
     float q[MPC_RTI_NX],
@@ -219,18 +320,19 @@ double source_slip_cost(
 }
 
 int mpc_rti_transform_qp_to_command_increments(
-    MpcRtiProblem_t *problem, const MpcRtiConfiguration_t *config)
+    MpcRtiProblem_t *problem, const MpcRtiConfiguration_t *config,
+    float prediction_dt)
 {
     if (!problem || !config || problem->horizon != RICCATI_HORIZON ||
         !config->command_increment_qp_enabled ||
         !(config->max_steering_command_step_rad > 0.f) ||
         !(config->max_throttle_command_step > 0.f)) return 0;
 
-    constexpr int previous[2] = {
-        MPC_OPT_IDX_PREVIOUS_STEERING_COMMAND,
+    const int previous[2] = {
+        mpc_rti_steering_qp_state_index(config),
         MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND};
     const float step_limit[2] = {
-        config->max_steering_command_step_rad,
+        mpc_rti_steering_qp_step_limit(config,prediction_dt),
         config->max_throttle_command_step};
     const float absolute_min[2] = {
         -config->max_steering_rad, MPC_THROTTLE_MIN_DRIVE};
@@ -293,7 +395,54 @@ int mpc_rti_transform_qp_to_command_increments(
  * constraints wrong, while recomputing the merit's targets gives a QP gradient
  * of a DIFFERENT objective. The public legacy entrypoint below remains a
  * convenience for one-pass/unfrozen QP callers. */
-int mpc_rti_build_ltv_qp_with_objective_schedule(
+/* The exact rollout evaluates track width at candidate progress. Construct
+ * its locally consistent first derivative using the identical source-frame
+ * path sampler, not stage-indexed width differences (those conflate speed).
+ * The final exact rollout remains the nonlinear collision authority. */
+static int source_corridor_progress_slopes(
+    const MpcTrajectorySample_t *trajectory, size_t count, double lap,
+    double progress, double previous_progress,
+    const MpcRtiConfiguration_t *model,float *left,float *right)
+{
+    /* The preview-minimum wall width is only piecewise differentiable.
+     * Local derivatives sampled at 2mm can be ~10 m/m while a physically
+     * realized 20mm SQP change crosses a different active corridor knot.
+     *
+     * At subsequent SQP passes, use the ACTUAL finite-width secant between
+     * two source-integrated same-epoch trajectories. This is exact for the
+     * two observed stations, unlike extrapolating across a knot with an
+     * infinitesimal derivative. The hard original-source validator still
+     * handles every candidate; this local model is not a safety certificate.
+     *
+     * If the displacement is tiny or exceeds a local physical step, fall
+     * back to the true local derivative, avoiding noisy/divergent secants. */
+    constexpr double h=0.002;
+    if(!isfinite(progress) || !left || !right)return 0;
+    if(isfinite(previous_progress) &&
+       fabs(progress-previous_progress)>=.004 &&
+       fabs(progress-previous_progress)<=.5) {
+        MpcRtiReference_t now{},previous{};
+        if(!mpc_rti_reference_at_progress(trajectory,count,lap,progress,
+                                         model,&now) ||
+           !mpc_rti_reference_at_progress(trajectory,count,lap,
+                                         previous_progress,model,&previous))
+            return 0;
+        const double ds=progress-previous_progress;
+        *left=float((now.left_bound-previous.left_bound)/ds);
+        *right=float((now.right_bound-previous.right_bound)/ds);
+    } else {
+        MpcRtiReference_t before{},after{};
+        if(!mpc_rti_reference_at_progress(trajectory,count,lap,progress-h,
+                                         model,&before) ||
+           !mpc_rti_reference_at_progress(trajectory,count,lap,progress+h,
+                                         model,&after))return 0;
+        *left=float((after.left_bound-before.left_bound)/(2.*h));
+        *right=float((after.right_bound-before.right_bound)/(2.*h));
+    }
+    return isfinite(*left) && isfinite(*right);
+}
+
+int mpc_rti_build_ltv_qp_with_progress_corridor(
     const MpcRtiState_t nominal_states[PREDICTION_HORIZON + 1],
     const MpcModelControl_t nominal_controls[PREDICTION_HORIZON],
     const MpcRtiReference_t references[PREDICTION_HORIZON + 1],
@@ -301,7 +450,11 @@ int mpc_rti_build_ltv_qp_with_objective_schedule(
     float prediction_dt,
     const MpcRtiConfiguration_t *configuration,
     const MpcRtiObjectiveSchedule_t *objective_schedule,
-    MpcRtiProblem_t *problem)
+    MpcRtiProblem_t *problem,
+    const double nominal_progress[PREDICTION_HORIZON+1],
+    const MpcTrajectorySample_t *trajectory, size_t trajectory_count,
+    double lap_length,
+    const double previous_progress[PREDICTION_HORIZON+1])
 {
     if (!nominal_states || !nominal_controls || !references || !problem ||
         !valid_configuration(configuration) ||
@@ -312,6 +465,10 @@ int mpc_rti_build_ltv_qp_with_objective_schedule(
     if (objective_schedule &&
         (!objective_schedule->valid || objective_schedule->horizon != horizon))
         return 0;
+    if (nominal_progress &&
+        (!trajectory || trajectory_count < 3 ||
+         !isfinite(lap_length) || lap_length <= 0.)) return 0;
+    if(previous_progress && !nominal_progress)return 0;
     const MpcRtiReference_t *objective_references = objective_schedule
         ? objective_schedule->references : references;
     for (int k = 0; k <= horizon; ++k) {
@@ -662,6 +819,39 @@ int mpc_rti_build_ltv_qp_with_objective_schedule(
         if (!mpc_rti_build_corridor_polygon(&nominal_states[bound_index].plant,
                 references[bound_index].left_bound, references[bound_index].right_bound,
                 configuration, bound_index, &problem->state_polygons[solver_stage])) return 0;
+        if(nominal_progress && model_stage>0) {
+            float left_slope=0.f,right_slope=0.f;
+            if(!source_corridor_progress_slopes(trajectory,trajectory_count,
+                    lap_length,nominal_progress[model_stage],
+                    previous_progress?previous_progress[model_stage]:NAN,
+                    configuration,
+                    &left_slope,&right_slope))return 0;
+            auto &polygon=problem->state_polygons[solver_stage];
+            for(int face=0;face<polygon.count;++face)
+                polygon.progress_normal[face]=
+                    -(face%2==0?left_slope:right_slope);
+            if(left_slope!=0.f || right_slope!=0.f) {
+                /* The nominal-progress e_y box would contradict the
+                 * progress-coupled polygon, especially in a narrowing turn.
+                 * Keep broad physical heading bounds and give delta_s a
+                 * nonbinding ±49m split box (the 750ms legal speed envelope
+                 * allows at most 12m) so ADMM projects all three axes. */
+                stage->x_lb[MPC_OPT_IDX_EY]=-BIG_BOUND+1.f;
+                stage->x_ub[MPC_OPT_IDX_EY]= BIG_BOUND-1.f;
+                stage->x_lb[MPC_OPT_IDX_PROGRESS_DEVIATION]=-BIG_BOUND+1.f;
+                stage->x_ub[MPC_OPT_IDX_PROGRESS_DEVIATION]= BIG_BOUND-1.f;
+            }
+        }
+        if(model_stage>0)
+            add_footprint_reserve_merit(stage->Q_diag,stage->q,
+                stage->Q_offdiag,&problem->state_polygons[solver_stage],
+                &nominal_states[model_stage].plant,configuration);
+        if(model_stage>0 &&
+           !add_source_front_lateral_slip_merit(
+               stage->Q_diag,stage->q,stage->Q_offdiag,
+               &nominal_states[model_stage].plant,
+               nominal_optimizer_states[model_stage],configuration,1.f))
+            return 0;
         stage->u_lb[0] = -configuration->max_steering_rad;
         stage->u_ub[0] = configuration->max_steering_rad;
         stage->u_lb[1] = MPC_THROTTLE_MIN_DRIVE;
@@ -686,11 +876,81 @@ int mpc_rti_build_ltv_qp_with_objective_schedule(
     if (!mpc_rti_build_corridor_polygon(&nominal_states[horizon].plant,
             references[horizon].left_bound, references[horizon].right_bound,
             configuration, horizon, &problem->state_polygons[RICCATI_HORIZON])) return 0;
-    return !configuration->command_increment_qp_enabled ||
-        mpc_rti_transform_qp_to_command_increments(problem,configuration);
+    if(nominal_progress) {
+        float left_slope=0.f,right_slope=0.f;
+        if(!source_corridor_progress_slopes(trajectory,trajectory_count,
+                lap_length,nominal_progress[horizon],
+                previous_progress?previous_progress[horizon]:NAN,
+                configuration,
+                &left_slope,&right_slope))return 0;
+        auto &polygon=problem->state_polygons[RICCATI_HORIZON];
+        for(int face=0;face<polygon.count;++face)
+            polygon.progress_normal[face]=
+                -(face%2==0?left_slope:right_slope);
+        if(left_slope!=0.f || right_slope!=0.f) {
+            problem->terminal_x_lb[MPC_OPT_IDX_EY]=-BIG_BOUND+1.f;
+            problem->terminal_x_ub[MPC_OPT_IDX_EY]= BIG_BOUND-1.f;
+            problem->terminal_x_lb[MPC_OPT_IDX_PROGRESS_DEVIATION]=-BIG_BOUND+1.f;
+            problem->terminal_x_ub[MPC_OPT_IDX_PROGRESS_DEVIATION]= BIG_BOUND-1.f;
+        }
+    }
+    add_footprint_reserve_merit(problem->terminal_Q,problem->terminal_q,
+        nullptr,&problem->state_polygons[RICCATI_HORIZON],
+        &nominal_states[horizon].plant,configuration);
+    if(!add_source_front_lateral_slip_merit(
+           problem->terminal_Q,problem->terminal_q,nullptr,
+           &nominal_states[horizon].plant,
+           nominal_optimizer_states[horizon],configuration,
+           configuration->terminal_multiplier))return 0;
+    // Transform into the solver's actual incremental-command coordinates
+    // BEFORE checking floating-point convexity. The coordinate transform
+    // contains sums of large PSD source-slip GN products; independent
+    // binary32 rounding can reintroduce negative curvature even when the
+    // absolute-command Hessian was PSD. The earlier pre-transform check was
+    // therefore not a certificate of the actual QP sent to ADMM.
+    if(configuration->command_increment_qp_enabled &&
+       !mpc_rti_transform_qp_to_command_increments(
+            problem,configuration,prediction_dt))return 0;
+    for(int k=0;k<RICCATI_HORIZON;++k) {
+        const int model_stage=k+MPC_COMMAND_DELAY_STEPS;
+        float nominal_solver_input[MPC_RTI_NU]={
+            nominal_controls[model_stage].steering_target_rad,
+            nominal_controls[model_stage].throttle_command
+        };
+        if(configuration->command_increment_qp_enabled) {
+            nominal_solver_input[0]-=nominal_optimizer_states[model_stage][
+                mpc_rti_steering_qp_state_index(configuration)];
+            nominal_solver_input[1]-=nominal_optimizer_states[model_stage][
+                MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND];
+        }
+        if(!mpc_rti_convexify_float_source_hessian(
+            &problem->steps[k],
+            nominal_optimizer_states[model_stage],nominal_solver_input,
+            nullptr)) {
+            problem->linearization_failure_stage=k;
+            problem->linearization_failure_reason=7; // Nonconvex QP.
+            problem->linearization_failure_index=-1;
+            return 0;
+        }
+    }
+    return 1;
 }
 
 
+
+int mpc_rti_build_ltv_qp_with_objective_schedule(
+    const MpcRtiState_t nominal_states[PREDICTION_HORIZON+1],
+    const MpcModelControl_t nominal_controls[PREDICTION_HORIZON],
+    const MpcRtiReference_t references[PREDICTION_HORIZON+1],
+    int horizon,float prediction_dt,
+    const MpcRtiConfiguration_t *configuration,
+    const MpcRtiObjectiveSchedule_t *objective_schedule,
+    MpcRtiProblem_t *problem)
+{
+    return mpc_rti_build_ltv_qp_with_progress_corridor(
+        nominal_states,nominal_controls,references,horizon,prediction_dt,
+        configuration,objective_schedule,problem,nullptr,nullptr,0,0.);
+}
 
 int mpc_rti_build_ltv_qp(
     const MpcRtiState_t nominal_states[PREDICTION_HORIZON + 1],

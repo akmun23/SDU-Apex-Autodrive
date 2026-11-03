@@ -504,6 +504,23 @@ def analyze(bag: Path, library_path: Path) -> tuple[dict[str, Any], list[dict[st
                 f"wheel_{i}_pred_long_slip": output.longitudinal_slip[i]
                 for i in range(4)
             },
+            # Compare source lateral WheelHit-compatible slip against the
+            # next published UnityPlantState diagnostic, not against a
+            # geometric bicycle approximation. Both have a matching sign.
+            **{
+                f"wheel_{i}_pred_lateral_slip_rad": output.lateral_slip[i]
+                for i in range(4)
+            },
+            **{
+                f"wheel_{i}_unity_lateral_slip_rad":
+                    plant[next_ns]["lat_slip"][i]
+                for i in range(4)
+            },
+            **{
+                f"wheel_{i}_lateral_slip_error_rad":
+                    output.lateral_slip[i] - plant[next_ns]["lat_slip"][i]
+                for i in range(4)
+            },
             **{
                 f"wheel_{i}_normal_load_n": output.normal_load_n[i]
                 for i in range(4)

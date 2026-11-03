@@ -119,6 +119,18 @@ extern "C" int unity_source_plant_step_c(
   return 1;
 }
 
+extern "C" int unity_source_plant_instantaneous_lateral_slip_c(
+    const double state[UNITY_SOURCE_PLANT_STATE_SIZE], double slip[4])
+{
+    if(!state || !slip)return 0;
+    const auto physical=from_c(state,1);
+    std::array<double,4> result{};
+    if(!f1tenth_mpc::unity_source_plant_lateral_slip_at_state(
+           physical,&result))return 0;
+    std::copy(result.begin(),result.end(),slip);
+    return 1;
+}
+
 extern "C" int unity_source_plant_reconcile_suspension_jounce_c(
     double state[UNITY_SOURCE_PLANT_STATE_SIZE],
     int *suspension_history_initialized)

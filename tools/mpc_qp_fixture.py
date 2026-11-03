@@ -68,11 +68,15 @@ class Cursor:
 
 def parse_payload(data: bytes) -> dict:
     cursor = Cursor(data)
-    if cursor.take(8) != MAGIC:
+    magic = cursor.take(8)
+    if magic not in (MAGIC,b"SDUFQP6\n",b"SDUFQP7\n"):
         raise FixtureError("bad fixture magic")
     version, endian, nx, nu, horizon, passes = (cursor.word() for _ in range(6))
     raw_status = cursor.signed()
-    if version != SCHEMA_VERSION:
+    if version not in (SCHEMA_VERSION,6,7) or (
+        version == 7 and magic != b"SDUFQP7\n") or (
+        version == 6 and magic != b"SDUFQP6\n") or (
+        version == SCHEMA_VERSION and magic != MAGIC):
         raise FixtureError(f"unsupported schema version {version}")
     if endian != 0x01020304:
         raise FixtureError("unsupported endianness marker")
@@ -115,9 +119,15 @@ def parse_payload(data: bytes) -> dict:
             raise FixtureError("invalid state-polygon plane count")
         polygon_count += count
         for face in range(8):
-            normal0, normal1, bound = cursor.f32_array(3)
-            if face < count and normal0 == normal1 == 0.:
+            values = cursor.f32_array(4 if version >= 6 else 3)
+            normal0, normal1, bound = values[:3]
+            progress_normal = values[3] if version >= 6 else 0.
+            if face < count and normal0 == normal1 == progress_normal == 0.:
                 raise FixtureError("zero state-polygon normal")
+        if version >= 7:
+            weight = cursor.f32_array(1)[0]
+            if not 0. <= weight <= 1.e7:
+                raise FixtureError("invalid elastic polygon penalty")
     for lower, upper in zip(lower_state_bounds + [terminal_lb],
                             upper_state_bounds + [terminal_ub]):
         if any(lo > hi for lo, hi in zip(lower, upper)):
@@ -204,7 +214,7 @@ def parse_payload(data: bytes) -> dict:
     if max_solve_time_us < 0.0 or iterations < 0 or time_budget_exhausted not in (0, 1):
         raise FixtureError("invalid solver metadata")
     if (rho <= 0 or rho_u <= 0 or rho_max < 1 or rho_max > 127 or
-            solver_tolerance <= 0 or max_iterations < 1 or max_iterations > 300 or
+            solver_tolerance <= 0 or max_iterations < 1 or max_iterations > 10000 or
             adaptive_rho not in (0, 1) or cold_start not in (0, 1) or
             reuse_same_epoch not in (0, 1) or
             shared_rho not in (0, 1) or adaptive_update_period < 1 or

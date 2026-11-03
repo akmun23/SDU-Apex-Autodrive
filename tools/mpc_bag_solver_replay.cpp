@@ -1,4 +1,5 @@
 #include "mpc_rti.h"
+#include "../f1tenth_mpc/src/mpc_rti_internal.hpp"
 #include "mpc_qp_fixture_format.hpp"
 #include "mpc_trajectory_io.hpp"
 #include "mpc_world_footprint.hpp"
@@ -169,7 +170,8 @@ void configure(MpcRtiCycleConfiguration_t *config,
     model.first_prediction_corridor_margin_m =
         static_cast<float>(first_corridor_margin);
     model.corridor_preview_halfwidth_m = 0.10f;
-    model.nonlinear_corridor_tolerance_m = 0.005f;
+    model.nonlinear_corridor_tolerance_m =
+        std::getenv("MPC_REPLAY_STRICT_CORRIDOR") ? 0.f : 0.005f;
     model.jacobian_threads = jacobian_threads;
 
     auto &solver = config->solver;
@@ -1631,7 +1633,7 @@ void audit_candidate_merit(const MpcRtiState_t &initial,double progress,
                 &initial,progress,trajectory.data(),trajectory.size(),
                 length,PREDICTION_DT_SECONDS,&config,
                 &result.comparison_objective,result.nominal_controls,
-                &options,improvement.get());
+                &options,improvement.get(),nullptr);
             std::cerr<<std::setprecision(10)
                 <<"SOURCE_NONLINEAR_CORE progress="<<progress
                 <<" success="<<success
@@ -1861,7 +1863,6 @@ int main(int argc, char **argv)
             config.max_cycle_time_us=value;
         }
         config.terminal_viability=std::getenv("MPC_REPLAY_TERMINAL_VIABILITY")?1:0;
-        config.source_informed_sqp=std::getenv("MPC_REPLAY_SOURCE_INFORMED_SQP")?1:0;
         if (const char *ratio = std::getenv("MPC_REPLAY_MIN_MODEL_AGREEMENT_RATIO"))
             config.minimum_sqp_model_agreement_ratio = std::strtof(ratio, nullptr);
         config.capture_sqp_prediction_metrics =
@@ -2049,7 +2050,7 @@ int main(int argc, char **argv)
                      "admm_projection_ns,rho_update_ns,scaling_transform_ns,"
                      "output_unscale_ns,rollout_us,"
                      "nonlinear_validation_us,min_corridor_slack_m,"
-                     "first_pass_objective,second_pass_objective,exact_objective_improvement,source_directional_derivative,source_curvature_steering,source_curvature_throttle,nonlinear_objective,"
+                     "first_pass_objective,second_pass_objective,exact_objective_improvement,nonlinear_objective,"
                      "nonlinear_failure_reason,nonlinear_failure_stage,"
                      "line_search_attempted,line_search_trials,"
                      "line_search_accepted,line_search_skipped_budget,"
@@ -2100,6 +2101,29 @@ int main(int argc, char **argv)
             for (int i = 0; i < MPC_PLANT_INTERNAL_STATE_COUNT; ++i)
                 state.plant.source_plant_internal_state[i] = row[16 + i];
 
+            if (std::getenv("MPC_REPLAY_SOURCE_FIRST_BOX")) {
+                float lo[2]={-config.model.max_steering_rad,
+                              MPC_THROTTLE_MIN_DRIVE};
+                float hi[2]={config.model.max_steering_rad,MPC_THROTTLE_MAX};
+                MpcModelControl_t first{
+                    state.plant.delayed_steering_command_2,
+                    state.plant.delayed_throttle_command_2};
+                if (const auto fixed=fixed_plan_controls.find(row_index);
+                    fixed!=fixed_plan_controls.end()) first=fixed->second[0];
+                int checks=0;
+                const auto start=std::chrono::steady_clock::now();
+                int changed=mpc_rti_source_first_step_feasible_box(
+                    &state,row[1],trajectory.data(),trajectory.size(),
+                    lap_length,PREDICTION_DT_SECONDS,&config,&first,0.,
+                    lo,hi,&checks);
+                const double elapsed=std::chrono::duration<double,std::milli>(
+                    std::chrono::steady_clock::now()-start).count();
+                std::cerr<<"SOURCE_FIRST_BOX row="<<row_index
+                    <<" changed="<<changed<<" checks="<<checks
+                    <<" lsteer="<<lo[0]<<" usteer="<<hi[0]
+                    <<" lthrottle="<<lo[1]<<" uthrottle="<<hi[1]
+                    <<" runtime_ms="<<elapsed<<std::endl;
+            }
             MpcTrajectorySample_t operating_reference{};
             const bool operating_reference_valid = mpc_trajectory_sample(
                 trajectory.data(), trajectory.size(), lap_length, row[1],
@@ -2108,13 +2132,18 @@ int main(int argc, char **argv)
             config.model.active_speed_ceiling_mps = static_cast<float>(row[2]);
             if (const auto fixed = fixed_plan_controls.find(row_index);
                 fixed != fixed_plan_controls.end()) {
+                const int fixed_horizon = std::getenv("MPC_REPLAY_FIXED_PLAN_HORIZON")
+                    ? std::atoi(std::getenv("MPC_REPLAY_FIXED_PLAN_HORIZON"))
+                    : PREDICTION_HORIZON;
+                if(fixed_horizon<1 || fixed_horizon>PREDICTION_HORIZON)
+                    throw std::runtime_error("invalid fixed plan replay horizon");
                 MpcRtiNominal_t fixed_plan{};
                 int fixed_failure_stage = -1;
                 const MpcRtiRolloutStatus_t fixed_status =
                     mpc_rti_validate_candidate_plan(
                         &state, row[1], fixed->second.data(),
                         trajectory.data(), trajectory.size(), lap_length,
-                        PREDICTION_HORIZON, PREDICTION_DT_SECONDS, &config,
+                        fixed_horizon, PREDICTION_DT_SECONDS, &config,
                         &fixed_plan, &fixed_failure_stage);
                 std::cerr << std::setprecision(10)
                     << "FIXED_SOURCE_PLAN row=" << row_index
@@ -2479,9 +2508,6 @@ int main(int argc, char **argv)
                       << result.first_pass_objective << ','
                       << result.second_pass_objective << ','
                       << result.exact_objective_improvement << ','
-                      << result.source_directional_derivative << ','
-                      << result.source_curvature_regularization[0] << ','
-                      << result.source_curvature_regularization[1] << ','
                       << result.nonlinear_objective << ','
                       << result.nonlinear_failure_reason << ','
                       << result.nonlinear_failure_stage << ','

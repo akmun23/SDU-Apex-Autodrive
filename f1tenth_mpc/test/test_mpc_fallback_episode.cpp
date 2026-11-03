@@ -39,3 +39,21 @@ TEST(MpcFallbackEpisode, ZeroLeavesOriginalBehaviorUnaffected) {
     for(int i=0;i<30;++i)a.record_short_action();
     EXPECT_FALSE(a.requires_full_horizon(0));
 }
+
+TEST(MpcFallbackEpisode, AcceptedFullHorizonStopsRecoveryBiasImmediately)
+{
+    f1tenth_mpc::FallbackEpisode episode;
+    episode.record_short_action();
+    episode.record_short_action();
+    episode.record_short_action();
+    EXPECT_TRUE(episode.last_published_action_was_short_prefix());
+    EXPECT_TRUE(episode.must_reseed_nominal());
+    episode.record_full_action();
+    EXPECT_GE(episode.recent_short_actions(),2);
+    EXPECT_FALSE(episode.last_published_action_was_short_prefix());
+    /* Health history still requires monitoring: it must NOT override the
+     * freshly certified SQP nominal, warm source controls, or ADMM state. */
+    EXPECT_TRUE(episode.must_reseed_nominal());
+    episode.record_short_action();
+    EXPECT_TRUE(episode.last_published_action_was_short_prefix());
+}

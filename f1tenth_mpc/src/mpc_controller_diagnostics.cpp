@@ -680,24 +680,59 @@ void MpcControllerNode::publish_cycle_diagnostics(const MpcRtiState_t &state,
         << rti_config_.model.weight_steering_slew
         << ",\"throttle_slew\":"
         << rti_config_.model.weight_throttle_slew << '}';
-    json << ",\"solver\":{\"iterations\":" << result.solver_iterations
+    json << ",\"solver\":{\"backend\":\""
+        << (result.native_source_sqp_active
+            ? "native_full_source_60_command_sqp"
+            : "riccati_rti")
+        << "\",\"native_source_sqp_enabled\":"
+        << (rti_config_.native_source_reduced_sqp ? "true":"false")
+        << ",\"native_source_sqp_source_evaluations\":"
+        << result.native_source_sqp_source_evaluations
+        << ",\"native_source_sqp_fd_columns\":"
+        << result.native_source_sqp_fd_columns
+        << ",\"native_source_sqp_qp_solves\":"
+        << result.native_source_sqp_qp_solves
+        << ",\"native_source_sqp_qp_iterations\":"
+        << result.native_source_sqp_qp_iterations
+        << ",\"native_source_sqp_first_feasible_iteration\":"
+        << result.native_source_sqp_first_feasible_iteration
+        << ",\"native_source_sqp_initial_failure_stage\":"
+        << result.native_source_sqp_initial_failure_stage
+        << ",\"native_source_sqp_initial_wall_violation_m2\":"
+        << result.native_source_sqp_initial_wall_violation_m2
+        << ",\"native_source_sqp_final_wall_violation_m2\":"
+        << result.native_source_sqp_final_wall_violation_m2
+        << ",\"native_source_sqp_qp_us\":"
+        << result.native_source_sqp_qp_us
+        << ",\"native_source_sqp_source_evaluation_us\":"
+        << result.native_source_sqp_source_evaluation_us
+        << ",\"iterations\":" << result.solver_iterations
         << ",\"max_iterations_requested\":"
         << requested_max_solver_iterations_
         << ",\"max_iterations_configured\":"
         << rti_config_.solver.max_iterations
         << ",\"time_budget_exhausted\":"
         << (result.solver_time_budget_exhausted ? "true" : "false")
-        << ",\"source_informed_sqp_enabled\":"
-        << (rti_config_.source_informed_sqp ? "true" : "false")
         << ",\"terminal_viability_enabled\":" << (rti_config_.terminal_viability ? "true":"false")
         << ",\"first_pass_objective\":";
     json_number(result.first_pass_objective);
     json << ",\"second_pass_objective\":";
     json_number(result.second_pass_objective);
     json << ",\"exact_objective_improvement\":" << result.exact_objective_improvement
-        << ",\"source_directional_derivative\":" << result.source_directional_derivative
-        << ",\"source_curvature_steering\":" << result.source_curvature_regularization[0]
-        << ",\"source_curvature_throttle\":" << result.source_curvature_regularization[1]
+        << ",\"source_nominal_repair_attempted\":"
+        << (result.source_nominal_repair_attempted ? "true":"false")
+        << ",\"source_nominal_repair_accepted\":"
+        << (result.source_nominal_repair_accepted ? "true":"false")
+        << ",\"source_nominal_repair_phase_one_iterations\":"
+        << result.source_nominal_repair_phase_one_iterations
+        << ",\"source_nominal_repair_us\":"
+        << result.source_nominal_repair_us
+        << ",\"successor_recourse_active\":"
+        << (result.successor_recourse_active ? "true":"false")
+        << ",\"successor_recourse_initialize_us\":"
+        << result.successor_recourse_initialize_us
+        << ",\"successor_recourse_qp_us\":"
+        << result.successor_recourse_qp_us
         << ",\"source_refinement_selected\":"
         << (result.experimental_source_nonlinear_selected ? "true" : "false")
         << ",\"source_nonlinear_exact_evaluations\":"
@@ -742,6 +777,8 @@ void MpcControllerNode::publish_cycle_diagnostics(const MpcRtiState_t &state,
     json_number(result.refinement_second_prefix_objective);
     json
         << ",\"admm_status\":" << result.admm_status
+        << ",\"solver_memory_restored_after_deadline\":"
+        << (result.solver_memory_restored_after_deadline?"true":"false")
         << ",\"admm_state_reset_for_recovery\":"
         << (result.admm_state_reset_for_recovery ? "true" : "false")
         << ",\"admm_stop_reason\":\""
@@ -877,9 +914,9 @@ void MpcControllerNode::publish_cycle_diagnostics(const MpcRtiState_t &state,
          << result.line_search_last_failure_reason
          << ",\"line_search_last_failure_stage\":"
          << result.line_search_last_failure_stage
-         << ",\"line_search_selected_alpha\":"
-         << result.line_search_selected_alpha
-         << ",\"line_search_us\":" << result.line_search_us
+         << ",\"line_search_selected_alpha\":";
+    json_number(result.line_search_selected_alpha);
+    json << ",\"line_search_us\":" << result.line_search_us
          << ",\"solve_us\":" << result.total_solve_us
          << ",\"node_solve_us\":" << solve_us
          << ",\"cycle_us\":" << result.total_cycle_us

@@ -125,6 +125,14 @@ double unity_steering_command_normalized_to_physical_rad(
 // setSubStepCount(5.0f, 5, 1); see the source constant and boundary test.
 unsigned int unity_source_wheel_substep_count(double forward_speed_mps);
 
+// Evaluate the exact native source wheel-contact lateral-slip expression
+// at a physical state, without advancing a motor/steering command or
+// repeating the expensive 25ms source-plant dynamics. Used by the normal
+// SQP's coherent lateral tire-saturation objective and its finite-difference
+// state Jacobian. WheelHit.sidewaysSlip sign is retained.
+bool unity_source_plant_lateral_slip_at_state(
+    const UnitySourcePlantState &state, std::array<double,4> *slip);
+
 // Reconcile the suspension history after an observer corrects body pose or
 // attitude. PhysX damper velocity is a finite difference from the preceding
 // substep; carrying jounce computed from the pre-correction body state would

@@ -113,7 +113,8 @@ static int riccati_solver_factorize_diagonal(
     const float rho_state[][RICCATI_MAX_NX],
     const float rho_input[][RICCATI_MAX_NU],
     RiccatiFactorization_t *factorization,
-    const float terminal_augmentation[RICCATI_MAX_NX][RICCATI_MAX_NX])
+    const float terminal_augmentation[RICCATI_MAX_NX][RICCATI_MAX_NX],
+    const RiccatiStatePolygon_t *polygons)
 {
     enum { nx = RICCATI_MAX_NX, nu = RICCATI_MAX_NU,
            N = RICCATI_HORIZON };
@@ -147,7 +148,8 @@ static int riccati_solver_factorize_diagonal(
 
     for (int i = 0; i < nx; ++i) {
         factor->x_is_constrained[N][i] =
-            terminal_x_ub[i] < BIG_BOUND || terminal_x_lb[i] > -BIG_BOUND;
+            terminal_x_ub[i] < BIG_BOUND || terminal_x_lb[i] > -BIG_BOUND ||
+            riccati_polygon_constrains_state(polygons,N,i);
         factor->P[N][i][i] = terminal_Q[i] +
             (factor->x_is_constrained[N][i] ? rho_state[N][i] : 0.0f);
         if (!isfinite(factor->P[N][i][i])) return 0;
@@ -167,7 +169,8 @@ static int riccati_solver_factorize_diagonal(
 
         for (int i = 0; i < nx; ++i) {
             const int constrained = k > 0 &&
-                (sd->x_ub[i] < BIG_BOUND || sd->x_lb[i] > -BIG_BOUND);
+                (sd->x_ub[i] < BIG_BOUND || sd->x_lb[i] > -BIG_BOUND ||
+                 riccati_polygon_constrains_state(polygons,k,i));
             factor->x_is_constrained[k][i] = (uint8_t)constrained;
             q_aug_diag[i] = sd->Q_diag[i] +
                 (constrained ? rho_state[k][i] : 0.0f);
@@ -253,7 +256,8 @@ int riccati_solver_factorize(
     return riccati_solver_factorize_diagonal(
         step_data, terminal_Q, terminal_x_lb, terminal_x_ub,
         (const float (*)[RICCATI_MAX_NX])rho_state,
-        (const float (*)[RICCATI_MAX_NU])rho_input, factorization, nullptr);
+        (const float (*)[RICCATI_MAX_NU])rho_input, factorization,
+        nullptr,nullptr);
 }
 
 int riccati_solver_pass_factored(
@@ -299,7 +303,8 @@ int riccati_solver_primal_pass(
     float x_out[][RICCATI_MAX_NX],
     float u_out[][RICCATI_MAX_NU],
     RiccatiFactorization_t *factorization,
-    const float terminal_augmentation[RICCATI_MAX_NX][RICCATI_MAX_NX])
+    const float terminal_augmentation[RICCATI_MAX_NX][RICCATI_MAX_NX],
+    const RiccatiStatePolygon_t *polygons)
 {
     if (!factorization) return 0;
     // Only the ADMM core calls this private fixed-QP pathway. Its penalty
@@ -312,7 +317,7 @@ int riccati_solver_primal_pass(
 #endif
         if (!riccati_solver_factorize_diagonal(step_data, terminal_Q,
                 terminal_x_lb, terminal_x_ub, rho_state, rho_input,
-                factorization, terminal_augmentation)) return 0;
+                factorization, terminal_augmentation,polygons)) return 0;
         /* This factorization belongs to one fixed MPC QP and cannot be
          * used through the public RHS reuse contract. Subsequent ADMM
          * iterations only update duals and penalty matrices; a penalty

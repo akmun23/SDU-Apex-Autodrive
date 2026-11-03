@@ -10,6 +10,7 @@
 #include "vehicle_model.h"
 #include "mpc_linearization.h"
 
+#include <algorithm>
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
@@ -213,6 +214,77 @@ static void write_source_plant_state(
            4 * sizeof(source_state[0]));
 }
 
+int vehicle_model_full_source_interval_sensitivities(
+    const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
+    const double seed_state[26][20],
+    const double seed_control[2][20],
+    double next_state[26][20],
+    double body_motion[3][20],
+    double slip_excess[4][20])
+{
+    static_assert(UNITY_SOURCE_PLANT_STATE_SIZE==26);
+    static_assert(UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH==20);
+    if(!state||!control||!seed_state||!seed_control||!next_state||
+       !body_motion||!slip_excess||!state->source_plant_initialized||
+       !std::isfinite(state->u)||!std::isfinite(state->v)||
+       !std::isfinite(state->r)||
+       !std::isfinite(state->actual_steering_angle)||
+       !std::isfinite(dt)||dt<=0.f||
+       !std::isfinite(control->steering_target_rad)||
+       !std::isfinite(control->throttle_command))return 0;
+    UnitySourcePlantInputC input{};
+    write_source_plant_state(state,input.state);
+    input.steering_target_rad=clamp_source_steering_target(
+        clampf_local(control->steering_target_rad,
+            -active_parameters.max_steering_angle,
+            active_parameters.max_steering_angle));
+    input.throttle_normalized=clampf_local(
+        control->throttle_command,MPC_THROTTLE_MIN,MPC_THROTTLE_MAX);
+    input.suspension_history_initialized=
+        state->source_suspension_history_initialized;
+    // Every state and command seed lane is populated before the C call.
+    UnitySourcePlantSensitivitySeedsC seeds;
+    for(int k=0;k<26;++k)
+        for(int lane=0;lane<20;++lane)
+            seeds.state[k][lane]=seed_state[k][lane];
+    const bool steer_interior=
+        control->steering_target_rad> -active_parameters.max_steering_angle &&
+        control->steering_target_rad< active_parameters.max_steering_angle;
+    const bool throttle_interior=
+        control->throttle_command>MPC_THROTTLE_MIN &&
+        control->throttle_command<MPC_THROTTLE_MAX;
+    for(int lane=0;lane<20;++lane) {
+        seeds.steering_target[lane]=steer_interior?
+            seed_control[0][lane]:0.;
+        seeds.throttle[lane]=throttle_interior?
+            seed_control[1][lane]:0.;
+    }
+    // The C sensitivity API fills all consumed result coordinates on
+    // success; avoid zeroing 26x20 tangents before every model interval.
+    UnitySourcePlantSensitivityC result;
+    if(!unity_source_plant_step_sensitivity_c(&input,dt,&seeds,&result))
+        return 0;
+    for(int k=0;k<26;++k)
+        for(int lane=0;lane<20;++lane) {
+            const double value=result.state[k][lane];
+            if(!std::isfinite(value))return 0;
+            next_state[k][lane]=value;
+        }
+    for(int lane=0;lane<20;++lane) {
+        body_motion[0][lane]=result.body_forward_displacement[lane];
+        body_motion[1][lane]=result.body_lateral_displacement[lane];
+        body_motion[2][lane]=result.yaw_delta[lane];
+        for(int m=0;m<3;++m)
+            if(!std::isfinite(body_motion[m][lane]))return 0;
+        for(int w=0;w<4;++w) {
+            slip_excess[w][lane]=
+                result.maximum_longitudinal_slip_excess_derivative[w][lane];
+            if(!std::isfinite(slip_excess[w][lane]))return 0;
+        }
+    }
+    return 1;
+}
+
 int vehicle_model_longitudinal_slip_excess(
     const MpcModelState_t *state,
     double excess_speed_mps[4],
@@ -228,6 +300,61 @@ int vehicle_model_longitudinal_slip_excess(
     return unity_source_plant_slip_excess_c(
         source_state, slip, excess_speed_mps,
         excess_derivative_wheel_omega);
+}
+
+int vehicle_model_source_lateral_slip(
+    const MpcModelState_t *state, double slip[4],
+    double derivative[4][MPC_OPT_PHYSICAL_NX])
+{
+    if(!state || !slip)return 0;
+    MpcModelState_t prepared=*state;
+    if(!vehicle_model_initialize_plant_state(&prepared))return 0;
+    double src[UNITY_SOURCE_PLANT_STATE_SIZE]{};
+    write_source_plant_state(&prepared,src);
+    if(!unity_source_plant_instantaneous_lateral_slip_c(src,slip))
+        return 0;
+    if(!derivative)return 1;
+    for(int wheel=0;wheel<4;++wheel)
+        for(int col=0;col<MPC_OPT_PHYSICAL_NX;++col)
+            derivative[wheel][col]=0.;
+    constexpr int coords[]={
+        MPC_OPT_IDX_U,MPC_OPT_IDX_V,MPC_OPT_IDX_R,
+        MPC_OPT_IDX_ACTUAL_STEERING_ANGLE,
+        MPC_OPT_IDX_BODY_HEIGHT,MPC_OPT_IDX_BODY_HEIGHT_RATE,
+        MPC_OPT_IDX_ROLL,MPC_OPT_IDX_ROLL_RATE,
+        MPC_OPT_IDX_PITCH,MPC_OPT_IDX_PITCH_RATE};
+    constexpr int source_coords[]={
+        UNITY_SOURCE_U,UNITY_SOURCE_V,UNITY_SOURCE_YAW_RATE,
+        UNITY_SOURCE_PHYSICAL_STEERING,
+        UNITY_SOURCE_BODY_HEIGHT,UNITY_SOURCE_BODY_HEIGHT_RATE,
+        UNITY_SOURCE_ROLL,UNITY_SOURCE_ROLL_RATE,
+        UNITY_SOURCE_PITCH,UNITY_SOURCE_PITCH_RATE};
+    for(int entry=0;entry<10;++entry) {
+        const int model_col=coords[entry];
+        const int physical_col=source_coords[entry];
+        const double h=model_col==MPC_OPT_IDX_BODY_HEIGHT ? 1.e-5 :
+            model_col==MPC_OPT_IDX_ACTUAL_STEERING_ANGLE ? 1.e-5 : 1.e-4;
+        double plus[UNITY_SOURCE_PLANT_STATE_SIZE]{};
+        double minus[UNITY_SOURCE_PLANT_STATE_SIZE]{};
+        std::copy_n(src,UNITY_SOURCE_PLANT_STATE_SIZE,plus);
+        std::copy_n(src,UNITY_SOURCE_PLANT_STATE_SIZE,minus);
+        plus[physical_col]+=h;minus[physical_col]-=h;
+        if(model_col==MPC_OPT_IDX_R) {
+            // Stored QP v is rear-axle v, but source uses centre-of-mass v.
+            // An r perturbation also moves the source COM lateral velocity.
+            plus[UNITY_SOURCE_V]+=h*kComForwardFromRearAxleM;
+            minus[UNITY_SOURCE_V]-=h*kComForwardFromRearAxleM;
+        }
+        double plus_slip[4]{},minus_slip[4]{};
+        if(!unity_source_plant_instantaneous_lateral_slip_c(
+              plus,plus_slip) ||
+           !unity_source_plant_instantaneous_lateral_slip_c(
+              minus,minus_slip))return 0;
+        for(int wheel=0;wheel<4;++wheel)
+            derivative[wheel][model_col]=
+                (plus_slip[wheel]-minus_slip[wheel])/(2.*h);
+    }
+    return 1;
 }
 
 int vehicle_model_initialize_plant_state(MpcModelState_t *state)
