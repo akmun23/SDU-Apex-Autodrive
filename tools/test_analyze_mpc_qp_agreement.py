@@ -4,7 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from analyze_mpc_qp_agreement import report
+from analyze_mpc_qp_agreement import report, accepted_cost_precision_gate
 
 class AgreementAuditTests(unittest.TestCase):
     def test_full_step_false_safe_rejection_and_cost_error(self):
@@ -19,7 +19,11 @@ class AgreementAuditTests(unittest.TestCase):
                               racing_cost_model_valid=True,
                               qp_predicted_racing_cost_change=-10.,
                               exact_source_racing_cost_change=-4.,
-                              racing_cost_prediction_error=6.),
+                              racing_cost_prediction_error=6.,
+                              accepted_racing_cost_model_valid=True,
+                              accepted_qp_predicted_racing_cost_change=-3.,
+                              accepted_exact_source_racing_cost_change=-2.,
+                              accepted_racing_cost_prediction_error=1.),
                          dict(valid=False)])),
             dict(status="waiting_for_solver_budget",command_published=False,
                  solver=dict(native_source_sqp_enabled=True,
@@ -55,7 +59,27 @@ class AgreementAuditTests(unittest.TestCase):
         self.assertEqual(data["cost_model"]["absolute_cost_error"]["median"],5.)
         self.assertEqual(data["per_pass"]["SQP_1"]["racing_cost_prediction_samples"],1)
         self.assertEqual(data["per_pass"]["SQP_2"]["racing_cost_prediction_samples"],0)
+        self.assertEqual(data["accepted_cost_model"]["samples"],1)
+        self.assertEqual(data["accepted_cost_model"]["absolute_cost_error"]["median"],1.)
+        self.assertEqual(data["accepted_cost_model"]["absolute_cost_error"]["p99"],1.)
+        self.assertEqual(data["per_pass"]["SQP_1"][
+            "accepted_racing_cost_prediction_abs_error"]["median"],1.)
         self.assertEqual(len(data["worst_disagreement_epochs"]),1)
+
+    def test_precision_gate_rejects_missing_insufficient_and_bad_model(self):
+        summary={"accepted_cost_model":{"absolute_cost_error":None}}
+        self.assertFalse(accepted_cost_precision_gate(
+            summary,max_p99=100.,minimum_samples=1)[0])
+        summary["accepted_cost_model"]["absolute_cost_error"]={
+            "count":58,"p99":56.03903,
+        }
+        self.assertFalse(accepted_cost_precision_gate(
+            summary,max_p99=100.,minimum_samples=100)[0])
+        self.assertTrue(accepted_cost_precision_gate(
+            summary,max_p99=100.,minimum_samples=58)[0])
+        summary["accepted_cost_model"]["absolute_cost_error"]["p99"]=101.
+        self.assertFalse(accepted_cost_precision_gate(
+            summary,max_p99=100.,minimum_samples=58)[0])
 
     def test_uninstrumented_is_not_misclassified_as_agreement(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -66,6 +90,7 @@ class AgreementAuditTests(unittest.TestCase):
         self.assertFalse(data["model_agreement_instrumented"])
         self.assertEqual(data["per_pass"]["SQP_1"]["samples"],0)
         self.assertIsNone(data["per_pass"]["SQP_1"]["wall_prediction_abs_error_m2"])
+        self.assertIsNone(data["accepted_cost_model"]["absolute_cost_error"])
 
     def test_rejects_invalid_data_and_thresholds(self):
         with tempfile.TemporaryDirectory() as folder:

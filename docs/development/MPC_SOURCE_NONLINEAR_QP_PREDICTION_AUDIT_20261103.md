@@ -39,6 +39,36 @@ Each candidate retained exact source scoring and source output certification, bu
 
 A temporary incorrect BFGS/GN branch introduced during experiment cleanup was detected by snapshot replay parity, corrected, retested and did not remain in the working tree.
 
+## Precision target follow-up: source cost P99 (2026-11-03)
+
+The required threshold is 99th-percentile absolute error below 100 weighted objective units. The unaccepted full QP step must be distinguished from the actual nonlinear accepted step.
+
+On 29 recorded sequential source-model epochs (58 first/second SQP samples), nearest-rank percentiles:
+
+| Exact source comparison | P95 absolute error | P99 absolute error | Incorrect cost-change sign |
+| --- | ---: | ---: | ---: |
+| Initial full QP step | 2617.062 | **8062.825** | **25/58** |
+| Actual accepted source step | 43.635 | **56.039** | **0/58** |
+
+The accepted-step P99 meets the numerical threshold on this limited offline corpus; the full-step QP is not accurate. Neither is Unity/ROS live qualification. Weighted objective units are not meters, radians or a percentage. The severe physical error remains the approximately 0.335 m true-source wall-prediction defect at corner 16.
+
+### Checked potential explanations and fixes
+
+- Full-source forward sensitivity gradients agree reasonably with small source finite differences on routine states (P95 scaled error about 0.8–5.6%), but in high-slip transitions the P95 scaled discrepancy reached about 18.2% at normalized perturbation 0.001. Changing perturbation size changes the finite difference around nonsmooth source branches.
+- Double rather than float propagation of all 20 source-AD derivative lanes did not materially improve finite-difference parity and increased computation. The change was reverted.
+- Levenberg damping of 10,000 reduced the correctly measured full-step racing cost P99 to 54.085 across 58 offline comparisons, but reduced median true-racing-objective improvement per solve from 18.567 to 9.995 units and preserved only 33/36 feasible snapshots. This was not a valid high-performance nonlinear model fix; reverted.
+- Same-iteration source-measured directional Hessian refitting did not improve feasibility and worsened P99 accepted cost accuracy from 56.039 to 169.428. Reverted.
+- These results demonstrate that the dominant problem is a locally accurate model extrapolated across nonlinear and nondifferentiable steering/contact regimes, not merely floating point precision or the number of IPM iterations.
+
+### Safely retained
+
+- Passive ROS diagnostics separately report QP versus exact source racing-cost predictions at both the initial full step and the actually accepted alpha for each of the first two SQP passes, with validity flags. The Phase-I feasibility QP is never labeled as a racing-cost model.
+- The run-level model-agreement analyzer reports P99 and has an optional hard gate: --max-accepted-cost-error-p99 100 --min-accepted-cost-samples 100. Fewer samples do not count as a pass.
+- No diagnostic adds another physical rollout in the real-time callback, changes vehicle input limits, introduces low-throttle initialization, or publishes fallback output.
+- 42/42 exact frozen source-SQP output parity checks and 22/22 C++ CTest suites passed; the Python analyzer passed 4/4 tests.
+
+The source-exact nonlinear controller is NOT yet proven to run ten clean Unity laps or have globally accurate full-step QP predictions. The next implementation must account for full source-stage/Lagrangian second derivatives and active footprint constraint curvature, with a globally convergent nonlinear SQP/multiple-shooting formulation. Require full-step and accepted-step model accuracy, true physical feasibility, racing-cost improvement, and 22 ms callback-to-publication deadlines jointly. Do not accept a slow heavily regularized QP merely because its full-step error is small.
+
 ## Necessary next mathematical implementation
 
 1. Add discrete-source costate-weighted second derivatives to the SQP Lagrangian, not arbitrary diagonal/rank-one Hessian patches. In a true SQP, the curvature comprises both objective residual Gauss–Newton terms AND the second derivatives of source dynamics and active footprint constraints. Evaluate independent finite-step true-cost and physical-clearance prediction accuracy, not merely local Jacobian parity.

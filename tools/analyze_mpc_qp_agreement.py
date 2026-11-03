@@ -40,6 +40,7 @@ def summary(values: list[float]) -> dict[str,float] | None:
         "count":len(ordered),
         "median":round(statistics.median(ordered),6),
         "p95":round(ordered[math.ceil(.95*len(ordered))-1],6),
+        "p99":round(ordered[math.ceil(.99*len(ordered))-1],6),
         "max":round(ordered[-1],6),
     }
 
@@ -50,6 +51,7 @@ def report(path: pathlib.Path, *, wall_threshold_m2: float=1.e-5,
     statuses=collections.Counter()
     stages={i:[] for i in range(2)}
     cost=[]
+    accepted_cost=[]
     init=[]
     bad_streak=0
     worst_bad_streak=0
@@ -112,6 +114,11 @@ def report(path: pathlib.Path, *, wall_threshold_m2: float=1.e-5,
                         racing_cost_prediction_error=(
                             number(step.get("racing_cost_prediction_error"))
                             if step.get("racing_cost_model_valid") is True else None),
+                        accepted_racing_cost_model_valid=(
+                            step.get("accepted_racing_cost_model_valid") is True),
+                        accepted_racing_cost_prediction_error=(
+                            number(step.get("accepted_racing_cost_prediction_error"))
+                            if step.get("accepted_racing_cost_model_valid") is True else None),
                         false_safe_prediction=pred<=wall_threshold_m2 and
                             exact>wall_threshold_m2,
                         large_clearance_defect=defect>defect_threshold_m,
@@ -123,6 +130,16 @@ def report(path: pathlib.Path, *, wall_threshold_m2: float=1.e-5,
                         if predicted is not None and actual is not None:
                             full_cost_recorded=True
                             cost.append(dict(
+                                line=lineno,stamp_ns=stamp,progress_m=progress,
+                                pass_index=idx,predicted_delta=predicted,
+                                actual_delta=actual,error=actual-predicted))
+                    if event["accepted_racing_cost_model_valid"]:
+                        predicted=number(step.get(
+                            "accepted_qp_predicted_racing_cost_change"))
+                        actual=number(step.get(
+                            "accepted_exact_source_racing_cost_change"))
+                        if predicted is not None and actual is not None:
+                            accepted_cost.append(dict(
                                 line=lineno,stamp_ns=stamp,progress_m=progress,
                                 pass_index=idx,predicted_delta=predicted,
                                 actual_delta=actual,error=actual-predicted))
@@ -168,6 +185,9 @@ def report(path: pathlib.Path, *, wall_threshold_m2: float=1.e-5,
             racing_cost_prediction_abs_error=summary([
                 abs(e["racing_cost_prediction_error"]) for e in events
                 if e["racing_cost_prediction_error"] is not None]),
+            accepted_racing_cost_prediction_abs_error=summary([
+                abs(e["accepted_racing_cost_prediction_error"]) for e in events
+                if e["accepted_racing_cost_prediction_error"] is not None]),
         )
     traces.sort(
         key=lambda e:(e["false_safe_prediction"],abs(e["signed_wall_prediction_error_m2"]),
@@ -181,6 +201,10 @@ def report(path: pathlib.Path, *, wall_threshold_m2: float=1.e-5,
         cost_model=dict(samples=len(cost),
             absolute_cost_error=summary([abs(e["error"]) for e in cost]),
             sign_mismatch_count=sum(e["predicted_delta"]*e["actual_delta"]<0 for e in cost)),
+        accepted_cost_model=dict(samples=len(accepted_cost),
+            absolute_cost_error=summary([abs(e["error"]) for e in accepted_cost]),
+            sign_mismatch_count=sum(
+                e["predicted_delta"]*e["actual_delta"]<0 for e in accepted_cost)),
         initialization=dict(trials=len(init),
             selected=sum(e["used"] for e in init),
             additional_us=summary([e["extra_us"] for e in init
@@ -189,12 +213,39 @@ def report(path: pathlib.Path, *, wall_threshold_m2: float=1.e-5,
         interpretation="QP-predicted safe is NOT independent source/Unity safety certification",
     )
 
+def accepted_cost_precision_gate(
+    result: dict[str,Any], *, max_p99: float=100.,
+    minimum_samples: int=100,
+) -> tuple[bool,str]:
+    if not math.isfinite(max_p99) or max_p99<=0. or minimum_samples<1:
+        raise ValueError("invalid accepted source cost precision gate")
+    measured=result["accepted_cost_model"]["absolute_cost_error"]
+    if measured is None or measured["count"]<minimum_samples:
+        count=measured["count"] if measured is not None else 0
+        return False,(
+            f"insufficient source-exact accepted cost samples: "
+            f"{count}/{minimum_samples}; not a passing model"
+        )
+    p99=measured["p99"]
+    if p99>max_p99:
+        return False,(
+            f"accepted cost p99 {p99:.6g} exceeds limit {max_p99:.6g}"
+        )
+    return True,(
+        f"accepted cost p99 {p99:.6g} <= {max_p99:.6g} "
+        f"over {measured['count']} source-exact comparisons"
+    )
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("diagnostics",type=pathlib.Path)
     p.add_argument("--out",type=pathlib.Path)
     p.add_argument("--wall-threshold-m2",type=float,default=1.e-5)
     p.add_argument("--defect-threshold-m",type=float,default=.05)
+    p.add_argument("--max-accepted-cost-error-p99",type=float,
+                   help="fail if empirical p99 exceeds this weighted-cost limit")
+    p.add_argument("--min-accepted-cost-samples",type=int,default=100,
+                   help="fail if fewer accepted source comparisons; default 100")
     args=p.parse_args()
     result=report(args.diagnostics,wall_threshold_m2=args.wall_threshold_m2,
                   defect_threshold_m=args.defect_threshold_m)
@@ -205,6 +256,14 @@ def main():
     print(rendered)
     if not result["model_agreement_instrumented"]:
         print("WARNING: diagnostic source contains no full-step model-agreement instrumentation",flush=True)
+    if args.max_accepted_cost_error_p99 is not None:
+        import sys
+        passed,message=accepted_cost_precision_gate(
+            result,max_p99=args.max_accepted_cost_error_p99,
+            minimum_samples=args.min_accepted_cost_samples)
+        print(("PASS" if passed else "FAIL")+": "+message,file=sys.stderr)
+        if not passed:
+            raise SystemExit(1)
 
 if __name__=="__main__":
     main()
