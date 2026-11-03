@@ -7,6 +7,13 @@
 #include <cmath>
 #include <chrono>
 #include <memory>
+#if defined(SDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES) && defined(_OPENMP)
+#include <omp.h>
+#include <cstdlib>
+#if defined(__linux__)
+#include <sched.h>
+#endif
+#endif
 
 namespace sdu_apex::source_sqp {
 namespace {
@@ -119,14 +126,27 @@ bool full_source_derivatives(
        !std::isfinite(normalized_step)||normalized_step<=0.||
        decision_count<1||decision_count>2*N)
         return false;
-    // One scratch allocation per solver thread, NOT per 25 ms callback.
-    // No cross-thread sharing. The causal trace entry at the start of each
-    // dual batch is reset before use; every subsequent tangent is assigned.
-    static thread_local auto trace=std::make_unique<Trace>();
-    static thread_local auto positive=std::make_unique<MpcRtiNominal_t>();
-    static thread_local auto negative=std::make_unique<MpcRtiNominal_t>();
+    // Each 20-column batch is causally independent of the others.
+    // Their source rolls and tangent scoring can run on separate threads;
+    // writes to output matrices are restricted to disjoint column ranges.
+    // Workers own persistent scratch and never share nominal buffers.
+    struct BatchMeasurement {
+        double dual_plant_us{};
+        double tangent_scoring_us{};
+        int dual_plant_intervals{};
+        int score_evaluations{};
+        bool deadline_exhausted{};
+    };
     const int batches=(decision_count+L-1)/L;
-    for(int batch=0;batch<batches;++batch) {
+    std::array<BatchMeasurement,3> measurements{};
+    std::array<unsigned char,3> succeeded{};
+
+    const auto evaluate_batch=[&](int batch)->bool {
+        static thread_local auto trace=std::make_unique<Trace>();
+        static thread_local auto positive=std::make_unique<MpcRtiNominal_t>();
+        static thread_local auto negative=std::make_unique<MpcRtiNominal_t>();
+        auto &measurement=measurements[batch];
+
         // Every lane in this batch belongs to a command from stage
         // batch*(20/2) onward. Before that stage the exact source state
         // cannot depend on ANY variable in the batch, so zero is the
@@ -140,7 +160,7 @@ bool full_source_derivatives(
         for(int stage=first_affected_stage;stage<N;++stage) {
             if(absolute_deadline_us>0. &&
                monotonic_us()>=absolute_deadline_us) {
-                out->deadline_exhausted=true;
+                measurement.deadline_exhausted=true;
                 return false;
             }
             if(!baseline->states[stage+1].incoming_tracking_jacobian_valid)
@@ -167,8 +187,8 @@ bool full_source_derivatives(
                 &baseline->states[stage].plant,&baseline->controls[stage],
                 dt,seeds,control_seeds,next,body,slip))
                 return false;
-            out->dual_plant_us+=microseconds_since(dual_start);
-            ++out->dual_plant_intervals;
+            measurement.dual_plant_us+=microseconds_since(dual_start);
+            ++measurement.dual_plant_intervals;
             for(int lane=0;lane<L;++lane) {
                 const auto &previous=(*trace)[stage][lane];
                 auto &following=(*trace)[stage+1][lane];
@@ -202,7 +222,7 @@ bool full_source_derivatives(
             if(j>=decision_count)break;
             if(absolute_deadline_us>0. &&
                monotonic_us()>=absolute_deadline_us) {
-                out->deadline_exhausted=true;
+                measurement.deadline_exhausted=true;
                 return false;
             }
             double cost_plus=NAN,cost_minus=NAN;
@@ -215,8 +235,8 @@ bool full_source_derivatives(
                     trajectory,trajectory_count,lap_length,*cfg,
                     negative.get(),&cost_minus,wall_minus))
                 return false;
-            out->tangent_scoring_us+=microseconds_since(score_start);
-            out->score_evaluations+=2;
+            measurement.tangent_scoring_us+=microseconds_since(score_start);
+            measurement.score_evaluations+=2;
             out->gradient[j]=(cost_plus-cost_minus)/(2.*normalized_step);
             out->positive_diagonal_curvature[j]=std::clamp(
                 (cost_plus-2.*baseline_cost+cost_minus)/
@@ -250,7 +270,46 @@ bool full_source_derivatives(
         }
         // No full-trace clear: future batches reset only their entry stage,
         // and the score ignores all stages before the changed command.
+        return true;
+    };
+#if defined(SDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES) && defined(_OPENMP)
+    // Never initialize OpenMP just to run a serialized region on a pinned
+    // one-core controller. First-use runtime overhead can miss the deadline.
+    bool enough_cpus = false;
+#if defined(__linux__)
+    cpu_set_t allowed_cpus;
+    CPU_ZERO(&allowed_cpus);
+    if(sched_getaffinity(0,sizeof(allowed_cpus),&allowed_cpus)==0)
+        enough_cpus=CPU_COUNT(&allowed_cpus)>=3;
+#endif
+    // A bound OpenMP master may itself be pinned to one CPU, while its
+    // configured worker places span three available cores.
+    if(!enough_cpus && std::getenv("OMP_PLACES"))
+        enough_cpus=omp_get_num_places()>=3;
+    // World sweep callbacks are potentially stateful: keep serial unless
+    // their thread safety is explicitly established.
+    if(enough_cpus && batches>1 && !cfg->model.world_sweep_check) {
+#pragma omp parallel for schedule(static,1) num_threads(3)
+        for(int batch=0;batch<batches;++batch)
+            succeeded[batch]=evaluate_batch(batch)?1:0;
+    } else
+#endif
+    {
+        // Exact same source arithmetic, without OpenMP startup overhead.
+        for(int batch=0;batch<batches;++batch)
+            succeeded[batch]=evaluate_batch(batch)?1:0;
     }
-    return true;
+
+    bool all_valid=true;
+    for(int batch=0;batch<batches;++batch) {
+        const auto &measurement=measurements[batch];
+        out->dual_plant_us+=measurement.dual_plant_us;
+        out->dual_plant_intervals+=measurement.dual_plant_intervals;
+        out->tangent_scoring_us+=measurement.tangent_scoring_us;
+        out->score_evaluations+=measurement.score_evaluations;
+        out->deadline_exhausted|=measurement.deadline_exhausted;
+        all_valid &= succeeded[batch]!=0;
+    }
+    return all_valid;
 }
 } // namespace sdu_apex::source_sqp

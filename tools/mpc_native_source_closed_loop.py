@@ -57,6 +57,7 @@ def run(args):
             if args.suffix_fd:cmd.append("--suffix-fd")
             if args.adaptive:cmd.append("--adaptive")
             if args.forward_source:cmd.append("--full-source-forward")
+            if args.deadline_us:cmd.append(f"--deadline-us={args.deadline_us:.0f}")
             solved=call(cmd)
             accepted=solved["accepted"]
             if solved["prior_memory_loaded"] != (previous_memory is not None):
@@ -156,6 +157,8 @@ def main():
     p.add_argument("initial_case",type=Path)
     p.add_argument("--cycles",type=int,default=5)
     p.add_argument("--iterations",type=int,default=2)
+    p.add_argument("--deadline-us",type=float,default=0.,
+        help="absolute per-epoch solver deadline in microseconds; 0 disables")
     p.add_argument("--strategy",choices=("native","shift_seed"),default="native")
     p.add_argument("--terminal3",action="store_true",
         help="opt-in exact 3-stage held-command terminal continuation")
@@ -176,6 +179,8 @@ def main():
     p.add_argument("--source-merit",type=Path,default=Path("/tmp/mpc_source_merit_persistent"))
     a=p.parse_args()
     if not 1<=a.cycles<=100 or not 1<=a.iterations<=8:p.error("invalid cycles/iterations")
+    if a.deadline_us and not 1000<=a.deadline_us<=1e6:
+        p.error("deadline must be between 1000 and 1000000 microseconds")
     run(a)
 
 if __name__=="__main__":

@@ -1,6 +1,12 @@
 #include "mpc_source_reduced_sqp.hpp"
 #include "mpc_source_sensitivity.hpp"
 
+// The 60-variable dense source QP is intentionally single-threaded.
+// The source-plant tangent batches use three independent OpenMP workers,
+// but Eigen spawning an additional QP worker team oversubscribes pinned
+// control CPUs and introduces multi-millisecond (or worse) timing spikes.
+// This changes scheduling only, not the physical model or QP arithmetic.
+#define EIGEN_DONT_PARALLELIZE
 #include <Eigen/Dense>
 #include <algorithm>
 #include <chrono>

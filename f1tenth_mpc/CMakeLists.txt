@@ -71,6 +71,16 @@ endif()
 if(SDU_APEX_MPC_RICCATI_PROFILE)
   target_compile_definitions(mpc_core PRIVATE MPC_ENABLE_RICCATI_PROFILE)
 endif()
+option(SDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES
+  "Evaluate independent exact-source derivative batches concurrently" OFF)
+if(SDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES)
+  if(NOT OpenMP_CXX_FOUND)
+    message(FATAL_ERROR "Parallel source sensitivities require OpenMP")
+  endif()
+  target_compile_definitions(mpc_core PRIVATE
+    SDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES=1)
+endif()
+
 set_target_properties(mpc_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # On-demand saved-state replay against the exact production RTI core. This
