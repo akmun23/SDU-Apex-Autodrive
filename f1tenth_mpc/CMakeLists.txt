@@ -112,6 +112,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/mpc_bag_solver_replay.cpp")
     ../tools/mpc_native_source_sqp_replay.cpp)
   target_include_directories(mpc_native_source_sqp_replay PRIVATE src)
   target_link_libraries(mpc_native_source_sqp_replay PRIVATE mpc_core)
+  add_executable(mpc_source_live_fixture EXCLUDE_FROM_ALL
+    ../tools/mpc_source_live_fixture.cpp)
+  target_link_libraries(mpc_source_live_fixture PRIVATE mpc_core)
   add_executable(mpc_offline_source_merit EXCLUDE_FROM_ALL
     ../tools/mpc_offline_source_merit.cpp)
   target_include_directories(mpc_offline_source_merit PRIVATE src)
