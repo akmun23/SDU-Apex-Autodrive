@@ -128,6 +128,52 @@ int vehicle_model_full_source_interval_sensitivities(
     double body_motion[3][20],
     double slip_excess[4][20]);
 
+/* Full-source second-order directional transition oracle.
+ *
+ * For the true 26-dimensional Unity-derived physical state x and absolute
+ * control u, evaluate f(x +/- epsilon*dx,u +/- epsilon*du) via the ORIGINAL
+ * 1 ms source plant and return symmetric directional first/second
+ * differences of the complete 25 ms physical transition. No fitted yaw,
+ * bicycle, slip, reduced-state, or QP surrogate is used.
+ *
+ * These are branch-local finite differences. They must NOT be interpreted
+ * as a smooth Hessian when the +/- perturbations cross steering slew,
+ * contact, or friction-curve switching surfaces. Both perturbed controls
+ * must be inside the REAL physical steering and positive-drive limits.
+ *
+ * The input state must already contain all initialized physical source
+ * channels. This oracle never publishes commands or changes a controller
+ * mode. Profiling can decide whether its per-stage source curvature
+ * calculations are appropriate for a production Lagrangian-HVP.
+ */
+typedef struct
+{
+    double first_source[UNITY_SOURCE_PLANT_STATE_SIZE];
+    double second_source[UNITY_SOURCE_PLANT_STATE_SIZE];
+    double first_body[3];
+    double second_body[3];
+    double first_slip_excess_mps[4];
+    double second_slip_excess_mps[4];
+} MpcSourceDirectionalSecondOrder_t;
+
+int vehicle_model_full_source_interval_directional_second_order(
+    const MpcModelState_t *state,const MpcModelControl_t *control,
+    float dt,
+    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double direction_control[2],double epsilon,
+    MpcSourceDirectionalSecondOrder_t *out);
+
+/* Branch-local analytic second directional source derivative. This is
+ * distinct from the three-probe independent FD oracle above. It computes
+ * the selected source branch in ONE full interval and keeps both physical
+ * steering and throttle directions coupled. No SQP switch or publication. */
+int vehicle_model_full_source_interval_analytic_directional_second_order(
+    const MpcModelState_t *state,const MpcModelControl_t *control,
+    float dt,
+    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double direction_control[2],
+    MpcSourceDirectionalSecondOrder_t *out);
+
 /* Seed missing wheel/suspension state for explicit cold-start use. */
 int vehicle_model_initialize_plant_state(MpcModelState_t *state);
 

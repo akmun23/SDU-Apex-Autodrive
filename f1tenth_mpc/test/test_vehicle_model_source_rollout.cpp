@@ -5,6 +5,7 @@
 #include "riccati_state_polygon.h"
 #include "mpc_robust_contour.hpp"
 #include "vehicle_model.h"
+#include "unity_source_plant.hpp"
 
 #include <gtest/gtest.h>
 
@@ -4024,4 +4025,225 @@ TEST(MpcRtiCommandIncrements, MultistageFeedbackPredictionUsesIncrementCoordinat
     std::copy_n(direct_next, MPC_RTI_NX, direct);
     std::copy_n(increment_next, MPC_RTI_NX, increments);
   }
+}
+
+
+// Source-Lagrangian Hessian-vector primitive: directionally differentiate
+// the ORIGINAL native 1 ms source transition (all wheel/suspension states).
+// A meaningful second derivative is branch-local; the function must reject
+// physical-bound crossings instead of silently fitting a clipped control.
+TEST(MpcSourceSecondOrder, ExactSourceDirectionalSymmetryAndLocalAdAgreement)
+{
+  MpcModelState_t state{};
+  state.u=2.4f;
+  state.v=.04f;
+  state.r=.08f;
+  state.actual_steering_angle=.04f;
+  state.e_y=.01f;
+  state.e_psi=.02f;
+  ASSERT_TRUE(vehicle_model_initialize_plant_state(&state));
+  const MpcModelControl_t control{.065f,.18f};
+  double direction[UNITY_SOURCE_PLANT_STATE_SIZE]{};
+  direction[UNITY_SOURCE_U]=.21;
+  direction[UNITY_SOURCE_V]=-.03;
+  direction[UNITY_SOURCE_YAW_RATE]=.07;
+  direction[UNITY_SOURCE_PHYSICAL_STEERING]=-.04;
+  direction[UNITY_SOURCE_WHEEL_OMEGA_FL]=.06;
+  direction[UNITY_SOURCE_BODY_HEIGHT]=.001;
+  const double direction_input[2]={.04,.055};
+  MpcSourceDirectionalSecondOrder_t forward{},reversed{};
+  ASSERT_TRUE(vehicle_model_full_source_interval_directional_second_order(
+      &state,&control,.025f,direction,direction_input,.01,&forward));
+  double negative_direction[UNITY_SOURCE_PLANT_STATE_SIZE]{};
+  for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i)
+      negative_direction[i]=-direction[i];
+  const double negative_input[2]={
+      -direction_input[0],-direction_input[1]};
+  ASSERT_TRUE(vehicle_model_full_source_interval_directional_second_order(
+      &state,&control,.025f,negative_direction,negative_input,.01,&reversed));
+  for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i) {
+      EXPECT_NEAR(forward.first_source[i],-reversed.first_source[i],1e-8);
+      EXPECT_NEAR(forward.second_source[i],reversed.second_source[i],1e-8);
+  }
+  for(int i=0;i<3;++i) {
+      EXPECT_NEAR(forward.first_body[i],-reversed.first_body[i],1e-8);
+      EXPECT_NEAR(forward.second_body[i],reversed.second_body[i],1e-8);
+  }
+  // Compare the exact finite-difference directional first derivative
+  // against the existing 20-lane FULL source automatic differentiation.
+  double seeds[26][20]{},control_seeds[2][20]{};
+  double source_jacobian_direction[26][20]{};
+  double body_jacobian_direction[3][20]{};
+  double slip_jacobian_direction[4][20]{};
+  for(int i=0;i<26;++i)seeds[i][0]=direction[i];
+  control_seeds[0][0]=direction_input[0];
+  control_seeds[1][0]=direction_input[1];
+  ASSERT_TRUE(vehicle_model_full_source_interval_sensitivities(
+      &state,&control,.025f,seeds,control_seeds,
+      source_jacobian_direction,body_jacobian_direction,
+      slip_jacobian_direction));
+  for(int i:{UNITY_SOURCE_U,UNITY_SOURCE_V,UNITY_SOURCE_YAW_RATE,
+             UNITY_SOURCE_PHYSICAL_STEERING}) {
+      const double exact_fd=forward.first_source[i];
+      const double local_ad=source_jacobian_direction[i][0];
+      EXPECT_NEAR(exact_fd,local_ad,
+          .05*std::max(1.,std::abs(exact_fd)))
+          <<"source coordinate "<<i;
+  }
+}
+
+TEST(MpcSourceSecondOrder, RejectsPerturbationsOutsidePhysicalDriveBounds)
+{
+  MpcModelState_t state{};
+  state.u=2.f;
+  ASSERT_TRUE(vehicle_model_initialize_plant_state(&state));
+  double direction[UNITY_SOURCE_PLANT_STATE_SIZE]{};
+  const double steering_delta[2]={.02,0.};
+  const double throttle_delta[2]={0.,.1};
+  MpcSourceDirectionalSecondOrder_t curvature{};
+  MpcModelControl_t at_steer_limit{.5235987756f,.2f};
+  EXPECT_FALSE(vehicle_model_full_source_interval_directional_second_order(
+      &state,&at_steer_limit,.025f,direction,steering_delta,.01,
+      &curvature));
+  MpcModelControl_t at_positive_drive_min{.02f,MPC_THROTTLE_MIN_DRIVE};
+  EXPECT_FALSE(vehicle_model_full_source_interval_directional_second_order(
+      &state,&at_positive_drive_min,.025f,direction,throttle_delta,.01,
+      &curvature));
+  const double zero_delta[2]={0.,0.};
+  MpcModelControl_t inside{.02f,.2f};
+  ASSERT_TRUE(vehicle_model_full_source_interval_directional_second_order(
+      &state,&inside,.025f,direction,zero_delta,.01,&curvature));
+  for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i) {
+      EXPECT_DOUBLE_EQ(curvature.first_source[i],0.);
+      EXPECT_DOUBLE_EQ(curvature.second_source[i],0.);
+  }
+}
+
+
+TEST(MpcSourceSecondOrder, ExactBranchLocalCurvatureMatchesIndependentSmoothSource)
+{
+  MpcModelState_t state{};
+  state.u=2.4f;state.v=.04f;state.r=.08f;
+  state.actual_steering_angle=.04f;
+  state.e_y=.01f;state.e_psi=.02f;
+  ASSERT_TRUE(vehicle_model_initialize_plant_state(&state));
+  const MpcModelControl_t control{.065f,.18f};
+  double direction[UNITY_SOURCE_PLANT_STATE_SIZE]{};
+  direction[UNITY_SOURCE_U]=.21;
+  direction[UNITY_SOURCE_V]=-.03;
+  direction[UNITY_SOURCE_YAW_RATE]=.07;
+  direction[UNITY_SOURCE_PHYSICAL_STEERING]=-.04;
+  direction[UNITY_SOURCE_WHEEL_OMEGA_FL]=.06;
+  direction[UNITY_SOURCE_BODY_HEIGHT]=.001;
+  const double du[2]={.04,.055};
+  MpcSourceDirectionalSecondOrder_t analytic{},independent{};
+  ASSERT_TRUE(vehicle_model_full_source_interval_analytic_directional_second_order(
+      &state,&control,.025f,direction,du,&analytic));
+  // Analytic selected-branch second derivatives must agree with centered
+  // exact 1ms source evaluations as h->0 where the source is differentiable.
+  ASSERT_TRUE(vehicle_model_full_source_interval_directional_second_order(
+      &state,&control,.025f,direction,du,1.e-4,&independent));
+  double seeds[26][20]{},dcontrol[2][20]{};
+  double ad[26][20]{},body[3][20]{},slip[4][20]{};
+  for(int i=0;i<26;++i)seeds[i][0]=direction[i];
+  dcontrol[0][0]=du[0];dcontrol[1][0]=du[1];
+  ASSERT_TRUE(vehicle_model_full_source_interval_sensitivities(
+      &state,&control,.025f,seeds,dcontrol,ad,body,slip));
+  for(int i : {UNITY_SOURCE_U,UNITY_SOURCE_V,UNITY_SOURCE_YAW_RATE,
+               UNITY_SOURCE_PHYSICAL_STEERING}) {
+    const double a=analytic.first_source[i];
+    const double d=independent.first_source[i];
+    EXPECT_NEAR(a,ad[i][0],1.e-3*std::max(1.,std::abs(a)));
+    EXPECT_NEAR(a,d,.03*std::max(1.,std::abs(a)))
+        <<"first source state "<<i;
+    EXPECT_NEAR(analytic.second_source[i],
+                independent.second_source[i],
+                .15*std::max(1.,std::abs(analytic.second_source[i])))
+        <<"second source state "<<i;
+  }
+}
+
+TEST(MpcSourceSecondOrder, OneMillisecondSourceSplitReproducesFullInterval)
+{
+  MpcModelState_t state{};
+  state.u=3.22f;state.v=.06f;state.r=-1.47f;
+  state.actual_steering_angle=-.22f;
+  state.e_y=.02f;state.e_psi=.11f;
+  ASSERT_TRUE(vehicle_model_initialize_plant_state(&state));
+  UnitySourcePlantInputC input{};
+  input.state[UNITY_SOURCE_U]=state.u;
+  input.state[UNITY_SOURCE_V]=state.v+.15532*state.r;
+  input.state[UNITY_SOURCE_YAW_RATE]=state.r;
+  input.state[UNITY_SOURCE_PHYSICAL_STEERING]=
+      state.actual_steering_angle;
+  for(int i=0;i<MPC_PLANT_INTERNAL_STATE_COUNT;++i) {
+    const int index=i<10?3+i:i+4;
+    input.state[index]=state.source_plant_internal_state[i];
+  }
+  input.steering_target_rad=-.29;
+  input.throttle_normalized=.23;
+  input.suspension_history_initialized=
+      state.source_suspension_history_initialized;
+  UnitySourcePlantOutputC whole{};
+  ASSERT_TRUE(unity_source_plant_step_c(&input,.025,&whole));
+  UnitySourcePlantOutputC last{};
+  for(int microstep=0;microstep<25;++microstep) {
+    ASSERT_TRUE(unity_source_plant_step_c(&input,.001,&last));
+    std::copy_n(last.state,UNITY_SOURCE_PLANT_STATE_SIZE,input.state);
+    std::copy_n(last.wheel_rotation_angle_rad,4,
+                input.wheel_rotation_angle_rad);
+    input.suspension_history_initialized=
+        last.suspension_history_initialized;
+  }
+  for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i)
+      EXPECT_DOUBLE_EQ(last.state[i],whole.state[i])
+          <<"physical source coordinate "<<i;
+  for(int i=0;i<4;++i)
+      EXPECT_DOUBLE_EQ(last.wheel_rotation_angle_rad[i],
+                       whole.wheel_rotation_angle_rad[i]);
+}
+
+
+TEST(MpcSourceSecondOrder, InnerSubstepBranchDiagnosticsNeverChangePlant)
+{
+  f1tenth_mpc::UnitySourcePlantState initial{};
+  initial.u_mps=3.2;
+  initial.v_mps=.11;
+  initial.yaw_rate_radps=-1.4;
+  initial.physical_steering_rad=-.17;
+  initial.body_height_m=.1;
+  initial.suspension_history_initialized=false;
+  initial.wheel_omega_radps={53.,54.,52.,53.};
+  const f1tenth_mpc::UnitySourcePlantInput command{-.29,.23};
+  f1tenth_mpc::UnitySourcePlantOutput ordinary{},instrumented{};
+  std::vector<f1tenth_mpc::UnitySourceBranchObservation> branches;
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step(
+      initial,command,.025,&ordinary));
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_trace_branches(
+      initial,command,.025,&branches,&instrumented));
+  ASSERT_EQ(branches.size(),500u);
+  EXPECT_DOUBLE_EQ(ordinary.state.u_mps,instrumented.state.u_mps);
+  EXPECT_DOUBLE_EQ(ordinary.state.v_mps,instrumented.state.v_mps);
+  EXPECT_DOUBLE_EQ(ordinary.state.yaw_rate_radps,
+                   instrumented.state.yaw_rate_radps);
+  EXPECT_DOUBLE_EQ(ordinary.state.physical_steering_rad,
+                   instrumented.state.physical_steering_rad);
+  EXPECT_DOUBLE_EQ(ordinary.integrated_yaw_delta_rad,
+                   instrumented.integrated_yaw_delta_rad);
+  EXPECT_DOUBLE_EQ(ordinary.integrated_body_forward_displacement_m,
+                   instrumented.integrated_body_forward_displacement_m);
+  EXPECT_DOUBLE_EQ(ordinary.integrated_body_lateral_displacement_m,
+                   instrumented.integrated_body_lateral_displacement_m);
+  for(std::size_t w=0;w<4;++w) {
+    EXPECT_DOUBLE_EQ(ordinary.state.wheel_omega_radps[w],
+                     instrumented.state.wheel_omega_radps[w]);
+    EXPECT_DOUBLE_EQ(ordinary.state.suspension_jounce_m[w],
+                     instrumented.state.suspension_jounce_m[w]);
+  }
+  EXPECT_EQ(branches.front().fixed_tick,0);
+  EXPECT_EQ(branches.front().vehicle_substep,0);
+  EXPECT_EQ(branches.front().vehicle_substep_count,5);
+  EXPECT_EQ(branches.back().fixed_tick,24);
+  EXPECT_EQ(branches.back().vehicle_substep,4);
+  EXPECT_EQ(branches.back().wheel,3);
 }

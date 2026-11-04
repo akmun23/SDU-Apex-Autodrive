@@ -2,6 +2,7 @@
 #define F1TENTH_MPC_UNITY_SOURCE_PLANT_HPP
 
 #include <array>
+#include <vector>
 
 namespace f1tenth_mpc {
 
@@ -113,6 +114,27 @@ struct UnitySourcePlantSensitivity {
       maximum_longitudinal_slip_excess_derivative{};
 };
 
+// Exact branch-local directional second derivative of the full 1 ms source
+// plant integrated over one MPC stage. All 26 physical coordinates and
+// both command targets participate in the same fixed source branch. The
+// result is one selected piecewise Hessian direction; at force/contact
+// switches the global second derivative need not exist. Offline-first API.
+struct UnitySourcePlantDirectionalCurvature {
+  std::array<double,kUnityPlantSensitivityStateSize> first_state{};
+  std::array<double,kUnityPlantSensitivityStateSize> second_state{};
+  std::array<double,3> first_body{};
+  std::array<double,3> second_body{};
+  std::array<double,4> first_slip_excess{};
+  std::array<double,4> second_slip_excess{};
+};
+bool unity_source_plant_step_with_directional_curvature(
+    const UnitySourcePlantState &state,
+    const UnitySourcePlantInput &input,
+    double duration_s,
+    const std::array<double,kUnityPlantSensitivityStateSize> &direction_state,
+    const std::array<double,2> &direction_control,
+    UnitySourcePlantDirectionalCurvature *output);
+
 // VehicleController stores AutonomousSteering with the opposite sign in its
 // internal wheel angle, then publishes CurrentSteeringAngle as the negated
 // internal angle. The externally normalized command therefore maps to the
@@ -141,6 +163,33 @@ bool unity_source_plant_lateral_slip_at_state(
 bool unity_source_plant_reconcile_suspension_jounce(
     UnitySourcePlantState *state);
 
+
+// Development-only event trace of every original PxVehicle internal
+// wheel substep. At <5 m/s, each source 1 ms tick contains FIVE 0.2 ms
+// friction/contact evaluations; stage-end or 1 ms summaries conceal
+// regime changes. No alternative plant or hidden smoothing is permitted.
+struct UnitySourceBranchObservation {
+  int fixed_tick{};
+  int vehicle_substep{};
+  int vehicle_substep_count{};
+  int wheel{};
+  bool grounded{};
+  bool sticky_forward{};
+  bool sticky_side{};
+  int longitudinal_curve_region{}; // 0: rising, 1: falling, 2: plateau
+  int lateral_curve_region{};
+  int tire_load_filter_region{};
+  bool combined_slip_saturated{};
+  double longitudinal_slip{};
+  double lateral_slip{};
+  double combined_slip_utilization{};
+  double normal_load_n{};
+};
+bool unity_source_plant_trace_branches(
+    const UnitySourcePlantState &state,
+    const UnitySourcePlantInput &input,double duration_s,
+    std::vector<UnitySourceBranchObservation> *trace,
+    UnitySourcePlantOutput *traced_output=nullptr);
 
 // Advance a held 40 Hz steering/throttle command using Unity's 1 ms fixed
 // step, source Ackermann geometry, four independent wheel speeds, PhysX slip

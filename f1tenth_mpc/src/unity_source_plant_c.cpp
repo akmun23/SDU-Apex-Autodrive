@@ -119,6 +119,41 @@ extern "C" int unity_source_plant_step_c(
   return 1;
 }
 
+extern "C" int unity_source_plant_step_directional_curvature_c(
+    const UnitySourcePlantInputC *input,double duration_s,
+    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double direction_control[2],
+    UnitySourcePlantDirectionalCurvatureC *out)
+{
+    if(!input||!direction_state||!direction_control||!out)return 0;
+    auto physical=from_c(input->state,
+        input->suspension_history_initialized);
+    std::copy_n(input->wheel_rotation_angle_rad,4,
+                physical.wheel_rotation_angle_rad.begin());
+    const f1tenth_mpc::UnitySourcePlantInput command{
+        input->steering_target_rad,input->throttle_normalized};
+    std::array<double,UNITY_SOURCE_PLANT_STATE_SIZE> ds{};
+    std::array<double,2> du{};
+    std::copy_n(direction_state,ds.size(),ds.begin());
+    std::copy_n(direction_control,du.size(),du.begin());
+    f1tenth_mpc::UnitySourcePlantDirectionalCurvature curvature{};
+    if(!f1tenth_mpc::unity_source_plant_step_with_directional_curvature(
+        physical,command,duration_s,ds,du,&curvature))return 0;
+    std::copy(curvature.first_state.begin(),
+        curvature.first_state.end(),out->first_state);
+    std::copy(curvature.second_state.begin(),
+        curvature.second_state.end(),out->second_state);
+    std::copy(curvature.first_body.begin(),
+        curvature.first_body.end(),out->first_body);
+    std::copy(curvature.second_body.begin(),
+        curvature.second_body.end(),out->second_body);
+    std::copy(curvature.first_slip_excess.begin(),
+        curvature.first_slip_excess.end(),out->first_slip_excess);
+    std::copy(curvature.second_slip_excess.begin(),
+        curvature.second_slip_excess.end(),out->second_slip_excess);
+    return 1;
+}
+
 extern "C" int unity_source_plant_instantaneous_lateral_slip_c(
     const double state[UNITY_SOURCE_PLANT_STATE_SIZE], double slip[4])
 {

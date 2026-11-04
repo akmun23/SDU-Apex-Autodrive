@@ -214,6 +214,156 @@ static void write_source_plant_state(
            4 * sizeof(source_state[0]));
 }
 
+int vehicle_model_full_source_interval_analytic_directional_second_order(
+    const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
+    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double direction_control[2],
+    MpcSourceDirectionalSecondOrder_t *out)
+{
+    if(!state||!control||!out||!direction_state||!direction_control||
+       !state->source_plant_initialized||!std::isfinite(dt)||dt<=0.f||
+       !std::isfinite(control->steering_target_rad)||
+       !std::isfinite(control->throttle_command)||
+       control->steering_target_rad < -active_parameters.max_steering_angle||
+       control->steering_target_rad > active_parameters.max_steering_angle||
+       control->throttle_command < MPC_THROTTLE_MIN_DRIVE||
+       control->throttle_command > MPC_THROTTLE_MAX)return 0;
+    for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i)
+        if(!std::isfinite(direction_state[i]))return 0;
+    if(!std::isfinite(direction_control[0])||
+       !std::isfinite(direction_control[1]))return 0;
+    UnitySourcePlantInputC input{};
+    write_source_plant_state(state,input.state);
+    input.steering_target_rad=clamp_source_steering_target(
+        control->steering_target_rad);
+    input.throttle_normalized=control->throttle_command;
+    input.suspension_history_initialized=
+        state->source_suspension_history_initialized;
+    UnitySourcePlantDirectionalCurvatureC analytic{};
+    if(!unity_source_plant_step_directional_curvature_c(
+          &input,dt,direction_state,direction_control,&analytic))
+        return 0;
+    MpcSourceDirectionalSecondOrder_t result{};
+    for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i) {
+        result.first_source[i]=analytic.first_state[i];
+        result.second_source[i]=analytic.second_state[i];
+    }
+    for(int i=0;i<3;++i) {
+        result.first_body[i]=analytic.first_body[i];
+        result.second_body[i]=analytic.second_body[i];
+    }
+    for(int i=0;i<4;++i) {
+        result.first_slip_excess_mps[i]=analytic.first_slip_excess[i];
+        result.second_slip_excess_mps[i]=analytic.second_slip_excess[i];
+    }
+    *out=result;
+    return 1;
+}
+
+int vehicle_model_full_source_interval_directional_second_order(
+    const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
+    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double direction_control[2],double epsilon,
+    MpcSourceDirectionalSecondOrder_t *out)
+{
+    // This path uses the exact 26-state source plant also consumed by the
+    // original MPC propagation. Hidden wheel/suspension/contact memories
+    // are never discarded. No loss approximation or control fallback.
+    if(!state||!control||!out||!direction_state||!direction_control||
+       !state->source_plant_initialized||
+       !std::isfinite(dt)||dt<=0.f||
+       !std::isfinite(epsilon)||epsilon<=0.||epsilon>.2||
+       !std::isfinite(control->steering_target_rad)||
+       !std::isfinite(control->throttle_command))
+        return 0;
+    for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i)
+        if(!std::isfinite(direction_state[i]))return 0;
+    if(!std::isfinite(direction_control[0])||
+       !std::isfinite(direction_control[1]))return 0;
+
+    UnitySourcePlantInputC baseline{};
+    write_source_plant_state(state,baseline.state);
+    baseline.steering_target_rad=clamp_source_steering_target(
+        control->steering_target_rad);
+    baseline.throttle_normalized=control->throttle_command;
+    baseline.suspension_history_initialized=
+        state->source_suspension_history_initialized;
+    // The source transition clamps the real legal steering bounds.
+    // Do NOT silently differentiate a clipped/out-of-range perturbation:
+    // the corresponding Taylor derivative is undefined at that edge.
+    if(baseline.throttle_normalized<MPC_THROTTLE_MIN_DRIVE ||
+       baseline.throttle_normalized>MPC_THROTTLE_MAX)
+        return 0;
+    UnitySourcePlantInputC plus=baseline,minus=baseline;
+    for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i) {
+        plus.state[i]+=epsilon*direction_state[i];
+        minus.state[i]-=epsilon*direction_state[i];
+    }
+    plus.steering_target_rad+=epsilon*direction_control[0];
+    minus.steering_target_rad-=epsilon*direction_control[0];
+    plus.throttle_normalized+=epsilon*direction_control[1];
+    minus.throttle_normalized-=epsilon*direction_control[1];
+    if(plus.steering_target_rad>UNITY_SOURCE_MAX_STEERING_RAD||
+       plus.steering_target_rad<-UNITY_SOURCE_MAX_STEERING_RAD||
+       minus.steering_target_rad>UNITY_SOURCE_MAX_STEERING_RAD||
+       minus.steering_target_rad<-UNITY_SOURCE_MAX_STEERING_RAD||
+       plus.throttle_normalized<MPC_THROTTLE_MIN_DRIVE||
+       plus.throttle_normalized>MPC_THROTTLE_MAX||
+       minus.throttle_normalized<MPC_THROTTLE_MIN_DRIVE||
+       minus.throttle_normalized>MPC_THROTTLE_MAX)
+        return 0;
+
+    UnitySourcePlantOutputC center{},positive{},negative{};
+    if(!unity_source_plant_step_c(&baseline,dt,&center)||
+       !unity_source_plant_step_c(&plus,dt,&positive)||
+       !unity_source_plant_step_c(&minus,dt,&negative))
+        return 0;
+    MpcSourceDirectionalSecondOrder_t result{};
+    const double inverse_first=.5/epsilon;
+    const double inverse_second=1./(epsilon*epsilon);
+    for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i) {
+        result.first_source[i]=
+            (positive.state[i]-negative.state[i])*inverse_first;
+        result.second_source[i]=
+            (positive.state[i]-2.*center.state[i]+negative.state[i])*
+                inverse_second;
+        if(!std::isfinite(result.first_source[i])||
+           !std::isfinite(result.second_source[i]))return 0;
+    }
+    const double body_center[3]={
+        center.integrated_body_forward_displacement_m,
+        center.integrated_body_lateral_displacement_m,
+        center.integrated_yaw_delta_rad};
+    const double body_positive[3]={
+        positive.integrated_body_forward_displacement_m,
+        positive.integrated_body_lateral_displacement_m,
+        positive.integrated_yaw_delta_rad};
+    const double body_negative[3]={
+        negative.integrated_body_forward_displacement_m,
+        negative.integrated_body_lateral_displacement_m,
+        negative.integrated_yaw_delta_rad};
+    for(int i=0;i<3;++i) {
+        result.first_body[i]=(body_positive[i]-body_negative[i])*
+            inverse_first;
+        result.second_body[i]=
+            (body_positive[i]-2.*body_center[i]+body_negative[i])*
+            inverse_second;
+        if(!std::isfinite(result.first_body[i])||
+           !std::isfinite(result.second_body[i]))return 0;
+    }
+    for(int i=0;i<4;++i) {
+        const double a=positive.maximum_longitudinal_slip_excess_mps[i];
+        const double b=center.maximum_longitudinal_slip_excess_mps[i];
+        const double c=negative.maximum_longitudinal_slip_excess_mps[i];
+        result.first_slip_excess_mps[i]=(a-c)*inverse_first;
+        result.second_slip_excess_mps[i]=(a-2.*b+c)*inverse_second;
+        if(!std::isfinite(result.first_slip_excess_mps[i])||
+           !std::isfinite(result.second_slip_excess_mps[i]))return 0;
+    }
+    *out=result;
+    return 1;
+}
+
 int vehicle_model_full_source_interval_sensitivities(
     const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
     const double seed_state[26][20],

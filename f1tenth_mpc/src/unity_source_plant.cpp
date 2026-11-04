@@ -130,6 +130,111 @@ Dual20 &operator+=(Dual20 &a, const Dual20 &b) { return a = a + b; }
 Dual20 &operator-=(Dual20 &a, const Dual20 &b) { return a = a - b; }
 Dual20 &operator*=(Dual20 &a, const Dual20 &b) { return a = a * b; }
 
+
+// Branch-local exact second derivative in ONE direction. Unlike a central
+// finite difference, this never samples a different tire/contact/steering
+// regime to manufacture a Hessian. The nominal/source branch is selected
+// identically to the double and 20-lane first-order source evaluation.
+// At a true switching surface this is one selected generalized derivative,
+// NOT proof that an ordinary C2 Hessian exists.
+struct SourceJet2 {
+  double value{};
+  double first{};
+  double second{};
+  SourceJet2() = default;
+  SourceJet2(double v) : value(v) {}
+};
+SourceJet2 operator+(SourceJet2 a,SourceJet2 b) {
+  SourceJet2 r(a.value+b.value);
+  r.first=a.first+b.first;r.second=a.second+b.second;
+  return r;
+}
+SourceJet2 operator-(SourceJet2 a,SourceJet2 b) {
+  SourceJet2 r(a.value-b.value);
+  r.first=a.first-b.first;r.second=a.second-b.second;
+  return r;
+}
+SourceJet2 operator-(SourceJet2 a) {
+  a.value=-a.value;a.first=-a.first;a.second=-a.second;
+  return a;
+}
+SourceJet2 operator*(SourceJet2 a,SourceJet2 b) {
+  SourceJet2 r(a.value*b.value);
+  r.first=a.first*b.value+a.value*b.first;
+  r.second=a.second*b.value+2.*a.first*b.first+a.value*b.second;
+  return r;
+}
+SourceJet2 operator/(SourceJet2 a,SourceJet2 b) {
+  const double inverse=1./b.value;
+  SourceJet2 reciprocal(inverse);
+  reciprocal.first=-b.first*inverse*inverse;
+  reciprocal.second=(2.*b.first*b.first-b.value*b.second)*
+      inverse*inverse*inverse;
+  return a*reciprocal;
+}
+SourceJet2 operator+(SourceJet2 a,double b){a.value+=b;return a;}
+SourceJet2 operator+(double a,SourceJet2 b){return b+a;}
+SourceJet2 operator-(SourceJet2 a,double b){a.value-=b;return a;}
+SourceJet2 operator-(double a,SourceJet2 b){return SourceJet2(a)-b;}
+SourceJet2 operator*(SourceJet2 a,double b) {
+  a.value*=b;a.first*=b;a.second*=b;return a;
+}
+SourceJet2 operator*(double a,SourceJet2 b){return b*a;}
+SourceJet2 operator/(SourceJet2 a,double b){return a*(1./b);}
+SourceJet2 operator/(double a,SourceJet2 b){return SourceJet2(a)/b;}
+SourceJet2 &operator+=(SourceJet2 &a,SourceJet2 b){return a=a+b;}
+SourceJet2 &operator-=(SourceJet2 &a,SourceJet2 b){return a=a-b;}
+SourceJet2 &operator*=(SourceJet2 &a,SourceJet2 b){return a=a*b;}
+
+SourceJet2 sin(SourceJet2 a) {
+  SourceJet2 r(std::sin(a.value));
+  const double c=std::cos(a.value);
+  r.first=c*a.first;
+  r.second=c*a.second-r.value*a.first*a.first;
+  return r;
+}
+SourceJet2 cos(SourceJet2 a) {
+  SourceJet2 r(std::cos(a.value));
+  const double si=std::sin(a.value);
+  r.first=-si*a.first;
+  r.second=-si*a.second-r.value*a.first*a.first;
+  return r;
+}
+SourceJet2 sqrt(SourceJet2 a) {
+  SourceJet2 r(std::sqrt(a.value));
+  if(r.value>0.) {
+    const double inv=.5/r.value;
+    r.first=inv*a.first;
+    r.second=inv*a.second-.25*a.first*a.first/
+        (a.value*r.value);
+  }
+  return r;
+}
+SourceJet2 tan(SourceJet2 a) {
+  SourceJet2 r(std::tan(a.value));
+  const double gain=1.+r.value*r.value;
+  r.first=gain*a.first;
+  r.second=gain*(a.second+2.*r.value*a.first*a.first);
+  return r;
+}
+SourceJet2 atan(SourceJet2 a) {
+  SourceJet2 r(std::atan(a.value));
+  const double inv=1./(1.+a.value*a.value);
+  r.first=inv*a.first;
+  r.second=inv*a.second-2.*a.value*inv*inv*a.first*a.first;
+  return r;
+}
+double primal(const SourceJet2 &v){return v.value;}
+SourceJet2 scalar_max(const SourceJet2 &a,const SourceJet2 &b) {
+  return a.value < b.value ? b : a;
+}
+SourceJet2 scalar_max(double a,const SourceJet2 &b) {
+  return a < b.value ? b : SourceJet2(a);
+}
+SourceJet2 scalar_max(const SourceJet2 &a,double b) {
+  return a.value < b ? SourceJet2(b) : a;
+}
+
 template <typename Scalar>
 double primal(const Scalar &value)
 {
@@ -1004,7 +1109,9 @@ template <typename Scalar>
 bool step(const UnitySourcePlantStateT<Scalar> &input_state,
           const UnitySourcePlantInputT<Scalar> &input, double duration,
           UnitySourcePlantOutputT<Scalar> *out, bool complete_output,
-          bool collect_slip_diagnostics)
+          bool collect_slip_diagnostics,
+          std::vector<UnitySourceBranchObservation> *branch_trace=nullptr,
+          int fixed_tick=0)
 {
   if (!out || !finite_state(input_state) ||
       !scalar_finite(input.steering_target_rad) ||
@@ -1087,6 +1194,14 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
     }
     for (std::size_t i = 0; i < 4; ++i) {
       if (!contacts[i].grounded) {
+        if(branch_trace) {
+          UnitySourceBranchObservation event{};
+          event.fixed_tick=fixed_tick;
+          event.vehicle_substep=int(substep);
+          event.vehicle_substep_count=int(substep_count);
+          event.wheel=int(i);
+          branch_trace->push_back(event);
+        }
         // PxVehicleUpdate starts each wheel as airborne and computes
         // spring/tire forces only when a valid ray-plane hit lies within
         // max droop. A raycast hit beyond droop is not a supporting contact.
@@ -1227,6 +1342,40 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
           -load[i] * response_y * kSideCurve[4] / utilization;
       fx_tire[i] = force_wheel_x;
       fy_tire[i] = force_wheel_y;
+      if(branch_trace) {
+        // Reuse the ALREADY evaluated source quantities. Merely record
+        // which original friction spline and combined-slip expression was
+        // active; never recompute the plant, change force or use a proxy.
+        const auto region=[](double slip,
+                             const std::array<double,5> &curve) {
+          const double a=std::abs(slip);
+          return a<curve[0]?0:(a<curve[2]?1:2);
+        };
+        UnitySourceBranchObservation event{};
+        event.fixed_tick=fixed_tick;
+        event.vehicle_substep=int(substep);
+        event.vehicle_substep_count=int(substep_count);
+        event.wheel=int(i);
+        event.grounded=true;
+        event.sticky_forward=sticky_forward_active;
+        event.sticky_side=sticky_side_active;
+        event.longitudinal_curve_region=region(
+            primal(slip_x[i]),kForwardCurve);
+        event.lateral_curve_region=region(
+            primal(slip_y[i]),kSideCurve);
+        const double rest=(kSprungMassKg[i]+kWheelMassKg)*kGravity;
+        const double normalized=primal(suspension_force_n[i])/rest;
+        event.tire_load_filter_region=normalized<=0.?0:
+            (normalized>=3.?2:1);
+        const double demand=std::pow(primal(normalized_longitudinal),2)+
+            std::pow(primal(normalized_lateral),2);
+        event.combined_slip_saturated=demand>1.;
+        event.combined_slip_utilization=primal(utilization);
+        event.longitudinal_slip=primal(slip_x[i]);
+        event.lateral_slip=primal(slip_y[i]);
+        event.normal_load_n=primal(load[i]);
+        branch_trace->push_back(event);
+      }
       const Vec3T<Scalar> tire_force_body = add(
           scale(contacts[i].tire_longitudinal_body, force_wheel_x),
           scale(contacts[i].tire_lateral_body, force_wheel_y));
@@ -1419,7 +1568,8 @@ bool step_interval(const UnitySourcePlantStateT<Scalar> &state,
                    const UnitySourcePlantInputT<Scalar> &input,
                    double duration_s,
                    UnitySourcePlantOutputT<Scalar> *output,
-                   bool sensitivity_only = false)
+                   bool sensitivity_only = false,
+                   std::vector<UnitySourceBranchObservation> *branch_trace=nullptr)
 {
   if (!output || !scalar_finite(Scalar(duration_s)) || duration_s <= 0.0 ||
       duration_s > 0.2500001) return false;
@@ -1437,7 +1587,8 @@ bool step_interval(const UnitySourcePlantStateT<Scalar> &state,
   for (unsigned int i = 0; i < exact_steps; ++i) {
     const bool final_step = i + 1 == exact_steps;
     if (!step(current, input, kDt, &result,
-              final_step && !sensitivity_only, true))
+              final_step && !sensitivity_only, true,
+              branch_trace,int(i)))
       return false;
     const auto &next = result.state;
     const Scalar u_mid = 0.5 * (current.u_mps + next.u_mps);
@@ -1700,6 +1851,123 @@ bool unity_source_plant_step_with_sensitivities(
     sensitivity->yaw_delta[lane] =
         dual_output.integrated_yaw_delta_rad.derivative[lane];
   }
+  return true;
+}
+
+bool unity_source_plant_trace_branches(
+    const UnitySourcePlantState &state,
+    const UnitySourcePlantInput &input,double duration_s,
+    std::vector<UnitySourceBranchObservation> *trace,
+    UnitySourcePlantOutput *traced_output)
+{
+    if(!trace||!finite_state(state))return false;
+    trace->clear();
+    trace->reserve(
+        static_cast<std::size_t>(std::ceil(duration_s/0.001))*5*4);
+    UnitySourcePlantOutputT<double> local{};
+    return step_interval(state,input,duration_s,
+                         traced_output?traced_output:&local,false,trace);
+}
+
+bool unity_source_plant_step_with_directional_curvature(
+    const UnitySourcePlantState &state,
+    const UnitySourcePlantInput &input,
+    double duration_s,
+    const std::array<double,kUnityPlantSensitivityStateSize> &ds,
+    const std::array<double,2> &du,
+    UnitySourcePlantDirectionalCurvature *output)
+{
+  if(!output || !finite_state(state))return false;
+  for(double v:ds)if(!std::isfinite(v))return false;
+  for(double v:du)if(!std::isfinite(v))return false;
+  const auto seeded=[&](double v,int index) {
+    SourceJet2 jet(v);
+    jet.first=ds[index];
+    return jet;
+  };
+  UnitySourcePlantStateT<SourceJet2> s{};
+  s.u_mps=seeded(state.u_mps,UNITY_SOURCE_U);
+  s.v_mps=seeded(state.v_mps,UNITY_SOURCE_V);
+  s.yaw_rate_radps=seeded(state.yaw_rate_radps,UNITY_SOURCE_YAW_RATE);
+  for(int wheel=0;wheel<4;++wheel) {
+    s.wheel_omega_radps[wheel]=seeded(state.wheel_omega_radps[wheel],
+        UNITY_SOURCE_WHEEL_OMEGA_FL+wheel);
+    s.wheel_rotation_angle_rad[wheel]=
+        SourceJet2(state.wheel_rotation_angle_rad[wheel]);
+    s.suspension_jounce_m[wheel]=seeded(state.suspension_jounce_m[wheel],
+        UNITY_SOURCE_SUSPENSION_JOUNCE_FL+wheel);
+    s.low_forward_speed_time_s[wheel]=seeded(
+        state.low_forward_speed_time_s[wheel],
+        UNITY_SOURCE_LOW_FORWARD_SPEED_TIME_FL+wheel);
+    s.low_side_speed_time_s[wheel]=seeded(
+        state.low_side_speed_time_s[wheel],
+        UNITY_SOURCE_LOW_SIDE_SPEED_TIME_FL+wheel);
+  }
+  s.body_height_m=seeded(state.body_height_m,UNITY_SOURCE_BODY_HEIGHT);
+  s.body_height_rate_mps=seeded(state.body_height_rate_mps,
+      UNITY_SOURCE_BODY_HEIGHT_RATE);
+  s.roll_rad=seeded(state.roll_rad,UNITY_SOURCE_ROLL);
+  s.roll_rate_radps=seeded(state.roll_rate_radps,UNITY_SOURCE_ROLL_RATE);
+  s.pitch_rad=seeded(state.pitch_rad,UNITY_SOURCE_PITCH);
+  s.pitch_rate_radps=seeded(state.pitch_rate_radps,UNITY_SOURCE_PITCH_RATE);
+  s.physical_steering_rad=seeded(state.physical_steering_rad,
+      UNITY_SOURCE_PHYSICAL_STEERING);
+  s.suspension_history_initialized=state.suspension_history_initialized;
+  UnitySourcePlantInputT<SourceJet2> in{};
+  in.steering_target_rad=SourceJet2(input.steering_target_rad);
+  in.steering_target_rad.first=du[0];
+  in.throttle_normalized=SourceJet2(input.throttle_normalized);
+  in.throttle_normalized.first=du[1];
+  in.apply_sticky_tire_constraints=input.apply_sticky_tire_constraints;
+  in.apply_immediate_sticky_constraints=
+      input.apply_immediate_sticky_constraints;
+  UnitySourcePlantOutputT<SourceJet2> result{};
+  if(!step_interval(s,in,duration_s,&result,true))return false;
+  UnitySourcePlantDirectionalCurvature curvature{};
+  const auto assign=[&](int i,const SourceJet2 &a) {
+    if(!std::isfinite(a.first)||!std::isfinite(a.second))return false;
+    curvature.first_state[i]=a.first;
+    curvature.second_state[i]=a.second;
+    return true;
+  };
+  if(!assign(UNITY_SOURCE_U,result.state.u_mps)||
+     !assign(UNITY_SOURCE_V,result.state.v_mps)||
+     !assign(UNITY_SOURCE_YAW_RATE,result.state.yaw_rate_radps)||
+     !assign(UNITY_SOURCE_BODY_HEIGHT,result.state.body_height_m)||
+     !assign(UNITY_SOURCE_BODY_HEIGHT_RATE,
+             result.state.body_height_rate_mps)||
+     !assign(UNITY_SOURCE_ROLL,result.state.roll_rad)||
+     !assign(UNITY_SOURCE_ROLL_RATE,result.state.roll_rate_radps)||
+     !assign(UNITY_SOURCE_PITCH,result.state.pitch_rad)||
+     !assign(UNITY_SOURCE_PITCH_RATE,result.state.pitch_rate_radps)||
+     !assign(UNITY_SOURCE_PHYSICAL_STEERING,
+             result.state.physical_steering_rad))return false;
+  for(int wheel=0;wheel<4;++wheel) {
+    if(!assign(UNITY_SOURCE_WHEEL_OMEGA_FL+wheel,
+               result.state.wheel_omega_radps[wheel])||
+       !assign(UNITY_SOURCE_SUSPENSION_JOUNCE_FL+wheel,
+               result.state.suspension_jounce_m[wheel])||
+       !assign(UNITY_SOURCE_LOW_FORWARD_SPEED_TIME_FL+wheel,
+               result.state.low_forward_speed_time_s[wheel])||
+       !assign(UNITY_SOURCE_LOW_SIDE_SPEED_TIME_FL+wheel,
+               result.state.low_side_speed_time_s[wheel]))return false;
+    const auto &slip=result.maximum_longitudinal_slip_excess_mps[wheel];
+    if(!std::isfinite(slip.first)||!std::isfinite(slip.second))
+        return false;
+    curvature.first_slip_excess[wheel]=slip.first;
+    curvature.second_slip_excess[wheel]=slip.second;
+  }
+  const SourceJet2 body[3]={
+      result.integrated_body_forward_displacement_m,
+      result.integrated_body_lateral_displacement_m,
+      result.integrated_yaw_delta_rad};
+  for(int i=0;i<3;++i) {
+    if(!std::isfinite(body[i].first)||!std::isfinite(body[i].second))
+        return false;
+    curvature.first_body[i]=body[i].first;
+    curvature.second_body[i]=body[i].second;
+  }
+  *output=curvature;
   return true;
 }
 

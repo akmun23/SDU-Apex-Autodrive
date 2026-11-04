@@ -420,6 +420,8 @@ struct Qp {
 };
 struct QpAnswer {
     Eigen::VectorXd x;
+    // Populated ONLY for offline derivative snapshot requests.
+    Eigen::VectorXd offline_wall_duals;
     int iterations{},status{};
     double max_violation{INFINITY},relative_dual{INFINITY},gap{INFINITY};
 };
@@ -455,7 +457,8 @@ bool newton(const Qp &qp,const Eigen::LDLT<Eigen::MatrixXd> &ldlt,
 // Dense primal-dual Mehrotra IPM, all inequalities in original units.
 // No "solved" flag is accepted without an independent primal certificate.
 QpAnswer solve_qp(const Qp &qp,int maximum,double deadline_us=0.,
-                  const Eigen::VectorXd *warm_primal=nullptr) {
+                  const Eigen::VectorXd *warm_primal=nullptr,
+                  bool capture_offline_duals=false) {
     QpAnswer result{};
     const int m=qp.b.size(),n=qp.q.size();
     if(n==0||m==0||qp.H.rows()!=n||qp.H.cols()!=n||
@@ -569,6 +572,8 @@ QpAnswer solve_qp(const Qp &qp,int maximum,double deadline_us=0.,
         }
     }
     result.x=x;
+    if(capture_offline_duals && lambda.allFinite())
+        result.offline_wall_duals=lambda;
     result.max_violation=max_violation(qp,x);
     if(result.status!=-2 &&
        (result.status!=1 || result.max_violation>1e-5 ||
@@ -662,7 +667,8 @@ Qp assemble_slack(const Qp &hard,bool objective_lp,
 bool qp_step(const Vec &y,const Sample &base,
     const Derivatives &d,const Mat &H,const MpcRtiConfiguration_t &model,
     int max_qp_iter,int walls,int decision_count,double deadline_us,
-    Vec &step,Statistics &stats) {
+    Vec &step,Statistics &stats,
+    DerivativeSnapshot *offline_snapshot=nullptr) {
     const bool phase1=!base.strict_valid ||base.wall_v>1.e-12 ||
         base.rate_v>1.e-10;
     // Build full physical constraints, then eliminate fixed-tail variables
@@ -685,7 +691,8 @@ bool qp_step(const Vec &y,const Sample &base,
     auto solve=[&](const Qp &problem,
                    const Eigen::VectorXd *warm=nullptr) {
         const double start=now_us();
-        auto res=solve_qp(problem,max_qp_iter,deadline_us,warm);
+        auto res=solve_qp(problem,max_qp_iter,deadline_us,warm,
+                          offline_snapshot!=nullptr);
         if(res.status==-2)stats.deadline_exhausted=true;
         stats.qp_us+=now_us()-start;
         stats.qp_iterations+=res.iterations;
@@ -695,9 +702,20 @@ bool qp_step(const Vec &y,const Sample &base,
             finite(res.max_violation)?res.max_violation:0.);
         return res;
     };
+    const auto snapshot_wall_duals=[&](
+            const QpAnswer &qp_result,bool from_elastic) {
+        if(!offline_snapshot ||
+           qp_result.offline_wall_duals.size()<BaseW)return;
+        for(int row=0;row<BaseW;++row)
+            offline_snapshot->qp_wall_duals[row]=
+                qp_result.offline_wall_duals[row];
+        offline_snapshot->qp_wall_duals_valid=true;
+        offline_snapshot->qp_wall_duals_from_elastic=from_elastic;
+    };
     if(!phase1) {
         const auto result=solve(hard);
         if(result.status!=1)return false;
+        snapshot_wall_duals(result,false);
         step.head(decision_count)=result.x;
         return step.allFinite();
     }
@@ -767,6 +785,7 @@ bool qp_step(const Vec &y,const Sample &base,
         direct.relative_dual<=kPhaseOneRelativeDualTolerance &&
         direct.gap<=kPhaseOneComplementarityTolerance;
     if(direct.status==1 || certified_inexact_direction) {
+        snapshot_wall_duals(direct,false);
         step.head(decision_count)=direct.x;
         return step.allFinite();
     }
@@ -778,6 +797,7 @@ bool qp_step(const Vec &y,const Sample &base,
         const auto stage2=solve(assemble_slack(hard,false,walls,
             bound+std::max(1e-7,1.e-5*bound)));
         if(stage2.status!=1)return false;
+        snapshot_wall_duals(stage2,true);
         step.head(decision_count)=stage2.x.head(decision_count);
     } else {
         // Warm-start the strict hard minimum-norm solve from the
@@ -788,6 +808,7 @@ bool qp_step(const Vec &y,const Sample &base,
             stage1.x.head(decision_count);
         const auto stage2=solve(hard,&warm_primal);
         if(stage2.status!=1)return false;
+        snapshot_wall_duals(stage2,false);
         step.head(decision_count)=stage2.x;
     }
     return step.allFinite();
@@ -1013,9 +1034,21 @@ bool optimize(const MpcRtiState_t *initial,double progress,
         if(!qp_step(y,base,derivative,H,configuration->model,
                 options.qp_max_iterations,
                 options.terminal_lookahead_steps==3?W:BaseW,
-                decision_count,options.absolute_deadline_us,delta,stats))
+                decision_count,options.absolute_deadline_us,delta,stats,
+                iteration==0?options.first_derivative_snapshot:nullptr))
             break;
         stats.first_qp_direction_norm[iteration]=delta.norm();
+        if(iteration==0 && options.first_derivative_snapshot) {
+            auto &snapshot=*options.first_derivative_snapshot;
+            snapshot.qp_direction_valid=true;
+            snapshot.qp_was_phase1=!feasible;
+            for(int row=0;row<D;++row) {
+                snapshot.qp_direction[row]=delta[row];
+                for(int col=0;col<D;++col)
+                    snapshot.qp_hessian[row][col]=
+                        feasible?H(row,col):(row==col?1.:0.);
+            }
+        }
         double chosen_alpha=0.;
         bool chosen=false;
         Sample full_step{};

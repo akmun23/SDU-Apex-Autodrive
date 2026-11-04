@@ -13,6 +13,16 @@ struct DerivativeSnapshot {
     double gradient[60]{};
     double wall_jacobian[60][60]{};
     double rate_jacobian[120][60]{};
+    // Offline-only snapshot of the ACTUAL first nonlinear SQP QP.
+    // Unlike a guessed direction, this records the QP direction with
+    // its original frozen objective/affine physical constraints.
+    double qp_direction[60]{};
+    double qp_hessian[60][60]{};
+    double qp_wall_duals[60]{};
+    bool qp_wall_duals_valid{};
+    bool qp_wall_duals_from_elastic{};
+    bool qp_direction_valid{};
+    bool qp_was_phase1{};
 };
 struct Options {
     int max_iterations{8};

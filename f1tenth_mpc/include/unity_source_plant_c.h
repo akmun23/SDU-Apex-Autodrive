@@ -120,6 +120,25 @@ int unity_source_plant_step_sensitivity_c(
     const UnitySourcePlantSensitivitySeedsC *seeds,
     UnitySourcePlantSensitivityC *sensitivity);
 
+/* Full native-source branch-local second derivative in one 26-state + 2
+ * physical control direction. Unlike central finite differences this
+ * evaluates the exact selected source branch only; it is NOT a globally
+ * valid smooth Hessian across friction/contact switching surfaces. */
+typedef struct {
+  double first_state[UNITY_SOURCE_PLANT_STATE_SIZE];
+  double second_state[UNITY_SOURCE_PLANT_STATE_SIZE];
+  double first_body[3];
+  double second_body[3];
+  double first_slip_excess[4];
+  double second_slip_excess[4];
+} UnitySourcePlantDirectionalCurvatureC;
+int unity_source_plant_step_directional_curvature_c(
+    const UnitySourcePlantInputC *input,
+    double duration_s,
+    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double direction_control[2],
+    UnitySourcePlantDirectionalCurvatureC *out);
+
 /* Exact source wheel-contact lateral slip at this state, without
  * advancing the plant. No ABI changes to existing step/sensitivity structs. */
 int unity_source_plant_instantaneous_lateral_slip_c(

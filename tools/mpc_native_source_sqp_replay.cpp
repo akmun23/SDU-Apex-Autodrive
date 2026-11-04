@@ -15,7 +15,7 @@
 #include <string>
 
 int main(int argc,char **argv) {
-    if(argc<3 || argc>11) {
+    if(argc<3 || argc>13) {
         std::cerr << "usage: mpc_native_source_sqp_replay CASE seed.txt [iterations] [--no-soc] [controls_out.txt]; seed=- uses captured r1 nominal\n";
         return 2;
     }
@@ -36,9 +36,15 @@ int main(int argc,char **argv) {
     // --ipm-max=90 for the stored 90-iteration reference.
     options.qp_max_iterations=40;
     std::string control_output;
+    bool oracle_only=false;
+    bool oracle_details=false;
     for(int i=4;i<argc;++i) {
         const std::string option(argv[i]);
-        if(option=="--no-soc")options.second_order_correction=false;
+        if(option=="--oracle-only")oracle_only=true;
+        else if(option=="--oracle-details") {
+            oracle_only=true;oracle_details=true;
+        }
+        else if(option=="--no-soc")options.second_order_correction=false;
         else if(option=="--gn-hessian")options.use_gauss_newton_hessian=true;
         else if(option=="--stage-jacobians")
             options.use_stage_local_jacobians=true;
@@ -63,6 +69,10 @@ int main(int argc,char **argv) {
     }
     // No large derivative capture or file I/O in an ordinary replay.
     const bool dump_derivatives=std::getenv("MPC_SOURCE_SQP_DUMP_JACOBIAN")!=nullptr;
+    const char *const dump_prefix=std::getenv("MPC_SOURCE_SQP_DUMP_PREFIX");
+    const std::string dump_base=(dump_prefix && *dump_prefix)
+        ?std::string(dump_prefix):std::string("/tmp/mpc_native_source_sqp_first");
+
     std::unique_ptr<sdu_apex::source_sqp::DerivativeSnapshot> derivative_snapshot;
     if(dump_derivatives) {
         derivative_snapshot=std::make_unique<
@@ -75,6 +85,78 @@ int main(int argc,char **argv) {
     cfg.model.world_sweep_context=nullptr;
     cfg.model.world_map_rejection_only=0;
     cfg.objective_schedule=&ctx.objective;
+    if(oracle_only) {
+        // Independent exact 30-stage SOURCE objective/corridor oracle
+        // on arbitrary user-supplied physical steering/throttle controls.
+        // This mode DOES NOT call the source SQP or publish any commands.
+        auto nominal=std::make_unique<MpcRtiNominal_t>();
+        MpcRtiReference_t refs[PREDICTION_HORIZON+1]{};
+        if(!mpc_rti_build_nominal_same_epoch(
+                &ctx.initial_state,ctx.progress_m,nullptr,controls,
+                PREDICTION_HORIZON,ctx.trajectory.data(),
+                ctx.trajectory.size(),ctx.lap_length_m,ctx.prediction_dt,
+                PREDICTION_HORIZON,&cfg.model,nominal.get(),refs))
+            return 7;
+        double cost=NAN;
+        float clearance=NAN,side[PREDICTION_HORIZON+1][2]{};
+        if(!mpc_rti_score_candidate_plan_and_corridor_for_diagnostics(
+                nominal.get(),ctx.trajectory.data(),ctx.trajectory.size(),
+                ctx.lap_length_m,&cfg,&cost,&clearance,side))
+            return 8;
+        double violation=0.;
+        double minimum=INFINITY;
+        for(int stage=1;stage<=PREDICTION_HORIZON;++stage)
+            for(int j=0;j<2;++j) {
+                const double c=side[stage][j];
+                if(!std::isfinite(c))return 9;
+                minimum=std::min(minimum,c);
+                violation+=std::min(0.,c)*std::min(0.,c);
+            }
+        std::cout<<std::setprecision(17)
+            <<"{\"source_exact_nominal\":true,\"cost\":"<<cost
+            <<",\"wall_violation_m2\":"<<violation
+            <<",\"min_wall_clearance_m\":"<<minimum
+            <<",\"walls\":[";
+        for(int stage=1;stage<=PREDICTION_HORIZON;++stage) {
+            for(int side_index=0;side_index<2;++side_index) {
+                if(stage!=1||side_index!=0)std::cout<<",";
+                std::cout<<side[stage][side_index];
+            }
+        }
+        std::cout<<"]";
+        if(oracle_details) {
+            std::cout<<",\"source_states\":[";
+            for(int stage=0;stage<=PREDICTION_HORIZON;++stage) {
+                if(stage)std::cout<<",";
+                const auto &state=nominal->states[stage];
+                const auto &x=state.plant;
+                std::cout<<"{\"stage\":"<<stage
+                         <<",\"progress_m\":"<<nominal->progress[stage]
+                         <<",\"lateral_error_m\":"<<x.e_y
+                         <<",\"heading_error_rad\":"<<x.e_psi
+                         <<",\"u_mps\":"<<x.u
+                         <<",\"v_mps\":"<<x.v
+                         <<",\"yaw_rate\":"<<x.r
+                         <<",\"rack_rad\":"<<x.actual_steering_angle
+                         <<",\"incoming_branch_flags\":"
+                         <<state.incoming_branch_flags
+                         <<",\"source_plant_internal_state\":[";
+                for(int i=0;i<MPC_PLANT_INTERNAL_STATE_COUNT;++i) {
+                    if(i)std::cout<<",";
+                    std::cout<<x.source_plant_internal_state[i];
+                }
+                std::cout<<"],\"wheel_slip_excess\":[";
+                for(int i=0;i<4;++i) {
+                    if(i)std::cout<<",";
+                    std::cout<<state.incoming_wheel_slip_excess_mps[i];
+                }
+                std::cout<<"]}";
+            }
+            std::cout<<"]";
+        }
+        std::cout<<"}"<<std::endl;
+        return 0;
+    }
     sdu_apex::source_sqp::Statistics stats{};
     auto certified=std::make_unique<MpcRtiNominal_t>();
     MpcModelControl_t selected[PREDICTION_HORIZON]{};
@@ -83,7 +165,7 @@ int main(int argc,char **argv) {
         ctx.trajectory.size(),ctx.lap_length_m,ctx.prediction_dt,
         &cfg,controls,options,&stats,selected,certified.get());
     if(dump_derivatives) {
-        std::ofstream matrix_file("/tmp/mpc_native_source_sqp_first_jacobian.txt");
+        std::ofstream matrix_file(dump_base+"_jacobian.txt");
         matrix_file<<std::setprecision(17);
         for(int row=0;row<60;++row) {
             matrix_file<<"wall "<<row<<" "
@@ -99,10 +181,38 @@ int main(int argc,char **argv) {
                 matrix_file<<" "<<v;
             matrix_file<<"\n";
         }
-        std::ofstream gradient_file("/tmp/mpc_native_source_sqp_first_gradient.txt");
+        std::ofstream gradient_file(dump_base+"_gradient.txt");
         gradient_file<<std::setprecision(17);
         for(int col=0;col<60;++col)
             gradient_file<<col<<" "<<derivative_snapshot->gradient[col]<<"\n";
+        if(derivative_snapshot->qp_direction_valid) {
+            std::ofstream direction_file(dump_base+"_qp_direction.txt");
+            direction_file<<std::setprecision(17)
+                          <<"# normalized_delta_y steering_scale=.15 throttle_scale=.25 "
+                          <<"phase1="<<(derivative_snapshot->qp_was_phase1?1:0)<<"\n";
+            for(int col=0;col<60;++col)
+                direction_file<<col<<" "
+                              <<derivative_snapshot->qp_direction[col]<<"\n";
+            std::ofstream hessian_file(dump_base+"_qp_hessian.txt");
+            hessian_file<<std::setprecision(17);
+            for(int row=0;row<60;++row) {
+                for(int col=0;col<60;++col)
+                    hessian_file<<(col?" ":"")
+                                <<derivative_snapshot->qp_hessian[row][col];
+                hessian_file<<"\n";
+            }
+            if(derivative_snapshot->qp_wall_duals_valid) {
+                std::ofstream dual_file(dump_base+"_qp_wall_duals.txt");
+                dual_file<<std::setprecision(17)
+                    <<"# QP wall constraint duals lambda>=0; "
+                    <<"elastic="<<int(derivative_snapshot->qp_wall_duals_from_elastic)
+                    <<" phase1="<<int(derivative_snapshot->qp_was_phase1)
+                    <<" (NOT duals from source-nonlinear optimum)\n";
+                for(int row=0;row<60;++row)
+                    dual_file<<row<<" "<<derivative_snapshot->qp_wall_duals[row]
+                             <<"\n";
+            }
+        }
     }
     if(!control_output.empty()) {
         std::ofstream output(control_output);
