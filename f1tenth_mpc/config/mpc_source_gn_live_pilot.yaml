@@ -1,0 +1,21 @@
+# Experimental isolated high-fidelity source-SQP pilot.
+# Do NOT layer over the established practice/competition profile outside
+# an explicitly supervised test. The base profile remains unchanged.
+# This selects ONE 60-control source-exact MPC and no alternate recovery
+# publisher; native source failures remain visible in ROS diagnostics.
+# Experimental source-SQP permits a strict 22 ms callback-to-publication
+# deadline, leaving 3 ms within the 25 ms (40 Hz) scheduling interval.
+/mpc_controller_node:
+  ros__parameters:
+    native_source_reduced_sqp: true
+    native_source_reduced_sqp_iterations: 2
+    native_source_sqp_control_decision_stages: 30
+    native_source_sqp_full_source_forward: true
+    native_source_sqp_gauss_newton_hessian: true
+    native_source_sqp_stage_local_jacobians: true
+    native_source_sqp_terminal_lookahead_stages: 0
+    native_source_sqp_reuse_fd_prefix: false
+    native_source_sqp_adaptive_stop: false
+    rti_cycle_budget_ms: 22.0
+    end_to_end_cycle_budget_ms: 22.0
+    control_thread_cpu_affinity: -1

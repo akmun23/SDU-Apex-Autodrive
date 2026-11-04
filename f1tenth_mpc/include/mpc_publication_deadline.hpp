@@ -7,7 +7,7 @@
 namespace f1tenth_mpc
 {
 
-constexpr double kMpcHardPublicationBudgetMs = 20.0;
+constexpr double kMpcHardPublicationBudgetMs = 22.0;
 
 inline bool mpc_publication_budget_valid(double budget_ms) noexcept
 {

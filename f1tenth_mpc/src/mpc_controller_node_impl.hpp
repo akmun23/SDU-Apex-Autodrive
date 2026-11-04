@@ -498,6 +498,12 @@ public:
         rti_config_.native_source_sqp_full_source_forward=
             declare_parameter<bool>(
                 "native_source_sqp_full_source_forward",false)?1:0;
+        rti_config_.native_source_sqp_gauss_newton_hessian=
+            declare_parameter<bool>(
+                "native_source_sqp_gauss_newton_hessian",false)?1:0;
+        rti_config_.native_source_sqp_stage_local_jacobians=
+            declare_parameter<bool>(
+                "native_source_sqp_stage_local_jacobians",false)?1:0;
         const int terminal_source_lookahead=declare_parameter<int>(
             "native_source_sqp_terminal_lookahead_stages",0);
         rti_config_.native_source_sqp_terminal_lookahead_stages=
@@ -620,7 +626,7 @@ public:
             !std::isfinite(initial_command_publication_lead_ms) ||
             initial_command_publication_lead_ms < 0.0) {
             throw std::runtime_error(
-                "end-to-end budget must be positive and at most 20 ms; "
+                "end-to-end budget must be positive and at most 22 ms; "
                 "command-start lateness and initial command lead must be "
                 "finite and nonnegative");
         }
@@ -2073,7 +2079,8 @@ private:
 
 
         MpcRtiCycleResult_t result{};
-        if (deadline_recovery_pending_) {
+        if (!rti_config_.native_source_reduced_sqp &&
+            deadline_recovery_pending_) {
             deadline_recovery_pending_ = false;
             const bool seeded = seed_nominal_from_certified_plan();
             const char * recovery_reason = nullptr;
@@ -2130,7 +2137,8 @@ private:
         // that TAIL before solving. The new source-witness seed is rolled out
         // from the current plant/queued actuator state, with no map-specific
         // speed reduction or relaxation of physical corridor constraints.
-        if (fallback_max_short_prefix_actions_ > 0 &&
+        if (!rti_config_.native_source_reduced_sqp &&
+            fallback_max_short_prefix_actions_ > 0 &&
             fallback_episode_.last_published_action_was_short_prefix()) {
             if (fallback_retain_validated_seed_enabled_) {
                 f1tenth_mpc::reseed_after_bounded_fallback(
@@ -2143,7 +2151,8 @@ private:
                 mpc_rti_memory_reset_solver_state(&rti_memory_);
             }
         }
-        if (try_publish_source_reacquisition(state,last_projected_s_,
+        if (!rti_config_.native_source_reduced_sqp &&
+            try_publish_source_reacquisition(state,last_projected_s_,
                 callback_steady_ns,control_stamp_ns,&result)) {
             record_cycle_health(MPC_RTI_CYCLE_ACCEPTED_VIABILITY_RECOVERY,
                 result,0.0);
@@ -2153,6 +2162,27 @@ private:
                     last_projected_s_,source_dt,result,0.0,
                     control_ros_time.nanoseconds(),candidate_command_stamp_ns,
                     callback_steady_ns,synchronize_steady_ns);
+            return;
+        }
+        // The source MPC must never replan an earlier target command epoch
+        // after a later one has ALREADY been accepted and issued. Live 40Hz
+        // sensor/ROS timing can produce a ~0.3ms backwards epoch when a
+        // bridge callback arrives late. Treat that input as superseded,
+        // instead of invalidating the certified warm start and constructing
+        // a new reference seed in the middle of a fast corner. No new
+        // control is published for a superseded epoch; the next coherent
+        // epoch runs the SAME source MPC from fresh state observations.
+        if(rti_config_.native_source_reduced_sqp &&
+           rti_memory_.warm_start_controls_valid &&
+           rti_memory_.command_epoch_ns>0 &&
+           candidate_command_stamp_ns<rti_memory_.command_epoch_ns) {
+            RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),1000,
+                "Native source MPC suppressed regressing command epoch "
+                "(candidate=%lld, last_issued_plan=%lld, delta=%.3fms); "
+                "no competing or stale command published",
+                static_cast<long long>(candidate_command_stamp_ns),
+                static_cast<long long>(rti_memory_.command_epoch_ns),
+                (candidate_command_stamp_ns-rti_memory_.command_epoch_ns)*1.e-6);
             return;
         }
         const auto solve_start = std::chrono::steady_clock::now();
@@ -2211,8 +2241,30 @@ private:
             return;
         }
         if (status == MPC_RTI_CYCLE_WAITING_FOR_SOLVER_BUDGET) {
-            /* A solver-budget miss is retryable only at a motionless spawn.
-             * During motion, route it through the normal fault/reuse path. */
+            if (rti_config_.native_source_reduced_sqp) {
+                // A missed optimizer deadline is NOT a source infeasibility
+                // certificate and not a simulator collision. The normal
+                // isolated source MPC runs next cycle from a newly
+                // synchronized state. Never publish the overdue solution,
+                // a fabricated full brake or any legacy recovery controller.
+                // The actuator may retain its last issued command for this
+                // single publication gap; diagnostics expose the exact miss.
+                record_cycle_health(status,result,solve_us);
+                RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),1000,
+                    "Native source SQP publication deadline missed "
+                    "(%.3fms solver); no stale or unchecked command published",
+                    solve_us/1000.);
+                if(diagnostics_pub_)
+                    publish_cycle_diagnostics(state,coherent_state,
+                        control_time_prediction,control_prediction_us,
+                        last_projected_s_,source_dt,result,solve_us,
+                        control_ros_time.nanoseconds(),
+                        candidate_command_stamp_ns,callback_steady_ns,
+                        synchronize_steady_ns);
+                return;
+            }
+            // The established non-source controller retains its existing
+            // deadline recovery/validation behavior unchanged.
             status = MPC_RTI_CYCLE_REJECTED_SOLVER;
             result.status = status;
         }
@@ -2272,6 +2324,34 @@ private:
                 trajectory_.data(), trajectory_.size(), track_length_m_,
                 TIME_STEP_SECONDS, qp_capture_r1_.get(),
                 qp_capture_r2_.get());
+        }
+        // The experimental native source SQP is the ONLY control owner
+        // when selected. A rejected/incomplete source horizon cannot silently
+        // fall through into the legacy viability, short-prefix, or retained-
+        // plan publishers; those would contaminate real convergence tests
+        // and carry different objective/safety policies. The source solver
+        // alone must produce a 30-stage source-certified command, and failure
+        // remains visible in cycle diagnostics without a fabricated brake
+        // command or simulator shutdown. Simulator collision protection
+        // remains independent and unchanged.
+        if (rti_config_.native_source_reduced_sqp &&
+            status != MPC_RTI_CYCLE_ACCEPTED_FEASIBLE) {
+            record_cycle_health(status,result,solve_us);
+            RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),1000,
+                "Native source SQP did not certify a publishable 30-stage "
+                "solution (status=%s, source wall V=%.6g, "
+                "QP status=%d, elapsed=%.2fms); no legacy command issued",
+                cycle_status_name(status),
+                result.native_source_sqp_final_wall_violation_m2,
+                result.native_source_sqp_last_qp_status,solve_us/1000.);
+            if(diagnostics_pub_)
+                publish_cycle_diagnostics(state,coherent_state,
+                    control_time_prediction,control_prediction_us,
+                    last_projected_s_,source_dt,result,solve_us,
+                    control_ros_time.nanoseconds(),
+                    candidate_command_stamp_ns,callback_steady_ns,
+                    synchronize_steady_ns);
+            return;
         }
         if (try_publish_viability_recovery(
                 state, last_projected_s_, callback_steady_ns,

@@ -1,8 +1,10 @@
 #include "mpc_rti.h"
 #include "mpc_source_reduced_sqp.hpp"
+#include "mpc_source_sensitivity.hpp"
 #include "../src/mpc_rti_internal.hpp"
 #include "mpc_qp_convexity.hpp"
 #include <gtest/gtest.h>
+#include <Eigen/Eigenvalues>
 #include <algorithm>
 #include <cmath>
 #include <memory>
@@ -84,15 +86,19 @@ TEST(MpcSourceReducedSqp, NativeCycleUsesFullSourceAndIndependentStrictValidator
         result->candidate_controls[0].steering_target_rad);
     EXPECT_FLOAT_EQ(result->first_control.throttle_command,
         result->candidate_controls[0].throttle_command);
-    // Independent real actuator/rack rate checks, not QP-only feasibility.
-    const auto steer_step=std::min(
-        double(config.model.max_steering_command_step_rad),
-        .995*3.2*double(PREDICTION_DT_SECONDS));
+    // The actuator target is not constrained to the rack angle within one
+    // source stage. The source steering plant already respects its physical
+    // slew internally: verify rack evolution, NOT an artificial input trust
+    // region. Full legal target +/-0.5236 rad is always available.
+    const double physical_rack_step=3.2*double(PREDICTION_DT_SECONDS);
     for(int k=0;k<PREDICTION_HORIZON;++k) {
         const auto &plant=independent->states[k].plant;
+        const auto &next=independent->states[k+1].plant;
         const auto &u=result->candidate_controls[k];
-        EXPECT_LE(std::abs(double(u.steering_target_rad)-
-            plant.actual_steering_angle),steer_step+1e-5) << k;
+        EXPECT_LE(std::abs(double(u.steering_target_rad)),
+            config.model.max_steering_rad+1e-5) << k;
+        EXPECT_LE(std::abs(double(next.actual_steering_angle)-
+            plant.actual_steering_angle),physical_rack_step+1e-5) << k;
         EXPECT_LE(std::abs(double(u.throttle_command)-
             plant.delayed_throttle_command_2),
             config.model.max_throttle_command_step+1e-5) << k;
@@ -149,6 +155,48 @@ TEST(MpcSourceReducedSqp, FeasibleOnePassSkipsUnneededSocAndPreservesSourceCerti
         EXPECT_FLOAT_EQ(first[k].throttle_command,
                         second[k].throttle_command);
     }
+}
+
+TEST(MpcSourceReducedSqp, TwoSourcePassesRelinearizeAndRefreshGnHessian)
+{
+    Straight track;
+    auto config=configuration();
+    MpcModelControl_t seed[PREDICTION_HORIZON]{};
+    for(int k=0;k<PREDICTION_HORIZON;++k) {
+        seed[k].steering_target_rad=.02f;
+        seed[k].throttle_command=.12f;
+    }
+    auto nominal=std::make_unique<MpcRtiNominal_t>();
+    MpcRtiReference_t refs[PREDICTION_HORIZON+1]{};
+    ASSERT_TRUE(mpc_rti_build_nominal_same_epoch(
+        &track.initial,0.,nullptr,seed,PREDICTION_HORIZON,
+        track.track,track.count,track.lap,PREDICTION_DT_SECONDS,
+        PREDICTION_HORIZON,&config.model,nominal.get(),refs));
+    auto schedule=std::make_unique<MpcRtiObjectiveSchedule_t>();
+    ASSERT_TRUE(mpc_rti_build_objective_schedule(
+        nominal.get(),refs,&config.model,schedule.get()));
+    config.objective_schedule=schedule.get();
+    sdu_apex::source_sqp::Options options{};
+    options.max_iterations=2;
+    options.use_full_source_forward_sensitivities=true;
+    options.use_stage_local_jacobians=true;
+    options.use_gauss_newton_hessian=true;
+    options.source_exact_early_stop=false;
+    auto stats=std::make_unique<sdu_apex::source_sqp::Statistics>();
+    auto certified=std::make_unique<MpcRtiNominal_t>();
+    MpcModelControl_t output[PREDICTION_HORIZON]{};
+    ASSERT_TRUE(sdu_apex::source_sqp::optimize(
+        &track.initial,0.,track.track,track.count,track.lap,
+        PREDICTION_DT_SECONDS,&config,seed,options,stats.get(),
+        output,certified.get()));
+    EXPECT_EQ(stats->iterations,2)
+        << "do not skip the second SQP relinearization on an easy start";
+    EXPECT_EQ(stats->source_forward_sensitivity_intervals,120);
+    EXPECT_EQ(stats->source_tangent_objective_evaluations,240);
+    EXPECT_GT(stats->qp_solves,0);
+    ASSERT_TRUE(stats->feasible);
+    ASSERT_TRUE(certified->valid);
+    EXPECT_GE(certified->validation_minimum_corridor_slack_m,0.);
 }
 
 TEST(MpcSourceReducedSqp, TwentyDecisionStagesPreserveThirtySourceStages)
@@ -258,6 +306,163 @@ TEST(MpcSourceReducedSqp, FullSourcePhysicalForwardDerivativesMatchFiniteDiffere
         for(int row=0;row<120;++row)
             EXPECT_NEAR(forward->rate_jacobian[row][j],
                 fd->rate_jacobian[row][j],1.e-3) << row << " " << j;
+    }
+}
+
+TEST(MpcSourceReducedSqp, FullSourceGaussNewtonHasCrossStageCouplingsAndIsPsd)
+{
+    Straight straight;
+    auto config=configuration();
+    MpcModelControl_t seed[PREDICTION_HORIZON]{};
+    for(int k=0;k<PREDICTION_HORIZON;++k)
+        seed[k].throttle_command=.1f;
+    auto nominal=std::make_unique<MpcRtiNominal_t>();
+    MpcRtiReference_t references[PREDICTION_HORIZON+1]{};
+    ASSERT_TRUE(mpc_rti_build_nominal_same_epoch(
+        &straight.initial,0.,nullptr,seed,PREDICTION_HORIZON,
+        straight.track,straight.count,straight.lap,PREDICTION_DT_SECONDS,
+        PREDICTION_HORIZON,&config.model,nominal.get(),references));
+    auto schedule=std::make_unique<MpcRtiObjectiveSchedule_t>();
+    ASSERT_TRUE(mpc_rti_build_objective_schedule(
+        nominal.get(),references,&config.model,schedule.get()));
+    config.objective_schedule=schedule.get();
+    double objective=NAN;
+    float minimum_slack=NAN;
+    float margin[PREDICTION_HORIZON+1][2]{};
+    ASSERT_TRUE(mpc_rti_score_candidate_plan_and_corridor_for_diagnostics(
+        nominal.get(),straight.track,straight.count,straight.lap,
+        &config,&objective,&minimum_slack,margin));
+    auto output=std::make_unique<sdu_apex::source_sqp::FullSourceDerivatives>();
+    ASSERT_TRUE(sdu_apex::source_sqp::full_source_derivatives(
+        nominal.get(),straight.track,straight.count,straight.lap,
+        PREDICTION_DT_SECONDS,&config,60,.002,objective,0.,output.get(),
+        true));
+    EXPECT_EQ(output->dual_plant_intervals,60);
+    EXPECT_EQ(output->score_evaluations,120);
+    Eigen::Matrix<double,60,60> H;
+    for(int i=0;i<60;++i)for(int j=0;j<60;++j) {
+        H(i,j)=output->gn_hessian[i][j];
+        EXPECT_TRUE(std::isfinite(H(i,j))) << i << "," << j;
+        EXPECT_NEAR(H(i,j),output->gn_hessian[j][i],1e-8);
+    }
+    EXPECT_GT(std::abs(H(1,3)),1e-4)
+        << "consecutive throttle controls influence overlapping source states";
+    EXPECT_GT(std::abs(H(0,2)),1e-5)
+        << "steering commands influence common future heading residuals";
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,60,60>>
+        eigen(H,Eigen::EigenvaluesOnly);
+    ASSERT_EQ(eigen.info(),Eigen::Success);
+    EXPECT_GT(eigen.eigenvalues().minCoeff(),-1.e-6)
+        << "GN Hessian must be PSD, independent of tire branch curvature";
+}
+
+TEST(MpcSourceReducedSqp, LocalSourceTransitionJacobianMatchesFullHorizonTangent)
+{
+    Straight straight;
+    auto config=configuration();
+    MpcModelControl_t seed[PREDICTION_HORIZON]{};
+    for(int k=0;k<PREDICTION_HORIZON;++k)
+        seed[k].throttle_command=.1f;
+    auto nominal=std::make_unique<MpcRtiNominal_t>();
+    MpcRtiReference_t refs[PREDICTION_HORIZON+1]{};
+    ASSERT_TRUE(mpc_rti_build_nominal_same_epoch(
+        &straight.initial,0.,nullptr,seed,PREDICTION_HORIZON,
+        straight.track,straight.count,straight.lap,PREDICTION_DT_SECONDS,
+        PREDICTION_HORIZON,&config.model,nominal.get(),refs));
+    auto schedule=std::make_unique<MpcRtiObjectiveSchedule_t>();
+    ASSERT_TRUE(mpc_rti_build_objective_schedule(
+        nominal.get(),refs,&config.model,schedule.get()));
+    config.objective_schedule=schedule.get();
+    double objective=NAN;
+    float min_slack=NAN;
+    float margins[PREDICTION_HORIZON+1][2]{};
+    ASSERT_TRUE(mpc_rti_score_candidate_plan_and_corridor_for_diagnostics(
+        nominal.get(),straight.track,straight.count,straight.lap,
+        &config,&objective,&min_slack,margins));
+    auto direct=std::make_unique<sdu_apex::source_sqp::FullSourceDerivatives>();
+    auto local=std::make_unique<sdu_apex::source_sqp::FullSourceDerivatives>();
+    ASSERT_TRUE(sdu_apex::source_sqp::full_source_derivatives(
+        nominal.get(),straight.track,straight.count,straight.lap,
+        PREDICTION_DT_SECONDS,&config,60,.002,objective,0.,
+        direct.get(),true,false));
+    ASSERT_TRUE(sdu_apex::source_sqp::full_source_derivatives(
+        nominal.get(),straight.track,straight.count,straight.lap,
+        PREDICTION_DT_SECONDS,&config,60,.002,objective,0.,
+        local.get(),true,true));
+    ASSERT_EQ(local->dual_plant_intervals,60);
+    EXPECT_EQ(local->score_evaluations,120);
+    for(int j=0;j<60;++j) {
+        EXPECT_NEAR(local->gradient[j],direct->gradient[j],
+            0.003*std::max(1.,std::abs(direct->gradient[j]))+.01) << j;
+        for(int row=0;row<60;++row) {
+            EXPECT_NEAR(local->footprint[row][j],
+                direct->footprint[row][j],5.e-4) << row << ":" << j;
+            EXPECT_NEAR(local->gn_hessian[row][j],
+                direct->gn_hessian[row][j],
+                .003*std::max(1.,std::abs(direct->gn_hessian[row][j]))+
+                .015) << row << ":" << j;
+        }
+        for(int row=0;row<120;++row)
+            EXPECT_NEAR(local->actuator_rate[row][j],
+                direct->actuator_rate[row][j],2.e-5) << row << ":" << j;
+    }
+}
+
+TEST(MpcSourceReducedSqp, StageLocalFullSourceMatchesCausalDirectTangents)
+{
+    Straight straight;
+    auto config=configuration();
+    MpcModelControl_t seed[PREDICTION_HORIZON]{};
+    for(int k=0;k<PREDICTION_HORIZON;++k) {
+        seed[k].steering_target_rad=.02f*std::sin(.3f*k);
+        seed[k].throttle_command=.1f;
+    }
+    auto nominal=std::make_unique<MpcRtiNominal_t>();
+    MpcRtiReference_t refs[PREDICTION_HORIZON+1]{};
+    ASSERT_TRUE(mpc_rti_build_nominal_same_epoch(
+        &straight.initial,0.,nullptr,seed,PREDICTION_HORIZON,
+        straight.track,straight.count,straight.lap,PREDICTION_DT_SECONDS,
+        PREDICTION_HORIZON,&config.model,nominal.get(),refs));
+    auto schedule=std::make_unique<MpcRtiObjectiveSchedule_t>();
+    ASSERT_TRUE(mpc_rti_build_objective_schedule(
+        nominal.get(),refs,&config.model,schedule.get()));
+    config.objective_schedule=schedule.get();
+    double objective=NAN;
+    float minimum_slack=NAN;
+    float margins[PREDICTION_HORIZON+1][2]{};
+    ASSERT_TRUE(mpc_rti_score_candidate_plan_and_corridor_for_diagnostics(
+        nominal.get(),straight.track,straight.count,straight.lap,
+        &config,&objective,&minimum_slack,margins));
+    auto direct=std::make_unique<sdu_apex::source_sqp::FullSourceDerivatives>();
+    auto local=std::make_unique<sdu_apex::source_sqp::FullSourceDerivatives>();
+    const auto call=[&](bool stage_local,
+                        sdu_apex::source_sqp::FullSourceDerivatives *dest) {
+        return sdu_apex::source_sqp::full_source_derivatives(
+            nominal.get(),straight.track,straight.count,straight.lap,
+            PREDICTION_DT_SECONDS,&config,60,.002,objective,0.,dest,
+            true,stage_local);
+    };
+    ASSERT_TRUE(call(false,direct.get()));
+    ASSERT_TRUE(call(true,local.get()));
+    EXPECT_EQ(direct->dual_plant_intervals,60);
+    EXPECT_EQ(local->dual_plant_intervals,60);
+    EXPECT_EQ(local->score_evaluations,120);
+    for(int col=0;col<60;++col) {
+        EXPECT_NEAR(direct->gradient[col],local->gradient[col],
+                    .001*std::max(1.,std::abs(direct->gradient[col]))) << col;
+        for(int row=0;row<60;++row) {
+            EXPECT_NEAR(direct->footprint[row][col],local->footprint[row][col],
+                        2.e-4+5.e-5*std::abs(direct->footprint[row][col]))
+                << row << "," << col;
+            EXPECT_NEAR(direct->gn_hessian[row][col],
+                        local->gn_hessian[row][col],
+                        .002*std::max(1.,std::abs(direct->gn_hessian[row][col])))
+                << row << "," << col;
+        }
+        for(int row=0;row<120;++row)
+            EXPECT_NEAR(direct->actuator_rate[row][col],
+                        local->actuator_rate[row][col],1.e-4)
+                << row << "," << col;
     }
 }
 

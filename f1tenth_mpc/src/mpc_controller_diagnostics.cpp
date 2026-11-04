@@ -706,6 +706,91 @@ void MpcControllerNode::publish_cycle_diagnostics(const MpcRtiState_t &state,
         << result.native_source_sqp_qp_us
         << ",\"native_source_sqp_source_evaluation_us\":"
         << result.native_source_sqp_source_evaluation_us
+        << ",\"native_source_sqp_derivative_us\":"
+        << result.native_source_sqp_derivative_us
+        << ",\"native_source_sqp_dual_plant_worker_us\":"
+        << result.native_source_sqp_dual_plant_worker_us
+        << ",\"native_source_sqp_tangent_scoring_worker_us\":"
+        << result.native_source_sqp_tangent_scoring_worker_us
+        << ",\"native_source_sqp_cost_prediction_valid\":"
+        << (result.native_source_sqp_cost_prediction_valid?"true":"false")
+        << ",\"native_source_sqp_cost_prediction_error\":"
+        << (result.native_source_sqp_cost_prediction_valid?
+                std::to_string(result.native_source_sqp_cost_prediction_error):
+                "null")
+        << ",\"native_source_sqp_predicted_cost_change\":"
+        << (result.native_source_sqp_cost_prediction_valid?
+                std::to_string(result.native_source_sqp_predicted_cost_change):
+                "null")
+        << ",\"native_source_sqp_actual_cost_change\":"
+        << (result.native_source_sqp_cost_prediction_valid?
+                std::to_string(result.native_source_sqp_actual_cost_change):
+                "null")
+        << ",\"native_source_sqp_full_forward_intervals\":"
+        << result.native_source_sqp_full_forward_intervals
+        << ",\"native_source_sqp_tangent_score_evaluations\":"
+        << result.native_source_sqp_tangent_score_evaluations
+        << ",\"native_source_sqp_full_step_model_agreement\":[";
+    for(int k=0;k<2;++k) {
+        if(k)json<<",";
+        const bool valid=result.native_source_sqp_full_step_evaluated[k]!=0;
+        json<<"{\"valid\":"<<(valid?"true":"false")
+            <<",\"predicted_wall_violation_m2\":";
+        if(valid)json_number(result.native_source_sqp_qp_predicted_wall_violation_m2[k]);
+        else json<<"null";
+        json<<",\"exact_source_wall_violation_m2\":";
+        if(valid)json_number(result.native_source_sqp_source_actual_wall_violation_m2[k]);
+        else json<<"null";
+        json<<",\"maximum_wall_linearization_defect_m\":";
+        if(valid)json_number(result.native_source_sqp_max_wall_model_defect_m[k]);
+        else json<<"null";
+        json<<",\"accepted_alpha\":";
+        if(valid)json_number(result.native_source_sqp_selected_alpha[k]);
+        else json<<"null";
+        json<<",\"phase1_slack_sum\":";
+        if(valid)json_number(result.native_source_sqp_phase1_slack_sum[k]);
+        else json<<"null";
+        const bool cost_valid=valid &&
+            result.native_source_sqp_full_step_cost_model_valid[k]!=0;
+        json<<",\"racing_cost_model_valid\":"
+            <<(cost_valid?"true":"false")
+            <<",\"qp_predicted_racing_cost_change\":";
+        if(cost_valid)
+            json_number(result.native_source_sqp_full_step_cost_predicted_change[k]);
+        else json<<"null";
+        json<<",\"exact_source_racing_cost_change\":";
+        if(cost_valid)
+            json_number(result.native_source_sqp_full_step_cost_actual_change[k]);
+        else json<<"null";
+        json<<",\"racing_cost_prediction_error\":";
+        if(cost_valid)
+            json_number(result.native_source_sqp_full_step_cost_prediction_error[k]);
+        else json<<"null";
+        // This is the applied and exactly source-evaluated accepted alpha.
+        // Do not mix it with the rejected full-step cost comparison.
+        const bool accepted_cost_valid=
+            result.native_source_sqp_accepted_cost_model_valid[k]!=0;
+        json<<",\"accepted_racing_cost_model_valid\":"
+            <<(accepted_cost_valid?"true":"false")
+            <<",\"accepted_qp_predicted_racing_cost_change\":";
+        if(accepted_cost_valid)
+            json_number(result.native_source_sqp_accepted_cost_predicted_change[k]);
+        else json<<"null";
+        json<<",\"accepted_exact_source_racing_cost_change\":";
+        if(accepted_cost_valid)
+            json_number(result.native_source_sqp_accepted_cost_actual_change[k]);
+        else json<<"null";
+        json<<",\"accepted_racing_cost_prediction_error\":";
+        if(accepted_cost_valid)
+            json_number(result.native_source_sqp_accepted_cost_prediction_error[k]);
+        else json<<"null";
+        json<<"}";
+    }
+    json<<"]"
+        << ",\"native_source_sqp_near_feasible_projection_trials\":"
+        << result.native_source_sqp_near_feasible_projection_trials
+        << ",\"native_source_sqp_near_feasible_projection_accepts\":"
+        << result.native_source_sqp_near_feasible_projection_accepts
         << ",\"iterations\":" << result.solver_iterations
         << ",\"max_iterations_requested\":"
         << requested_max_solver_iterations_

@@ -4347,6 +4347,10 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             configuration->native_source_sqp_adaptive_stop!=0;
         opts.use_full_source_forward_sensitivities=
             configuration->native_source_sqp_full_source_forward!=0;
+        opts.use_gauss_newton_hessian=
+            configuration->native_source_sqp_gauss_newton_hessian!=0;
+        opts.use_stage_local_jacobians=
+            configuration->native_source_sqp_stage_local_jacobians!=0;
         opts.absolute_deadline_us=deadline_us;
         sdu_apex::source_sqp::Statistics report{};
         MpcModelControl_t selected[PREDICTION_HORIZON]{};
@@ -4384,6 +4388,57 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             report.source_forward_sensitivity_intervals;
         result->native_source_sqp_tangent_score_evaluations=
             report.source_tangent_objective_evaluations;
+        result->native_source_sqp_derivative_us=report.derivative_us;
+        result->native_source_sqp_dual_plant_worker_us=
+            report.full_forward_dual_plant_us;
+        result->native_source_sqp_tangent_scoring_worker_us=
+            report.full_forward_tangent_scoring_us;
+        if(report.initial_strict_source_valid &&
+           report.initial_wall_violation_m2<=1.e-12 &&
+           report.initial_rate_violation_m2<=1.e-10 &&
+           report.accepted_iterations>0) {
+            const double actual=report.accepted_cost[0]-report.initial_cost;
+            result->native_source_sqp_cost_prediction_valid=1;
+            result->native_source_sqp_actual_cost_change=actual;
+            result->native_source_sqp_cost_prediction_error=
+                report.first_cost_prediction_error;
+            result->native_source_sqp_predicted_cost_change=
+                actual-report.first_cost_prediction_error;
+        }
+        for(int k=0;k<2;++k) {
+            result->native_source_sqp_full_step_evaluated[k]=
+                report.full_step_evaluated[k]?1:0;
+            result->native_source_sqp_accepted_cost_model_valid[k]=
+                report.accepted_cost_model_valid[k]?1:0;
+            result->native_source_sqp_accepted_cost_predicted_change[k]=
+                report.accepted_cost_predicted_change[k];
+            result->native_source_sqp_accepted_cost_actual_change[k]=
+                report.accepted_cost_actual_change[k];
+            result->native_source_sqp_accepted_cost_prediction_error[k]=
+                report.accepted_cost_prediction_error[k];
+            result->native_source_sqp_full_step_cost_model_valid[k]=
+                report.full_step_cost_model_valid[k]?1:0;
+            result->native_source_sqp_full_step_cost_predicted_change[k]=
+                report.full_step_cost_predicted_change[k];
+            result->native_source_sqp_full_step_cost_actual_change[k]=
+                report.full_step_cost_actual_change[k];
+            result->native_source_sqp_full_step_cost_prediction_error[k]=
+                report.full_step_cost_prediction_error[k];
+            result->native_source_sqp_qp_predicted_wall_violation_m2[k]=
+                report.full_step_local_wall_violation_m2[k];
+            result->native_source_sqp_source_actual_wall_violation_m2[k]=
+                report.full_step_source_wall_violation_m2[k];
+            result->native_source_sqp_max_wall_model_defect_m[k]=
+                report.full_step_max_wall_defect_m[k];
+            result->native_source_sqp_selected_alpha[k]=
+                report.accepted_alpha[k];
+            result->native_source_sqp_phase1_slack_sum[k]=
+                report.phase1_slack_sum[k];
+        }
+        result->native_source_sqp_near_feasible_projection_trials=
+            report.near_feasible_source_projection_trials;
+        result->native_source_sqp_near_feasible_projection_accepts=
+            report.near_feasible_source_projection_accepts;
         result->first_pass_objective=report.initial_cost;
         result->second_pass_objective=report.final_cost;
         result->nonlinear_objective=report.final_cost;

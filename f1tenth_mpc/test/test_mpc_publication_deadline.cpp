@@ -11,6 +11,25 @@ TEST(MpcPublicationDeadline, AcceptsOnlyStrictlyUnderBudget)
   EXPECT_FALSE(f1tenth_mpc::mpc_cycle_within_publication_deadline(20.001, 20.0));
 }
 
+TEST(MpcPublicationDeadline, AcceptsTwentyTwoMsButNotTheTwentyFiveMsControlPeriod)
+{
+  EXPECT_TRUE(f1tenth_mpc::mpc_cycle_within_publication_deadline(21.999, 22.0));
+  EXPECT_FALSE(f1tenth_mpc::mpc_cycle_within_publication_deadline(22.0, 22.0));
+  EXPECT_FALSE(f1tenth_mpc::mpc_cycle_within_publication_deadline(22.001, 22.0));
+  EXPECT_FALSE(f1tenth_mpc::mpc_publication_budget_valid(25.0));
+  int publications = 0;
+  constexpr int64_t start_ns = 1'000'000'000;
+  EXPECT_TRUE(f1tenth_mpc::mpc_publish_before_deadline(
+    start_ns, 22.0, nullptr,
+    [] { return int64_t{1'021'999'000}; },
+    [&] { ++publications; }));
+  EXPECT_FALSE(f1tenth_mpc::mpc_publish_before_deadline(
+    start_ns, 22.0, nullptr,
+    [] { return int64_t{1'022'000'000}; },
+    [&] { ++publications; }));
+  EXPECT_EQ(publications, 1);
+}
+
 TEST(MpcPublicationDeadline, PriorPlanCannotBypassTheSameGate)
 {
   // The production publish wrapper is shared by normal, candidate-prefix,
@@ -62,9 +81,11 @@ TEST(MpcPublicationDeadline, RejectsInvalidMeasurementsAndBudgets)
   EXPECT_TRUE(f1tenth_mpc::mpc_publication_budget_valid(20.0));
   EXPECT_TRUE(f1tenth_mpc::mpc_publication_budget_valid(5.0));
   EXPECT_FALSE(f1tenth_mpc::mpc_publication_budget_valid(0.0));
-  EXPECT_FALSE(f1tenth_mpc::mpc_publication_budget_valid(20.001));
+  EXPECT_TRUE(f1tenth_mpc::mpc_publication_budget_valid(20.001));
+  EXPECT_TRUE(f1tenth_mpc::mpc_publication_budget_valid(22.0));
+  EXPECT_FALSE(f1tenth_mpc::mpc_publication_budget_valid(22.001));
   EXPECT_FALSE(f1tenth_mpc::mpc_publication_budget_valid(inf));
   EXPECT_FALSE(f1tenth_mpc::mpc_publication_budget_valid(nan));
   EXPECT_FALSE(f1tenth_mpc::mpc_cycle_within_publication_deadline(
-    1.0, 20.001));
+    1.0, 22.001));
 }

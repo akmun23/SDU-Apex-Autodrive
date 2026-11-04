@@ -57,6 +57,8 @@ def run(args):
             if args.suffix_fd:cmd.append("--suffix-fd")
             if args.adaptive:cmd.append("--adaptive")
             if args.forward_source:cmd.append("--full-source-forward")
+            if args.gn_hessian:cmd.append("--gn-hessian")
+            if args.stage_jacobians:cmd.append("--stage-jacobians")
             if args.deadline_us:cmd.append(f"--deadline-us={args.deadline_us:.0f}")
             solved=call(cmd)
             accepted=solved["accepted"]
@@ -168,6 +170,10 @@ def main():
         help="reuse exact baseline physical prefixes in source FD derivatives")
     p.add_argument("--adaptive",action="store_true",
         help="source-exact stop after first SQP step with >=2pct cost decrease and >=2mm clearance")
+    p.add_argument("--stage-jacobians",action="store_true",
+        help="opt-in exact source stage transition 26+2 Jacobians")
+    p.add_argument("--gn-hessian",action="store_true",
+        help="opt-in all-control source Gauss-Newton cost Hessian")
     p.add_argument("--forward-source",action="store_true",
         help="experimental full 26-physical-state source forward sensitivity")
     p.add_argument("--out",type=Path,default=Path("/tmp/mpc_native_source_closed_loop"))

@@ -13,6 +13,8 @@
 #include <cmath>
 #include <memory>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
 /*
  * Source-exact 60-control reduced SQP.
@@ -128,7 +130,8 @@ struct Evaluation {
     }
 
     bool evaluate(const Vec &y,bool strict_check,Sample &sample,
-                  int first_changed_command_stage=0) {
+                  int first_changed_command_stage=0,
+                  const Sample *acceptance_reference=nullptr) {
         const double begin=now_us();
         // Every expensive finite-difference oracle checks its REAL absolute
         // deadline before starting. A rejected epoch never publishes an
@@ -241,9 +244,11 @@ struct Evaluation {
             sample.tail_wall_v=sample.wall.tail(TailW).array()
                 .min(0.).square().sum();
         }
-        const double rack_step=std::min(
-            double(model.max_steering_command_step_rad),
-            .995*3.2*double(dt));
+        // Physical rack slew is already applied inside the exact source
+        // transition. A target is permitted to jump within the real +/-
+        // steering command range: do NOT constrain the target to be reached
+        // by the rack within one model stage (that is a spurious trust band).
+        const double rack_step=double(model.max_steering_command_step_rad);
         for(int k=0;k<N;++k) {
             const double ds=commands[k].steering_target_rad-
                 nominal->states[k].plant.actual_steering_angle;
@@ -257,7 +262,40 @@ struct Evaluation {
         sample.wall_v=wall_violation(sample.wall,false);
         sample.rate_v=rate_violation(sample.rate);
         sample.margin=minimum_clearance(sample.wall);
-        if(strict_check) {
+        // Accept/reject is defined by exact source cost and the physical
+        // corridor/rate margins. When a trial already fails those necessary
+        // conditions, an additional strict 30-stage re-integration cannot
+        // possibly make it acceptable. Only an otherwise ACCEPTABLE trial
+        // continues to independent strict source certification.
+        // This is a computational predicate, not an altered cost, relaxed
+        // corridor, fallback policy or speculative command publication.
+        bool fails_necessary_acceptance=false;
+        if(strict_check && acceptance_reference) {
+            const auto &base=*acceptance_reference;
+            if(base.strict_valid && base.wall_v<=1e-12 &&
+               base.rate_v<=1e-10) {
+                fails_necessary_acceptance=
+                    sample.wall_v>1e-12 || sample.rate_v>1e-10 ||
+                    !(sample.cost<base.cost-1e-6);
+            } else if(sample.wall_v>1e-12) {
+                const double old_v=wall_violation(base.wall,true);
+                const double new_v=wall_violation(sample.wall,true);
+                fails_necessary_acceptance=
+                    !(new_v<old_v-std::max(1.e-11,old_v*1.e-5)) ||
+                    sample.rate_v>base.rate_v+1.e-8;
+            }
+        }
+        // The normal SQP has already propagated the ENTIRE source model
+        // and scored the same footprint/rate margins. A candidate with an
+        // independently measured physical inequality violation can never
+        // become a publishable certificate. Do not perform a second 30-step
+        // integration purely to reconfirm that known infeasibility. Trials
+        // which CAN become feasible still run the unchanged independent
+        // validator, including its additional safety checks.
+        const bool known_physically_infeasible=sample.wall_v>1.e-12 ||
+            sample.rate_v>1.e-10;
+        if(strict_check && !fails_necessary_acceptance &&
+           !known_physically_infeasible) {
             int stage=-1;
             const auto status=mpc_rti_validate_candidate_plan(
                 initial,progress,commands,trajectory,trajectory_count,
@@ -298,7 +336,9 @@ struct Derivatives {
 };
 bool deriv(Evaluation &eval,const Vec &y,const Sample &base,
     double h,bool feasible,int decision_count,
-    bool use_full_source_forward_sensitivities,Derivatives &out) {
+    bool use_full_source_forward_sensitivities,
+    bool use_gauss_newton_hessian,
+    bool use_stage_local_jacobians,Derivatives &out) {
     if(use_full_source_forward_sensitivities) {
         // No heap churn for ~90 kB of derivative columns every callback.
         // The output is always reset before propagation; thread-local means
@@ -306,13 +346,26 @@ bool deriv(Evaluation &eval,const Vec &y,const Sample &base,
         static thread_local auto result=
             std::make_unique<FullSourceDerivatives>();
         *result={};
-        if(!full_source_derivatives(eval.nominal.get(),eval.trajectory,
+        const bool success=full_source_derivatives(
+                eval.nominal.get(),eval.trajectory,
                 eval.trajectory_count,eval.lap_length,eval.dt,eval.cfg,
-                decision_count,h,base.cost,eval.deadline_us,result.get())) {
-            if(result->deadline_exhausted && eval.stats)
-                eval.stats->deadline_exhausted=true;
-            return false;
+                decision_count,h,base.cost,eval.deadline_us,result.get(),
+                use_gauss_newton_hessian && feasible,
+                use_stage_local_jacobians);
+        // Always retain partial profiling counters when a REAL deadline
+        // interrupts derivative propagation. Otherwise a live 20ms miss
+        // looks indistinguishable from never entering the source Jacobian.
+        if(eval.stats) {
+            eval.stats->source_forward_sensitivity_intervals+=
+                result->dual_plant_intervals;
+            eval.stats->source_tangent_objective_evaluations+=
+                result->score_evaluations;
+            eval.stats->full_forward_dual_plant_us+=result->dual_plant_us;
+            eval.stats->full_forward_tangent_scoring_us+=
+                result->tangent_scoring_us;
+            eval.stats->deadline_exhausted|=result->deadline_exhausted;
         }
+        if(!success)return false;
         for(int j=0;j<decision_count;++j) {
             out.gradient[j]=result->gradient[j];
             out.hessian(j,j)=feasible?
@@ -322,15 +375,13 @@ bool deriv(Evaluation &eval,const Vec &y,const Sample &base,
             for(int row=0;row<R;++row)
                 out.rate(row,j)=result->actuator_rate[row][j];
         }
-        if(eval.stats) {
-            eval.stats->source_forward_sensitivity_intervals+=
-                result->dual_plant_intervals;
-            eval.stats->source_tangent_objective_evaluations+=
-                result->score_evaluations;
-            eval.stats->full_forward_dual_plant_us+=
-                result->dual_plant_us;
-            eval.stats->full_forward_tangent_scoring_us+=
-                result->tangent_scoring_us;
+        // Racing-cost Hessian is never consumed by Phase I: that QP
+        // minimizes physical infeasibility with identity curvature. Build
+        // GN only once a source-feasible racing-cost QP actually needs it.
+        if(use_gauss_newton_hessian && feasible) {
+            for(int row=0;row<decision_count;++row)
+                for(int col=0;col<decision_count;++col)
+                    out.hessian(row,col)=result->gn_hessian[row][col];
         }
         return out.gradient.allFinite()&&out.hessian.allFinite()&&
             out.wall.allFinite()&&out.rate.allFinite();
@@ -360,6 +411,12 @@ bool deriv(Evaluation &eval,const Vec &y,const Sample &base,
 struct Qp {
     Eigen::MatrixXd H,A;
     Eigen::VectorXd q,b;
+    // Rows [box_row_start,box_row_start+2*box_variable_count) are
+    // exact +e_j/-e_j physical control box inequalities. Their contribution
+    // to A^T diag(lambda/s) A is diagonal. Stage/slack constraints retain
+    // their original dense rows and exact source Jacobians.
+    int box_row_start{-1};
+    int box_variable_count{};
 };
 struct QpAnswer {
     Eigen::VectorXd x;
@@ -381,11 +438,14 @@ bool newton(const Qp &qp,const Eigen::LDLT<Eigen::MatrixXd> &ldlt,
     const Eigen::VectorXd &s,const Eigen::VectorXd &lambda,
     const Eigen::VectorXd &rd,const Eigen::VectorXd &rp,
     const Eigen::VectorXd &rc,
-    Eigen::VectorXd &dx,Eigen::VectorXd &ds,Eigen::VectorXd &dlambda) {
-    // Both Mehrotra predictor and corrector use the SAME (H + A' D A)
-    // coefficient matrix at this IPM iteration. Factor only once.
-    const Eigen::VectorXd rhs=-rd+qp.A.transpose()*
+    Eigen::VectorXd &dx,Eigen::VectorXd &ds,Eigen::VectorXd &dlambda,
+    Eigen::VectorXd &rhs) {
+    // The predictor and corrector reuse the same KKT factorization AND
+    // the same preallocated right-hand side. Avoid a new heap allocation
+    // and a copy for every Newton solve at 40 Hz.
+    rhs.noalias()=qp.A.transpose()*
         ((rc.array()-lambda.array()*rp.array())/s.array()).matrix();
+    rhs-=rd;
     dx=ldlt.solve(rhs);
     if(ldlt.info()!=Eigen::Success || !dx.allFinite())return false;
     ds=-rp-qp.A*dx;
@@ -394,76 +454,134 @@ bool newton(const Qp &qp,const Eigen::LDLT<Eigen::MatrixXd> &ldlt,
 }
 // Dense primal-dual Mehrotra IPM, all inequalities in original units.
 // No "solved" flag is accepted without an independent primal certificate.
-QpAnswer solve_qp(const Qp &qp,int maximum,double deadline_us=0.) {
+QpAnswer solve_qp(const Qp &qp,int maximum,double deadline_us=0.,
+                  const Eigen::VectorXd *warm_primal=nullptr) {
     QpAnswer result{};
     const int m=qp.b.size(),n=qp.q.size();
     if(n==0||m==0||qp.H.rows()!=n||qp.H.cols()!=n||
        qp.A.rows()!=m||qp.A.cols()!=n||!qp.H.allFinite()||
        !qp.q.allFinite()||!qp.A.allFinite()||!qp.b.allFinite())return result;
     Eigen::VectorXd x=Eigen::VectorXd::Zero(n);
+    const bool use_warm=warm_primal &&
+        warm_primal->size()==n && warm_primal->allFinite();
+    if(use_warm)x=*warm_primal;
     Eigen::VectorXd s=Eigen::VectorXd::Ones(m);
     Eigen::VectorXd lambda=Eigen::VectorXd::Ones(m);
     const Eigen::VectorXd ax=qp.A*x;
     for(int i=0;i<m;++i)
-        s[i]=std::max(1.,qp.b[i]-ax[i]+1.);
+        s[i]=use_warm
+            ?std::max(.01,qp.b[i]-ax[i]+.01)
+            :std::max(1.,qp.b[i]-ax[i]+1.);
     // Reuse all Eigen workspaces and the LDLT factor buffer through the
     // interior-point iterations. This preserves the original normal-matrix
     // expression and its strict KKT tests, unlike the rejected structured
     // numerical variant.
     Eigen::ArrayXd weights(m);
-    Eigen::MatrixXd weighted(m,n),W(n,n);
+    const int box_begin=qp.box_row_start;
+    const int box_count=qp.box_variable_count;
+    const bool structured_boxes=box_begin>=0 && box_count>0 &&
+        box_count<=n && box_begin+2*box_count<=m;
+    const int box_end=structured_boxes?box_begin+2*box_count:0;
+    const int tail_count=structured_boxes?m-box_end:0;
+    Eigen::MatrixXd weighted(structured_boxes?0:m,n),W(n,n);
+    Eigen::MatrixXd weighted_top(structured_boxes?box_begin:0,n);
+    Eigen::MatrixXd weighted_tail(tail_count,n);
     Eigen::LDLT<Eigen::MatrixXd> ldlt(n);
-    Eigen::VectorXd rd(n),rp(m),rc(m),corr(m);
-    Eigen::VectorXd dx(n),ds(m),dl(m),step(n),sstep(m),lstep(m);
+    Eigen::VectorXd rd(n),rp(m),rc(m),corr(m),Hx(n),Atlambda(n);
+    Eigen::VectorXd dx(n),ds(m),dl(m),step(n),sstep(m),lstep(m),rhs(n);
+    int stop_reason=0;
     for(int it=0;it<maximum;++it) {
         // The solver has no right to consume an entire control deadline
         // trying to repair an already impossible physical corner.
         if(deadline_us>0. && now_us()>=deadline_us) {
             result.status=-2; // deadline, not numerical feasibility
-            break;
+            stop_reason=2;break;
         }
-        rd=qp.H*x+qp.q+qp.A.transpose()*lambda;
+        // This A'lambda and Hx product is used by both the KKT
+        // residual and the scaled stopping test. Calculate each once.
+        Hx.noalias()=qp.H*x;
+        Atlambda.noalias()=qp.A.transpose()*lambda;
+        rd=Hx+qp.q+Atlambda;
         rp=qp.A*x+s-qp.b;
         const double mu=s.dot(lambda)/m;
         const double dualnorm=rd.lpNorm<Eigen::Infinity>();
         const double scale=std::max({1.,qp.q.lpNorm<Eigen::Infinity>(),
-            (qp.H*x).lpNorm<Eigen::Infinity>(),
-            (qp.A.transpose()*lambda).lpNorm<Eigen::Infinity>()});
+            Hx.lpNorm<Eigen::Infinity>(),
+            Atlambda.lpNorm<Eigen::Infinity>()});
         result.iterations=it;
         result.relative_dual=dualnorm/scale;
         result.gap=mu;
         const double violation=rp.lpNorm<Eigen::Infinity>();
         if(violation<1.e-7 && result.relative_dual<1.e-7 && mu<1.e-7) {
-            result.status=1;break;
+            result.status=1;stop_reason=1;break;
         }
-        if(!finite(mu)||mu<=0.||mu>1e30||!finite(violation))break;
+        if(!finite(mu)||mu<=0.||mu>1e30||!finite(violation)) {
+            stop_reason=3;break;
+        }
         weights=lambda.array()/s.array();
-        weighted=qp.A.array().colwise()*weights;
-        W=qp.H+qp.A.transpose()*weighted;
+        if(structured_boxes) {
+            W=qp.H;
+            if(box_begin>0) {
+                weighted_top=qp.A.topRows(box_begin).array().colwise()*
+                    weights.head(box_begin);
+                W.noalias()+=qp.A.topRows(box_begin).transpose()*
+                    weighted_top;
+            }
+            if(tail_count>0) {
+                weighted_tail=qp.A.bottomRows(tail_count).array().colwise()*
+                    weights.tail(tail_count);
+                W.noalias()+=qp.A.bottomRows(tail_count).transpose()*
+                    weighted_tail;
+            }
+            for(int coordinate=0;coordinate<box_count;++coordinate)
+                W(coordinate,coordinate)+=
+                    weights[box_begin+2*coordinate]+
+                    weights[box_begin+2*coordinate+1];
+        } else {
+            weighted=qp.A.array().colwise()*weights;
+            W=qp.H+qp.A.transpose()*weighted;
+        }
         W.diagonal().array()+=1.e-11*std::max(
             1.,W.diagonal().cwiseAbs().maxCoeff());
         ldlt.compute(W);
-        if(ldlt.info()!=Eigen::Success || !ldlt.isPositive())break;
+        if(ldlt.info()!=Eigen::Success || !ldlt.isPositive()) {
+            stop_reason=4;break;
+        }
         rc=s.cwiseProduct(lambda);
-        if(!newton(qp,ldlt,s,lambda,rd,rp,rc,dx,ds,dl))break;
+        if(!newton(qp,ldlt,s,lambda,rd,rp,rc,dx,ds,dl,rhs)) {
+            stop_reason=5;break;
+        }
         const double ap=fraction(s,ds,1.),ad=fraction(lambda,dl,1.);
         const double mua=(s+ap*ds).dot(lambda+ad*dl)/m;
         const double sigma=std::pow(std::clamp(mua/mu,0.,1.),3.);
         corr=rc+ds.cwiseProduct(dl)-
             Eigen::VectorXd::Constant(m,sigma*mu);
-        if(!newton(qp,ldlt,s,lambda,rd,rp,corr,step,sstep,lstep))break;
+        if(!newton(qp,ldlt,s,lambda,rd,rp,corr,step,sstep,lstep,rhs)) {
+            stop_reason=6;break;
+        }
         const double a=fraction(s,sstep,.995);
         const double b=fraction(lambda,lstep,.995);
-        if(a<=0.||b<=0.)break;
+        if(a<=0.||b<=0.) {stop_reason=7;break;}
         x+=a*step;s+=a*sstep;lambda+=b*lstep;
         if(!x.allFinite()||!s.allFinite()||!lambda.allFinite()||
-           (s.array()<=0.).any()||(lambda.array()<=0.).any())break;
+           (s.array()<=0.).any()||(lambda.array()<=0.).any()) {
+            stop_reason=8;break;
+        }
     }
     result.x=x;
     result.max_violation=max_violation(qp,x);
     if(result.status!=-2 &&
        (result.status!=1 || result.max_violation>1e-5 ||
         !finite(result.max_violation)))result.status=0;
+    if(std::getenv("SDU_APEX_SOURCE_QP_DEBUG")) {
+        std::fprintf(stderr,
+            "SOURCE_QP_DEBUG n=%d m=%d warm=%d status=%d reason=%d "
+            "iterations=%d relative_dual=%.8g gap=%.8g "
+            "max_primal_violation=%.8g norm_step=%.8g\n",
+            n,m,use_warm?1:0,result.status,stop_reason,
+            result.iterations,result.relative_dual,result.gap,
+            result.max_violation,x.norm());
+    }
     return result;
 }
 // Constraints -Jwall*dy<=wall-buffer; -Jrate*dy<=rate; physical boxes.
@@ -472,18 +590,40 @@ Qp assemble_hard(const Vec &y,const Sample &base,
     const Mat &H,const Vec &g,int walls) {
     Qp q{};
     q.H=H;q.q=g;
-    q.A=Eigen::MatrixXd::Zero(walls+R+2*D,D);
-    q.b=Eigen::VectorXd::Zero(walls+R+2*D);
+    // With full legal steering and throttle command ranges, the input-to-
+    // rack and throttle-difference rows are algebraically dominated by the
+    // physical input boxes below. The rack itself still has EXACT source
+    // slew dynamics in the nonlinear model. Omit these redundant 120 IPM
+    // inequalities instead of repeatedly factorizing them at 40 Hz.
+    // If a narrower physical actuator slew is explicitly configured, keep
+    // all rate rows and their exact source sensitivities.
+    const bool redundant_rate_rows=
+        double(model.max_steering_command_step_rad)>=
+            2.*double(model.max_steering_rad)-1.e-7 &&
+        double(model.max_throttle_command_step)>=1.-1.e-7;
+    const int rate_rows=redundant_rate_rows?0:R;
+    q.A=Eigen::MatrixXd::Zero(walls+rate_rows+2*D,D);
+    q.b=Eigen::VectorXd::Zero(walls+rate_rows+2*D);
     q.A.topRows(walls)=-deriv.wall.topRows(walls);
     q.b.head(walls)=base.wall.head(walls).array()-kMarginBuffer;
-    q.A.middleRows(walls,R)=-deriv.rate;q.b.segment(walls,R)=base.rate;
-    const int first=walls+R;
+    if(rate_rows) {
+        q.A.middleRows(walls,R)=-deriv.rate;
+        q.b.segment(walls,R)=base.rate;
+    }
+    const int first=walls+rate_rows;
+    q.box_row_start=first;
+    q.box_variable_count=D;
     for(int j=0;j<D;++j) {
         const int axis=j%2;
-        const double lo=(axis==0 ?-model.max_steering_rad:.001)/
-            kScale[axis]-y[j];
-        const double hi=(axis==0 ? model.max_steering_rad:1.)/
-            kScale[axis]-y[j];
+        // Steering uses the full physical target range; rack slew is
+        // simulated by the exact source plant, not imposed as a target
+        // trust region. Restrict throttle to the continuous DRIVE mode:
+        // zero activates Unity's separate hard-braking dynamics and must
+        // never be generated by this MPC formulation.
+        const double lo=(axis==0 ?-model.max_steering_rad:
+            double(MPC_THROTTLE_MIN_DRIVE))/kScale[axis]-y[j];
+        const double hi=(axis==0 ? model.max_steering_rad:
+            double(MPC_THROTTLE_MAX))/kScale[axis]-y[j];
         q.A(first+2*j,j)=1.;q.b[first+2*j]=hi;
         q.A(first+2*j+1,j)=-1.;q.b[first+2*j+1]=-lo;
     }
@@ -502,6 +642,8 @@ Qp assemble_slack(const Qp &hard,bool objective_lp,
     else q.H.topLeftCorner(variables,variables).diagonal().array()=1.;
     q.A=Eigen::MatrixXd::Zero(m,variables+walls);
     q.b=Eigen::VectorXd::Zero(m);
+    q.box_row_start=hard.box_row_start;
+    q.box_variable_count=hard.box_variable_count;
     q.A.topLeftCorner(walls,variables)=hard.A.topRows(walls);
     q.A.topRightCorner(walls,walls)=
         -Eigen::MatrixXd::Identity(walls,walls);
@@ -535,11 +677,15 @@ bool qp_step(const Vec &y,const Sample &base,
         hard.H=hard.H.topLeftCorner(decision_count,decision_count).eval();
         hard.q=hard.q.head(decision_count).eval();
         hard.A=hard.A.leftCols(decision_count).eval();
+        // The 20-stage reduced-mode experiment retains 30-stage input
+        // boxes. Only 40 coordinates still have nonzero box columns.
+        hard.box_variable_count=decision_count;
     }
     step.setZero();
-    auto solve=[&](const Qp &problem) {
+    auto solve=[&](const Qp &problem,
+                   const Eigen::VectorXd *warm=nullptr) {
         const double start=now_us();
-        auto res=solve_qp(problem,max_qp_iter,deadline_us);
+        auto res=solve_qp(problem,max_qp_iter,deadline_us,warm);
         if(res.status==-2)stats.deadline_exhausted=true;
         stats.qp_us+=now_us()-start;
         stats.qp_iterations+=res.iterations;
@@ -555,6 +701,48 @@ bool qp_step(const Vec &y,const Sample &base,
         step.head(decision_count)=result.x;
         return step.allFinite();
     }
+    // EXPERIMENTAL uniform first-phase merit QP. Replaces the hard
+    // affine corridor constraint with a Gauss-Newton least-squares model
+    // of the exact source footprint deficits. The physical control boxes
+    // (and any genuinely configured physical command-rate inequalities)
+    // remain HARD constraints. The local wall merit is NOT a safety
+    // certificate: every proposed command is independently checked
+    // against exact full-horizon nonlinear source constraints.
+    //
+    // The one-pass frozen hard feasibility QP may ask for a direction
+    // that is only locally feasible, while completely missing a large
+    // smooth reduction in physical violation. This tests an alternative
+    // convex QP formulation, not a fallback command or input trust radius.
+    if(const char *experimental=std::getenv(
+            "SDU_APEX_SOURCE_PHASE1_GN_MERIT")) {
+        const double damping=std::atof(experimental);
+        if(!std::isfinite(damping)||damping<=0.)return false;
+        Qp merit=hard;
+        // Only the physical input constraints remain hard. Their rows
+        // follow all wall rows and retain exactly the original bounds.
+        merit.A=hard.A.bottomRows(hard.A.rows()-walls).eval();
+        merit.b=hard.b.tail(hard.b.size()-walls).eval();
+        merit.box_row_start=hard.box_row_start-walls;
+        merit.H=Eigen::MatrixXd::Identity(decision_count,
+            decision_count)*damping;
+        merit.q=Eigen::VectorXd::Zero(decision_count);
+        const Eigen::MatrixXd J=d.wall.topRows(walls).leftCols(decision_count);
+        const auto source_margins=base.wall.head(walls);
+        const double near_band=std::getenv("SDU_APEX_SOURCE_PHASE1_GN_BAND_M")
+            ?std::max(0.,std::atof(std::getenv(
+                "SDU_APEX_SOURCE_PHASE1_GN_BAND_M"))):0.;
+        for(int row=0;row<walls;++row) {
+            const double deficit=kMarginBuffer+near_band-source_margins[row];
+            if(deficit<=0.)continue;
+            const auto j=J.row(row);
+            merit.H.noalias()+=j.transpose()*j;
+            merit.q.noalias()-=deficit*j.transpose();
+        }
+        const auto result=solve(merit);
+        if(result.status!=1)return false;
+        step.head(decision_count)=result.x;
+        return step.allFinite();
+    }
     // A source-infeasible nominal does NOT imply its linearized wall
     // constraints are infeasible. Test the exact hard min-norm Phase-I QP
     // first. An LP stopped with a micrometre residual must not cause the
@@ -562,7 +750,23 @@ bool qp_step(const Vec &y,const Sample &base,
     // hard linearized problem is in fact solvable. Only enter the true
     // slack LP when this hard QP is independently uncertified.
     const auto direct=solve(hard);
-    if(direct.status==1) {
+    // Inexact-SQP feasibility direction: the local HARD inequalities
+    // are independently satisfied, complementary gap has collapsed, and
+    // the *scaled* dual residual is small compared with source-model
+    // differential uncertainty. Strict cost-optimal QPs do NOT use this
+    // criterion. A local direction is NEVER a publication certificate:
+    // it still undergoes the full nonlinear source merit filter and the
+    // independent 30-stage source collision/actuator validation.
+    constexpr double kPhaseOnePrimalTolerance=1.e-8;
+    constexpr double kPhaseOneRelativeDualTolerance=1.e-4;
+    constexpr double kPhaseOneComplementarityTolerance=1.e-7;
+    const bool certified_inexact_direction=
+        direct.status==0 && direct.x.size()==decision_count &&
+        direct.x.allFinite() &&
+        direct.max_violation<=kPhaseOnePrimalTolerance &&
+        direct.relative_dual<=kPhaseOneRelativeDualTolerance &&
+        direct.gap<=kPhaseOneComplementarityTolerance;
+    if(direct.status==1 || certified_inexact_direction) {
         step.head(decision_count)=direct.x;
         return step.allFinite();
     }
@@ -576,8 +780,13 @@ bool qp_step(const Vec &y,const Sample &base,
         if(stage2.status!=1)return false;
         step.head(decision_count)=stage2.x.head(decision_count);
     } else {
-        // Affine footprint is fully repairable; use hard QP minimal norm.
-        const auto stage2=solve(hard);
+        // Warm-start the strict hard minimum-norm solve from the
+        // already-certified LP primal. The LP step alone does not
+        // minimize control change, so it is NOT a substitute for the
+        // lexicographic Phase-I direction.
+        const Eigen::VectorXd warm_primal=
+            stage1.x.head(decision_count);
+        const auto stage2=solve(hard,&warm_primal);
         if(stage2.status!=1)return false;
         step.head(decision_count)=stage2.x;
     }
@@ -643,6 +852,9 @@ bool optimize(const MpcRtiState_t *initial,double progress,
         options.terminal_lookahead_steps!=3) ||
        (options.control_decision_stages!=20 &&
         options.control_decision_stages!=N) ||
+       ((options.use_gauss_newton_hessian ||
+         options.use_stage_local_jacobians) &&
+        !options.use_full_source_forward_sensitivities) ||
        (options.use_full_source_forward_sensitivities &&
         options.terminal_lookahead_steps!=0))
         return false;
@@ -696,6 +908,19 @@ bool optimize(const MpcRtiState_t *initial,double progress,
     Vec accepted_y=y;
     bool have_accepted=false;
     Mat H=Mat::Identity();
+    // Save the exact accepted source nominal after nonlinear verification.
+    // A rejected alpha/SOC/projection probe can overwrite evaluator.nominal.
+    // Replaying the accepted full 30-stage physics solely to prepare the
+    // next SQP Jacobian is redundant: copy the exact accepted state instead.
+    auto accepted_nominal=std::make_unique<MpcRtiNominal_t>();
+    bool accepted_nominal_valid=false;
+    auto snapshot_accepted_nominal=[&] {
+        if(!evaluator.nominal || !evaluator.nominal->valid ||
+           evaluator.nominal->horizon!=N)return false;
+        *accepted_nominal=*evaluator.nominal;
+        accepted_nominal_valid=true;
+        return true;
+    };
     // Snapshot previous-epoch KKT duals before updating the current
     // memory. Never apply an uncommitted QP from a rejected RTI cycle.
     Vec previous_y=Vec::Zero(),previous_grad=Vec::Zero();
@@ -711,22 +936,28 @@ bool optimize(const MpcRtiState_t *initial,double progress,
         if((options.reuse_unperturbed_fd_prefix ||
             options.use_full_source_forward_sensitivities) &&
             iteration>0) {
-            // Line search / SOC can leave the temporary rollout buffer
-            // holding an unaccepted candidate. Recreate the EXACT accepted
-            // command nominal once so every stage-k prefix is causal.
-            Sample confirmed{};
-            if(!evaluator.evaluate(y,false,confirmed) ||
-               (confirmed.wall-base.wall).cwiseAbs().maxCoeff()>2e-6 ||
-               (confirmed.rate-base.rate).cwiseAbs().maxCoeff()>2e-6 ||
-               std::abs(confirmed.cost-base.cost)>2e-3)
+            // The previous SQP accepted this *exact* nonlinear source
+            // nominal, including 26 hidden physical states and progress.
+            // Reuse it without another 30-step source integration. Guard
+            // control-byte identity before computing full source tangents.
+            if(!accepted_nominal_valid)break;
+            MpcModelControl_t exact_accepted_commands[N]{};
+            from_y(y,exact_accepted_commands);
+            if(std::memcmp(accepted_nominal->controls,
+                           exact_accepted_commands,
+                           sizeof(exact_accepted_commands))!=0)
                 break;
+            *evaluator.nominal=*accepted_nominal;
         }
         evaluator.capture_source_prefix();
         const bool feasible=fully_feasible(base);
-        if(!deriv(evaluator,y,base,options.derivative_step,feasible,
+        const bool derivatives_valid=deriv(
+                evaluator,y,base,options.derivative_step,feasible,
                 decision_count,options.use_full_source_forward_sensitivities,
-                derivative))break;
-        if(stats.deadline_exhausted)break;
+                options.use_gauss_newton_hessian,
+                options.use_stage_local_jacobians,derivative);
+        stats.derivative_us+=now_us()-derivative_start;
+        if(!derivatives_valid || stats.deadline_exhausted)break;
         if(!options.use_full_source_forward_sensitivities)
             stats.source_finite_difference_columns+=decision_count;
         if(iteration==0 && options.first_derivative_snapshot) {
@@ -745,9 +976,14 @@ bool optimize(const MpcRtiState_t *initial,double progress,
             for(int col=0;col<D;++col)
                 snap.gradient[col]=derivative.gradient[col];
         }
-        stats.derivative_us+=now_us()-derivative_start;
         if(feasible) {
-            if(previous_feasible) {
+            if(options.use_gauss_newton_hessian) {
+                // Each nonlinear SQP pass has newly relinearized the
+                // FULL source plant. Use its newly assembled 60x60
+                // Gauss-Newton cost Hessian too: BFGS would otherwise
+                // discard fresh source curvature from the second pass.
+                H=derivative.hessian;
+            } else if(previous_feasible) {
                 // Powell-damped BFGS with exact source FD gradients.
                 const Vec s=y-previous_y;
                 const Vec diff=derivative.gradient-previous_grad;
@@ -784,6 +1020,7 @@ bool optimize(const MpcRtiState_t *initial,double progress,
         bool chosen=false;
         Sample full_step{};
         bool full_step_evaluated=false;
+
         Vec selected=Vec::Zero();
         Sample measured{};
         for(double alpha:kAlpha) {
@@ -794,19 +1031,21 @@ bool optimize(const MpcRtiState_t *initial,double progress,
             const Vec trial=y+alpha*delta;
             Sample attempt{};
             ++stats.line_search_trials;
-            if(!evaluator.evaluate(trial,true,attempt))continue;
+            if(!evaluator.evaluate(trial,true,attempt,0,&base))continue;
             if(alpha==1.) {
                 full_step=attempt;
                 full_step_evaluated=true;
             }
             if(!acceptable(base,attempt))continue;
             selected=trial;measured=attempt;chosen=true;chosen_alpha=alpha;
+            if(!snapshot_accepted_nominal())break;
             cache_source_certificate(selected,measured);
             // First source-exact improving globalization step. No
             // exhaustive trial search or additional "recovery controller".
             break;
         }
         if(full_step_evaluated) {
+            stats.full_step_evaluated[iteration]=true;
             const Wall linear_wall=base.wall+derivative.wall*delta;
             const Rate linear_rate=base.rate+derivative.rate*delta;
             stats.full_step_max_wall_defect_m[iteration]=
@@ -817,6 +1056,31 @@ bool optimize(const MpcRtiState_t *initial,double progress,
                 wall_violation(linear_wall,false);
             stats.full_step_source_wall_violation_m2[iteration]=
                 full_step.wall_v;
+            // True source racing-cost change versus the QP quadratic
+            // model at the *full physical step*. This is diagnostic-only;
+            // no extra source rollout, sensitivity or line search probe.
+            // Only a racing-cost SQP QP actually uses this curvature.
+            // Phase-I's identity minimum-norm Hessian is NOT a racing
+            // objective model, and must never be reported as one.
+            if(feasible) {
+                // Numerical Levenberg regularization, if any, is NOT
+                // the racing objective. Compare exact source racing cost
+                // against the source Gauss-Newton racing cost Hessian,
+                // not against additional solver stabilization.
+                const Mat &source_cost_curvature=
+                    options.use_gauss_newton_hessian?derivative.hessian:H;
+                const double model_cost_change=
+                    derivative.gradient.dot(delta)+
+                    .5*delta.dot(source_cost_curvature*delta);
+                const double source_cost_change=full_step.cost-base.cost;
+                stats.full_step_cost_model_valid[iteration]=true;
+                stats.full_step_cost_predicted_change[iteration]=
+                    model_cost_change;
+                stats.full_step_cost_actual_change[iteration]=
+                    source_cost_change;
+                stats.full_step_cost_prediction_error[iteration]=
+                    source_cost_change-model_cost_change;
+            }
         }
         // In the validated 1-SQP-iteration realtime regime, an already
         // source-feasible incumbent is itself a publishable full trajectory.
@@ -825,7 +1089,11 @@ bool optimize(const MpcRtiState_t *initial,double progress,
         // frozen epochs SOC ran 21 extra QPs and never changed a single
         // strict nonlinear accepted control or objective. Preserve it for
         // genuinely source-infeasible starts and multi-iteration solves.
-        const bool soc_needed=!feasible || options.max_iterations>1;
+        // A fully source-feasible incumbent is already publishable. With
+        // two exact relinearizations, SOC around a feasible start is
+        // redundant until evidence demonstrates a measurable accepted
+        // improvement. Retain SOC for real source-infeasible Phase-I starts.
+        const bool soc_needed=!feasible;
         if(options.second_order_correction && soc_needed &&
            !stats.deadline_exhausted && full_step_evaluated) {
             const Vec trial=y+delta;
@@ -842,7 +1110,7 @@ bool optimize(const MpcRtiState_t *initial,double progress,
                        decision_count,options.absolute_deadline_us,
                        corrected,stats)) {
                     Sample soc{};
-                    if(evaluator.evaluate(corrected,true,soc) &&
+                    if(evaluator.evaluate(corrected,true,soc,0,&base) &&
                        acceptable(base,soc) &&
                        (!chosen ||
                          (fully_feasible(base)
@@ -851,21 +1119,95 @@ bool optimize(const MpcRtiState_t *initial,double progress,
                              wall_violation(measured.wall,true)))) {
                         selected=corrected;measured=soc;chosen=true;
                         chosen_alpha=1.;
+                        if(!snapshot_accepted_nominal())break;
                         cache_source_certificate(selected,measured);
                     }
                 }
             }
         }
+        // Exact-source Phase-I continuation: a large physical violation
+        // can shrink to a millimetre-scale wall deficit in one SQP pass.
+        // The frozen J is still meaningful locally. Rather than force a
+        // second full 26-source-state differentiation (too expensive at
+        // 40 Hz), solve up to four small corrective hard QPs around the
+        // ACTUAL source-propagated trial and certify each proposed plan.
+        // No corridor is relaxed and this is the same sole MPC solve, not
+        // an independent fallback controller or alternative model.
+        const double projection_limit=std::getenv(
+            "SDU_APEX_SOURCE_PHASE1_PROJECTION_LIMIT")
+            ?std::max(5.e-3,std::atof(std::getenv(
+                "SDU_APEX_SOURCE_PHASE1_PROJECTION_LIMIT"))):5.e-3;
+        if(chosen && !fully_feasible(measured) &&
+           measured.rate_v<=1e-10 &&
+           measured.wall_v>0. && measured.wall_v<projection_limit) {
+            for(int projection=0;projection<4;++projection) {
+                // Keep time for one complete source nonlinear integration,
+                // independent strict validation and ROS publication. An
+                // unverified projection can never become the output.
+                if(options.absolute_deadline_us>0. &&
+                   options.absolute_deadline_us-now_us()<4200.)
+                    break;
+                // One measured nonlinear secant removes the known
+                // second-order defect along the last EXACT source step.
+                // This is not a new/approximate plant: it only updates the
+                // local affine QP Jacobian from source measured residuals;
+                // every resulting command is independently re-integrated.
+                Derivatives corrected_derivatives=derivative;
+                const Vec actual_displacement=selected-y;
+                const double denominator=actual_displacement.squaredNorm();
+                if(denominator>1.e-12 &&
+                   fully_feasible(measured)==false) {
+                    const Wall source_wall_defect=measured.wall-base.wall-
+                        derivative.wall*actual_displacement;
+                    const Rate source_rate_defect=measured.rate-base.rate-
+                        derivative.rate*actual_displacement;
+                    corrected_derivatives.wall.noalias()+=
+                        source_wall_defect*actual_displacement.transpose()/denominator;
+                    corrected_derivatives.rate.noalias()+=
+                        source_rate_defect*actual_displacement.transpose()/denominator;
+                }
+                Vec repaired;
+                if(!corrected_step(selected,measured,corrected_derivatives,
+                        configuration->model,options.qp_max_iterations,
+                        options.terminal_lookahead_steps==3?W:BaseW,
+                        decision_count,options.absolute_deadline_us,
+                        repaired,stats))
+                    break;
+                if((repaired-selected).norm()<1.e-8)break;
+                if(options.absolute_deadline_us>0. &&
+                   options.absolute_deadline_us-now_us()<2600.)
+                    break;
+                Sample actual{};
+                ++stats.near_feasible_source_projection_trials;
+                if(!evaluator.evaluate(repaired,true,actual,0,&measured) ||
+                   !acceptable(measured,actual))
+                    break;
+                selected=repaired;measured=actual;chosen_alpha=1.;
+                if(!snapshot_accepted_nominal())break;
+                ++stats.near_feasible_source_projection_accepts;
+                cache_source_certificate(selected,measured);
+                if(fully_feasible(measured))break;
+            }
+        }
         if(!chosen)break;
-        if(!have_accepted && feasible) {
-            // Only compare racing-cost Hessian against real racing cost
-            // when the feasible-start QP actually optimizes that cost.
-            // Phase-I minimizes wall slack instead: its Hessian is I and
-            // is not a source racing-cost prediction.
+        if(feasible) {
+            // Compare the EXACT accepted nonlinear source output to the
+            // racing QP at the ACTUAL applied alpha, for EVERY SQP pass.
+            // A rejected alpha=1 is still separately measured above.
+            // Phase-I never masquerades as a racing-cost QP.
             const Vec applied_step=selected-y;
-            stats.first_cost_prediction_error=measured.cost-base.cost-
-                (derivative.gradient.dot(applied_step)+
-                 .5*applied_step.dot(H*applied_step));
+            const Mat &source_cost_curvature=
+                options.use_gauss_newton_hessian?derivative.hessian:H;
+            const double predicted=derivative.gradient.dot(applied_step)+
+                .5*applied_step.dot(source_cost_curvature*applied_step);
+            const double measured_delta=measured.cost-base.cost;
+            stats.accepted_cost_model_valid[iteration]=true;
+            stats.accepted_cost_predicted_change[iteration]=predicted;
+            stats.accepted_cost_actual_change[iteration]=measured_delta;
+            stats.accepted_cost_prediction_error[iteration]=
+                measured_delta-predicted;
+            if(!have_accepted)
+                stats.first_cost_prediction_error=measured_delta-predicted;
         }
         const bool stop_on_full_source_merit=
             options.source_exact_early_stop &&

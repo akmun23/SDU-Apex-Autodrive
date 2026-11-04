@@ -30,6 +30,12 @@ struct Options {
     // Experimental full 26-source-channel, 20-lane forward derivative.
     // Never use this as production until cost AND wall/rate gradient parity.
     bool use_full_source_forward_sensitivities{false};
+    // Experimental full-source residual Gauss-Newton Hessian. The exact
+    // objective gradient and full nonlinear acceptance are unchanged.
+    bool use_gauss_newton_hessian{false};
+    // Experimental parallel stage-local full-source Jacobians (26+2),
+    // causally chained to all 60 controls. Never approximate the plant.
+    bool use_stage_local_jacobians{false};
     // Reduce *control decision* stages only (20 or 30); always propagate
     // and strictly validate the original 30-stage physical horizon.
     // Stages [decision_stages..29] retain the physical warm-start commands.
@@ -64,6 +70,8 @@ struct Statistics {
 
     int line_search_trials{};
     int accepted_full_source_horizons{};
+    int near_feasible_source_projection_trials{};
+    int near_feasible_source_projection_accepts{};
     int initial_source_failure_stage{-1};
     int last_qp_status{};
     bool feasible{};
@@ -91,10 +99,19 @@ struct Statistics {
     double qp_us{};
     double total_us{};
     double first_cost_prediction_error{};
+    bool full_step_cost_model_valid[12]{};
+    double full_step_cost_prediction_error[12]{};
+    double full_step_cost_predicted_change[12]{};
+    double full_step_cost_actual_change[12]{};
+    bool full_step_evaluated[12]{};
     double full_step_max_wall_defect_m[12]{};
     double full_step_max_rate_defect[12]{};
     double full_step_local_wall_violation_m2[12]{};
     double full_step_source_wall_violation_m2[12]{};
+    bool accepted_cost_model_valid[12]{};
+    double accepted_cost_predicted_change[12]{};
+    double accepted_cost_actual_change[12]{};
+    double accepted_cost_prediction_error[12]{};
     double accepted_cost[12]{};
     double accepted_wall_violation_m2[12]{};
     double accepted_alpha[12]{};

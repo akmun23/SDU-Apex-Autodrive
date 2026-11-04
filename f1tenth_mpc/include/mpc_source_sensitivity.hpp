@@ -13,6 +13,7 @@ struct FullSourceDerivatives {
     double positive_diagonal_curvature[60]{};
     double footprint[66][60]{};
     double actuator_rate[120][60]{};
+    double gn_hessian[60][60]{};
     int dual_plant_intervals{};
     int score_evaluations{};
     double dual_plant_us{};
@@ -25,5 +26,7 @@ bool full_source_derivatives(
     const MpcTrajectorySample_t *trajectory,std::size_t trajectory_count,
     double lap_length,float dt,const MpcRtiCycleConfiguration_t *cfg,
     int decision_count,double normalized_step,double baseline_cost,
-    double absolute_deadline_us,FullSourceDerivatives *out);
+    double absolute_deadline_us,FullSourceDerivatives *out,
+    bool build_gauss_newton_hessian=false,
+    bool use_stage_local_jacobians=false);
 } // namespace sdu_apex::source_sqp

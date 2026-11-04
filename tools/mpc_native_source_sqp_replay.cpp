@@ -39,6 +39,9 @@ int main(int argc,char **argv) {
     for(int i=4;i<argc;++i) {
         const std::string option(argv[i]);
         if(option=="--no-soc")options.second_order_correction=false;
+        else if(option=="--gn-hessian")options.use_gauss_newton_hessian=true;
+        else if(option=="--stage-jacobians")
+            options.use_stage_local_jacobians=true;
         else if(option=="--terminal3")options.terminal_lookahead_steps=3;
         else if(option=="--suffix-fd")options.reuse_unperturbed_fd_prefix=true;
         else if(option=="--full-source-forward")
@@ -126,6 +129,8 @@ int main(int argc,char **argv) {
        <<stats.full_forward_dual_plant_us/1000.
        <<",\"full_forward_tangent_scoring_ms\":"
        <<stats.full_forward_tangent_scoring_us/1000.
+       <<",\"near_feasible_projection_trials\":"<<stats.near_feasible_source_projection_trials
+       <<",\"near_feasible_projection_accepts\":"<<stats.near_feasible_source_projection_accepts
        <<",\"qp_solves\":"<<stats.qp_solves
        <<",\"qp_iterations\":"<<stats.qp_iterations
        <<",\"qp_status\":"<<stats.last_qp_status
@@ -176,6 +181,22 @@ int main(int argc,char **argv) {
              <<stats.full_step_max_wall_defect_m[k]
              <<",\"max_rate_model_defect\":"
              <<stats.full_step_max_rate_defect[k]
+             <<",\"accepted_qp_cost_model_valid\":"
+             <<(stats.accepted_cost_model_valid[k]?"true":"false")
+             <<",\"accepted_qp_cost_predicted_delta\":"
+             <<stats.accepted_cost_predicted_change[k]
+             <<",\"accepted_source_cost_actual_delta\":"
+             <<stats.accepted_cost_actual_change[k]
+             <<",\"accepted_qp_cost_model_error\":"
+             <<stats.accepted_cost_prediction_error[k]
+             <<",\"qp_cost_model_valid\":"
+             <<(stats.full_step_cost_model_valid[k]?"true":"false")
+             <<",\"qp_cost_predicted_delta\":"
+             <<stats.full_step_cost_predicted_change[k]
+             <<",\"source_cost_actual_delta\":"
+             <<stats.full_step_cost_actual_change[k]
+             <<",\"source_cost_model_error\":"
+             <<stats.full_step_cost_prediction_error[k]
              <<",\"qp_predicted_wall_V\":"
              <<stats.full_step_local_wall_violation_m2[k]
              <<",\"actual_source_wall_V\":"

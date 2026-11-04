@@ -406,6 +406,9 @@ typedef struct
     int native_source_sqp_reuse_fd_prefix; /* 0 or 1 */
     int native_source_sqp_adaptive_stop; /* 0 or 1 */
     int native_source_sqp_full_source_forward; /* 0 or 1, experimental */
+    int native_source_sqp_gauss_newton_hessian; /* 0 or 1, experimental */
+    int native_source_sqp_stage_local_jacobians; /* 0 or 1, experimental */
+
     /* Normal SQP infeasible-start filter: before R2, select a nonpublishable
      * source-integrated R1 intermediate iterate ONLY when the original
      * physical footprint violation is reduced. R2 must still solve and pass
@@ -622,6 +625,36 @@ typedef struct
     int native_source_sqp_last_qp_status;
     int native_source_sqp_full_forward_intervals;
     int native_source_sqp_tangent_score_evaluations;
+    double native_source_sqp_derivative_us;
+    double native_source_sqp_dual_plant_worker_us;
+    double native_source_sqp_tangent_scoring_worker_us;
+    /* Diagnostic only: the first accepted cost-optimizing SQP step, not a
+     * Phase-I physical-feasibility QP. Compare the *applied* alpha step's
+     * quadratic racing-cost prediction with its exact source-model cost. */
+    int native_source_sqp_cost_prediction_valid;
+    double native_source_sqp_predicted_cost_change;
+    double native_source_sqp_actual_cost_change;
+    double native_source_sqp_cost_prediction_error;
+    /* QP affine footprint versus EXACT nonlinear source rollout at the
+     * candidate full step, for each of the first two source SQP passes.
+     * Diagnostic-only; no extra source integration is performed. This
+     * measures whether local convexification can be trusted in corners. */
+    int native_source_sqp_full_step_evaluated[2];
+    int native_source_sqp_accepted_cost_model_valid[2];
+    double native_source_sqp_accepted_cost_predicted_change[2];
+    double native_source_sqp_accepted_cost_actual_change[2];
+    double native_source_sqp_accepted_cost_prediction_error[2];
+    int native_source_sqp_full_step_cost_model_valid[2];
+    double native_source_sqp_full_step_cost_predicted_change[2];
+    double native_source_sqp_full_step_cost_actual_change[2];
+    double native_source_sqp_full_step_cost_prediction_error[2];
+    double native_source_sqp_qp_predicted_wall_violation_m2[2];
+    double native_source_sqp_source_actual_wall_violation_m2[2];
+    double native_source_sqp_max_wall_model_defect_m[2];
+    double native_source_sqp_selected_alpha[2];
+    double native_source_sqp_phase1_slack_sum[2];
+    int native_source_sqp_near_feasible_projection_trials;
+    int native_source_sqp_near_feasible_projection_accepts;
     int source_nominal_repair_attempted;
     int source_nominal_repair_accepted;
     int source_nominal_repair_phase_one_iterations;

@@ -67,22 +67,11 @@ class ActuatorInterfaceTest(unittest.TestCase):
         self.node._on_command(command)
         self.assertEqual(self.outputs, [])
 
-    def test_zero_throttle_is_forwarded_when_development_mode_allows_braking(self):
-        self.node.destroy_node()
-        self.node = ActuatorInterface(parameter_overrides=[
-            Parameter("minimum_throttle_normalized", value=0.0)])
-        self.outputs = []
-        self.node._publish = lambda steering, throttle: self.outputs.append(
-            (steering, throttle))
-
-        command = DriveCommand()
-        command.steering_angle_rad = 0.1
-        command.throttle_normalized = 0.0
-        self.node._on_command(command)
-
-        self.assertEqual(len(self.outputs), 1)
-        self.assertAlmostEqual(self.outputs[0][0], 0.1 / self.node.max_steering)
-        self.assertEqual(self.outputs[0][1], 0.0)
+    def test_zero_throttle_cannot_be_enabled_through_parameter_override(self):
+        with self.assertRaisesRegex(ValueError, "unmodelled full-brake"):
+            node = ActuatorInterface(parameter_overrides=[
+                Parameter("minimum_throttle_normalized", value=0.0)])
+            node.destroy_node()
 
     def test_invalid_command_does_not_publish_fallback(self):
         command = DriveCommand()

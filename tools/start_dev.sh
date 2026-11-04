@@ -106,6 +106,15 @@ if [[ -n "${GOMP_SPINCOUNT:-}" ]]; then
   openmp_wait_args+=(-e "GOMP_SPINCOUNT=${GOMP_SPINCOUNT}")
 fi
 
+# Explicit native-source timing experiments can bind the three OpenMP
+# source sensitivity workers to distinct P cores without constraining ROS
+# executor/AMCL/odometry threads. Preserve ordinary environment defaults.
+for omp_var in OMP_NUM_THREADS OMP_PROC_BIND OMP_PLACES; do
+  if [[ -n "${!omp_var:-}" ]]; then
+    openmp_wait_args+=(-e "${omp_var}=${!omp_var}")
+  fi
+done
+
 controller_cpuset_args=()
 if [[ -n "${SDU_APEX_CPUSET_CPUS:-}" ]]; then
   if [[ ! "${SDU_APEX_CPUSET_CPUS}" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then

@@ -94,7 +94,7 @@ static bool write_persistent_memory(const std::filesystem::path &file,
     return output.good();
 }
 int main(int argc,char**argv) {
-    if(argc<3||argc>12) {
+    if(argc<3||argc>15) {
         std::cerr<<"usage: native_controller_epoch CASE output_controls.txt [iterations] [previous_memory|-] [next_memory]\n";
         return 2;
     }
@@ -109,7 +109,7 @@ int main(int argc,char**argv) {
         (case_dir/"r1.fqp").string(),capture.get()))return 4;
     const int iters=argc>=4?std::stoi(argv[3]):2;
     bool terminal3=false,opt20=false,suffix_fd=false,adaptive=false;
-    bool forward_source=false;
+    bool forward_source=false,source_gn=false,stage_jacobians=false;
     double hard_deadline_budget_us=0.;
     for(int i=6;i<argc;++i) {
         const std::string flag(argv[i]);
@@ -118,6 +118,8 @@ int main(int argc,char**argv) {
         else if(flag=="--suffix-fd")suffix_fd=true;
         else if(flag=="--adaptive")adaptive=true;
         else if(flag=="--full-source-forward")forward_source=true;
+        else if(flag=="--gn-hessian")source_gn=true;
+        else if(flag=="--stage-jacobians")stage_jacobians=true;
         else if(flag.rfind("--deadline-us=",0)==0) {
             try {hard_deadline_budget_us=std::stod(flag.substr(14));}
             catch(...) {return 2;}
@@ -144,6 +146,8 @@ int main(int argc,char**argv) {
     cfg.native_source_sqp_reuse_fd_prefix=suffix_fd?1:0;
     cfg.native_source_sqp_adaptive_stop=adaptive?1:0;
     cfg.native_source_sqp_full_source_forward=forward_source?1:0;
+    cfg.native_source_sqp_gauss_newton_hessian=source_gn?1:0;
+    cfg.native_source_sqp_stage_local_jacobians=stage_jacobians?1:0;
     cfg.command_epoch_ns=ctx->command_epoch_ns;
     cfg.line_search_command_epoch_valid=1;
     cfg.enable_nonlinear_line_search=1;
@@ -298,7 +302,28 @@ int main(int argc,char**argv) {
        <<result->native_source_sqp_last_qp_status
        <<",\"source_forward_intervals\":"
        <<result->native_source_sqp_full_forward_intervals
-       <<",\"derivative_time_ms\":"<<result->qp_build_us/1000.
+       <<",\"derivative_time_ms\":"
+       <<result->native_source_sqp_derivative_us/1000.
+       <<",\"source_dual_plant_worker_ms\":"
+       <<result->native_source_sqp_dual_plant_worker_us/1000.
+       <<",\"source_tangent_scoring_worker_ms\":"
+       <<result->native_source_sqp_tangent_scoring_worker_us/1000.
+       <<",\"source_tangent_score_evaluations\":"
+       <<result->native_source_sqp_tangent_score_evaluations
+       <<",\"cost_prediction_valid\":"
+       <<(result->native_source_sqp_cost_prediction_valid?"true":"false")
+       <<",\"cost_prediction_error\":"
+       <<(result->native_source_sqp_cost_prediction_valid?
+          std::to_string(result->native_source_sqp_cost_prediction_error):
+          "null")
+       <<",\"predicted_cost_change\":"
+       <<(result->native_source_sqp_cost_prediction_valid?
+          std::to_string(result->native_source_sqp_predicted_cost_change):
+          "null")
+       <<",\"actual_cost_change\":"
+       <<(result->native_source_sqp_cost_prediction_valid?
+          std::to_string(result->native_source_sqp_actual_cost_change):
+          "null")
        <<",\"qp_time_ms\":"
        <<result->native_source_sqp_qp_us/1000.
        <<",\"exact_source_eval_time_ms\":"

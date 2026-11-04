@@ -33,9 +33,14 @@ class ActuatorInterface(Node):
             raise ValueError("maximum steering angle must be positive")
         self.minimum_throttle = float(
             self.get_parameter("minimum_throttle_normalized").value)
+        # The source-SQP optimizes the continuous positive-drive mode.
+        # Unity interprets exactly zero as a distinct full-brake operation;
+        # a ROS parameter must not silently enable that unmodelled mode.
         if (not math.isfinite(self.minimum_throttle) or
-                not 0.0 <= self.minimum_throttle <= 1.0):
-            raise ValueError("minimum throttle must be finite and in [0, 1]")
+                not MIN_DRIVE_THROTTLE <= self.minimum_throttle <= 1.0):
+            raise ValueError(
+                "minimum throttle must be finite and in [0.001, 1]; "
+                "zero throttle activates an unmodelled full-brake mode")
         self.command_sequence = 0
         timing_topic = str(
             self.get_parameter("development_timing_topic").value).strip()
