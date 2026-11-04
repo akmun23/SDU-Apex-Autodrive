@@ -408,6 +408,10 @@ typedef struct
     int native_source_sqp_full_source_forward; /* 0 or 1, experimental */
     int native_source_sqp_gauss_newton_hessian; /* 0 or 1, experimental */
     int native_source_sqp_stage_local_jacobians; /* 0 or 1, experimental */
+    // Isolated SOURCE SQP numerical options; never changed for established
+    // practice/competition controllers without qualification.
+    int native_source_sqp_passive_timer_sensitivities; /* 0 or 1 */
+    int native_source_sqp_inexact_phase1_inner_qp; /* 0 or 1 */
 
     /* Normal SQP infeasible-start filter: before R2, select a nonpublishable
      * source-integrated R1 intermediate iterate ONLY when the original

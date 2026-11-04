@@ -504,6 +504,12 @@ public:
         rti_config_.native_source_sqp_stage_local_jacobians=
             declare_parameter<bool>(
                 "native_source_sqp_stage_local_jacobians",false)?1:0;
+        rti_config_.native_source_sqp_passive_timer_sensitivities=
+            declare_parameter<bool>(
+                "native_source_sqp_passive_timer_sensitivities",false)?1:0;
+        rti_config_.native_source_sqp_inexact_phase1_inner_qp=
+            declare_parameter<bool>(
+                "native_source_sqp_inexact_phase1_inner_qp",false)?1:0;
         const int terminal_source_lookahead=declare_parameter<int>(
             "native_source_sqp_terminal_lookahead_stages",0);
         rti_config_.native_source_sqp_terminal_lookahead_stages=

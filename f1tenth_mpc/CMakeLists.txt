@@ -118,6 +118,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/mpc_bag_solver_replay.cpp")
   add_executable(mpc_source_full_lagrangian_hvp EXCLUDE_FROM_ALL
     ../tools/mpc_source_full_lagrangian_hvp.cpp)
   target_link_libraries(mpc_source_full_lagrangian_hvp PRIVATE mpc_core)
+  add_executable(mpc_source_exact_feasibility_search EXCLUDE_FROM_ALL
+    ../tools/mpc_source_exact_feasibility_search.cpp)
+  target_link_libraries(mpc_source_exact_feasibility_search PRIVATE mpc_core Eigen3::Eigen)
   add_executable(mpc_source_live_fixture EXCLUDE_FROM_ALL
     ../tools/mpc_source_live_fixture.cpp)
   target_link_libraries(mpc_source_live_fixture PRIVATE mpc_core)

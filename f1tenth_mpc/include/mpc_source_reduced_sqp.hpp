@@ -46,6 +46,34 @@ struct Options {
     // Experimental parallel stage-local full-source Jacobians (26+2),
     // causally chained to all 60 controls. Never approximate the plant.
     bool use_stage_local_jacobians{false};
+    // Experiment: in strictly positive-drive source stages the eight
+    // low-speed sticky-tire time memories do not influence any tire force
+    // or geometric objective. All 26 primal states are STILL propagated.
+    // Omit only their identically inactive command-sensitivity columns,
+    // leaving 18 active-state + 2 input seeds = one 20-lane source call.
+    bool compress_positive_drive_passive_timer_sensitivities{false};
+    // The infeasible Phase-I QP only uses J_corridor and J_rate, not
+    // source racing-cost gradients or source racing-cost curvature.
+    // Score the same physical footprint directly when optimizing its
+    // feasibility. Source model, map, terminal and strict acceptance
+    // remain unchanged. Experimental until parity qualification.
+    bool use_phase1_corridor_only_scoring{false};
+    // Offline opt-in inexact hard Phase-I QP termination. The physical
+    // affine primal constraints and complementarity remain rigorously
+    // checked, and EVERY returned candidate is independently validated
+    // against the complete nonlinear source. Does not loosen source
+    // certificate or actuation authority.
+    double phase1_inexact_relative_dual{0.};
+    // Offline-only second-source-branch SQP experiment. Retain TWO
+    // independent affine corridor constraints: one from the exact source
+    // incumbent and one from the exact source trajectory at the first
+    // QP's proposed step. No source physics or vehicle bounds change.
+    // Disabled until source-feasibility parity and 22ms timing qualify.
+    bool use_two_source_branch_qp{false};
+    // Experimental algebraic presolve. A corridor row is removed ONLY
+    // if maximizing its affine LHS over all physically legal command
+    // boxes still cannot violate that row (no input-radius restrictions).
+    bool use_two_branch_box_presolve{false};
     // Reduce *control decision* stages only (20 or 30); always propagate
     // and strictly validate the original 30-stage physical horizon.
     // Stages [decision_stages..29] retain the physical warm-start commands.
@@ -68,6 +96,14 @@ struct Statistics {
     bool source_exact_early_stop_selected{};
     int source_evaluations{};
     int source_finite_difference_columns{};
+    int two_branch_source_probes{};
+    int two_branch_qp_solves{};
+    int two_branch_box_redundant_wall_rows{};
+    int two_branch_relinearizations{};
+    int two_branch_selected_directions{};
+    double two_branch_initial_max_wall_defect_m{};
+    double two_branch_selected_wall_v{};
+
     int source_forward_sensitivity_intervals{};
     int source_tangent_objective_evaluations{};
     double full_forward_dual_plant_us{};

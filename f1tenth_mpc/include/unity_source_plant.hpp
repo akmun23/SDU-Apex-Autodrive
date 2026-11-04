@@ -180,6 +180,24 @@ struct UnitySourceBranchObservation {
   int lateral_curve_region{};
   int tire_load_filter_region{};
   bool combined_slip_saturated{};
+  // Further original PhysX/Unity physical switching surfaces. These are
+  // recorded only in source-trace mode, NEVER used to approximate forces.
+  // -1 / 0 / +1: below minimum / interior / above maximum jounce.
+  int suspension_jounce_region{};
+  // -1 wheel-ground > wheel-surface, +1 surface > ground (the max
+  // denominator derivative changes at equality); 0 exact tie.
+  int longitudinal_slip_denominator_region{};
+  // -1,0,+1 for distinct absolute-value derivatives at zero speed.
+  int forward_contact_speed_sign{};
+  int lateral_contact_speed_sign{};
+  int wheel_surface_speed_sign{};
+  bool steering_target_reached{};
+  bool zero_throttle_brake_mode{};
+  double raw_suspension_jounce_m{};
+  double wheel_ground_forward_speed_mps{};
+  double wheel_surface_speed_mps{};
+  double unfiltered_tire_load_ratio{};
+  double normalized_combined_slip_demand_squared{};
   double longitudinal_slip{};
   double lateral_slip{};
   double combined_slip_utilization{};

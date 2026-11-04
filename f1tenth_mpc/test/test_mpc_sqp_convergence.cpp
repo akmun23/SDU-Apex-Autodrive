@@ -466,6 +466,57 @@ TEST(MpcSourceReducedSqp, StageLocalFullSourceMatchesCausalDirectTangents)
     }
 }
 
+TEST(MpcSourceReducedSqp, SourcePhaseOneCorridorOnlyMatchesFullObjectiveMargins)
+{
+    Straight straight;
+    auto config=configuration();
+    MpcModelControl_t controls[PREDICTION_HORIZON]{};
+    for(int k=0;k<PREDICTION_HORIZON;++k) {
+        controls[k].steering_target_rad=.12f*std::sin(.22f*k);
+        controls[k].throttle_command=.06f+.08f*(k%7)/7.f;
+    }
+    auto nominal=std::make_unique<MpcRtiNominal_t>();
+    MpcRtiReference_t refs[PREDICTION_HORIZON+1]{};
+    ASSERT_TRUE(mpc_rti_build_nominal_same_epoch(
+        &straight.initial,0.,nullptr,controls,PREDICTION_HORIZON,
+        straight.track,straight.count,straight.lap,PREDICTION_DT_SECONDS,
+        PREDICTION_HORIZON,&config.model,nominal.get(),refs));
+    auto schedule=std::make_unique<MpcRtiObjectiveSchedule_t>();
+    ASSERT_TRUE(mpc_rti_build_objective_schedule(
+        nominal.get(),refs,&config.model,schedule.get()));
+    config.objective_schedule=schedule.get();
+    double cost=NAN;
+    float clearance=NAN;
+    float by_stage[PREDICTION_HORIZON+1][2]{};
+    ASSERT_TRUE(mpc_rti_score_candidate_plan_and_corridor_for_diagnostics(
+        nominal.get(),straight.track,straight.count,straight.lap,
+        &config,&cost,&clearance,by_stage));
+    auto original=std::make_unique<sdu_apex::source_sqp::FullSourceDerivatives>();
+    auto compact=std::make_unique<sdu_apex::source_sqp::FullSourceDerivatives>();
+    ASSERT_TRUE(sdu_apex::source_sqp::full_source_derivatives(
+        nominal.get(),straight.track,straight.count,straight.lap,
+        PREDICTION_DT_SECONDS,&config,60,.002,cost,0.,original.get(),
+        false,true,true,false));
+    ASSERT_TRUE(sdu_apex::source_sqp::full_source_derivatives(
+        nominal.get(),straight.track,straight.count,straight.lap,
+        PREDICTION_DT_SECONDS,&config,60,.002,cost,0.,compact.get(),
+        false,true,true,true));
+    EXPECT_EQ(original->dual_plant_intervals,30);
+    EXPECT_EQ(compact->dual_plant_intervals,30);
+    for(int col=0;col<60;++col) {
+        EXPECT_DOUBLE_EQ(compact->gradient[col],0.)
+            << "Phase I cannot consume racing-cost derivatives";
+        for(int row=0;row<60;++row)
+            EXPECT_DOUBLE_EQ(compact->footprint[row][col],
+                             original->footprint[row][col])
+                << row << ',' << col;
+        for(int row=0;row<120;++row)
+            EXPECT_DOUBLE_EQ(compact->actuator_rate[row][col],
+                             original->actuator_rate[row][col])
+                << row << ',' << col;
+    }
+}
+
 TEST(MpcSourceReducedSqp, ForwardSourceDeadlineDoesNotPublish)
 {
     Straight straight;

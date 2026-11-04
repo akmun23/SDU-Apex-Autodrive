@@ -1200,6 +1200,16 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
           event.vehicle_substep=int(substep);
           event.vehicle_substep_count=int(substep_count);
           event.wheel=int(i);
+          event.raw_suspension_jounce_m=
+              primal(contacts[i].raw_jounce_m);
+          event.suspension_jounce_region=
+              event.raw_suspension_jounce_m<-kSuspensionMaxDroopM?-1:
+              event.raw_suspension_jounce_m>kSuspensionMaxCompressionM?1:0;
+          event.steering_target_reached=
+              std::abs(primal(s.physical_steering_rad)-
+                       primal(steering_target))<=1.e-9;
+          event.zero_throttle_brake_mode=
+              primal(input.throttle_normalized)==0.;
           branch_trace->push_back(event);
         }
         // PxVehicleUpdate starts each wheel as airborne and computes
@@ -1357,6 +1367,26 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
         event.vehicle_substep_count=int(substep_count);
         event.wheel=int(i);
         event.grounded=true;
+          event.raw_suspension_jounce_m=
+              primal(contacts[i].raw_jounce_m);
+          event.suspension_jounce_region=
+              event.raw_suspension_jounce_m<-kSuspensionMaxDroopM?-1:
+              event.raw_suspension_jounce_m>kSuspensionMaxCompressionM?1:0;
+          event.wheel_ground_forward_speed_mps=primal(wheel_forward);
+          event.wheel_surface_speed_mps=primal(wheel_surface);
+          const double ground_abs=std::abs(primal(wheel_forward));
+          const double surface_abs=std::abs(primal(wheel_surface));
+          event.longitudinal_slip_denominator_region=
+              surface_abs>ground_abs?1:(surface_abs<ground_abs?-1:0);
+          const auto sign=[](double v) {return v>0.?1:(v<0.?-1:0);};
+          event.forward_contact_speed_sign=sign(primal(wheel_forward));
+          event.lateral_contact_speed_sign=sign(primal(wheel_lateral));
+          event.wheel_surface_speed_sign=sign(primal(wheel_surface));
+          event.steering_target_reached=
+              std::abs(primal(s.physical_steering_rad)-
+                       primal(steering_target))<=1.e-9;
+          event.zero_throttle_brake_mode=
+              primal(input.throttle_normalized)==0.;
         event.sticky_forward=sticky_forward_active;
         event.sticky_side=sticky_side_active;
         event.longitudinal_curve_region=region(
@@ -1367,9 +1397,11 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
         const double normalized=primal(suspension_force_n[i])/rest;
         event.tire_load_filter_region=normalized<=0.?0:
             (normalized>=3.?2:1);
+          event.unfiltered_tire_load_ratio=normalized;
         const double demand=std::pow(primal(normalized_longitudinal),2)+
             std::pow(primal(normalized_lateral),2);
         event.combined_slip_saturated=demand>1.;
+          event.normalized_combined_slip_demand_squared=demand;
         event.combined_slip_utilization=primal(utilization);
         event.longitudinal_slip=primal(slip_x[i]);
         event.lateral_slip=primal(slip_y[i]);

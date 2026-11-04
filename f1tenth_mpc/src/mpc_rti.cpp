@@ -1625,6 +1625,12 @@ static int valid_cycle_configuration(
         (configuration->native_source_sqp_full_source_forward==0 ||
          (configuration->native_source_sqp_full_source_forward==1 &&
           configuration->native_source_sqp_terminal_lookahead_stages==0)) &&
+        (configuration->native_source_sqp_passive_timer_sensitivities==0 ||
+         (configuration->native_source_sqp_passive_timer_sensitivities==1 &&
+          configuration->native_source_sqp_stage_local_jacobians==1 &&
+          configuration->native_source_sqp_full_source_forward==1)) &&
+        (configuration->native_source_sqp_inexact_phase1_inner_qp==0 ||
+         configuration->native_source_sqp_inexact_phase1_inner_qp==1) &&
         (configuration->source_violation_filter_sqp == 0 ||
          configuration->source_violation_filter_sqp == 1) &&
         finite_nonnegative(configuration->source_elastic_wall_weight) &&
@@ -4351,6 +4357,14 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             configuration->native_source_sqp_gauss_newton_hessian!=0;
         opts.use_stage_local_jacobians=
             configuration->native_source_sqp_stage_local_jacobians!=0;
+        opts.compress_positive_drive_passive_timer_sensitivities=
+            configuration->native_source_sqp_passive_timer_sensitivities!=0;
+        // Identical primal/complementarity tests to the existing verified
+        // Phase-I inexact direction criterion. Early termination is only
+        // permitted for the PHYSICAL hard feasibility QP.
+        opts.phase1_inexact_relative_dual=
+            configuration->native_source_sqp_inexact_phase1_inner_qp?
+            1.e-4:0.;
         opts.absolute_deadline_us=deadline_us;
         sdu_apex::source_sqp::Statistics report{};
         MpcModelControl_t selected[PREDICTION_HORIZON]{};

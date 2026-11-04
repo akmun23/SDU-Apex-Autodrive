@@ -92,7 +92,8 @@ bool scored_tangent(const MpcRtiNominal_t &nominal,
     const Trace &trace,int lane,int direction,int source_column,double h,
     const MpcTrajectorySample_t *track,std::size_t track_count,double length,
     const MpcRtiCycleConfiguration_t &cfg,MpcRtiNominal_t *candidate,
-    double *objective,double margins[2*N]) {
+    double *objective,double margins[2*N],
+    bool corridor_only_phase_one) {
     *candidate=nominal;
     // The frozen SQP objective owns its speed targets. The exact scorer
     // already interpolates ALL progress-dependent references when checking
@@ -126,6 +127,29 @@ bool scored_tangent(const MpcRtiNominal_t &nominal,
     else
         candidate->controls[control_stage].throttle_command+=
             static_cast<float>(direction*h*kCommandScale[1]);
+    if(corridor_only_phase_one) {
+        // The objective is NOT a Phase-I QP objective. Evaluate the exact
+        // source physical footprint and progress-dependent track width
+        // directly, preserving the SAME reference interpolation and
+        // mpc_rti_compute_corridor_slack used by the full scorer.
+        // This is not a new plant, geometric approximation or relaxed
+        // constraint; it avoids 120 redundant full racing-cost evaluations.
+        *objective=0.;
+        for(int stage=1;stage<=N;++stage) {
+            MpcRtiReference_t reference{};
+            if(!mpc_rti_reference_at_progress(
+                track,track_count,length,candidate->progress[stage],
+                &cfg.model,&reference))return false;
+            float lower=NAN,upper=NAN;
+            if(!mpc_rti_compute_corridor_slack(
+                &candidate->states[stage].plant,
+                reference.left_bound,reference.right_bound,
+                &cfg.model,stage,&lower,&upper))return false;
+            margins[2*(stage-1)]=lower;
+            margins[2*(stage-1)+1]=upper;
+        }
+        return true;
+    }
     float raw_margins[N+1][2]{};
     float minimum=NAN;
     if(!mpc_rti_score_candidate_plan_and_corridor_for_diagnostics(
@@ -146,7 +170,9 @@ bool full_source_derivatives(
     int decision_count,double normalized_step,double baseline_cost,
     double absolute_deadline_us,FullSourceDerivatives *out,
     bool build_gauss_newton_hessian,
-    bool use_stage_local_jacobians)
+    bool use_stage_local_jacobians,
+    bool compress_positive_drive_passive_timers,
+    bool corridor_only_phase_one)
 {
     if(!baseline||!baseline->valid||baseline->horizon!=N||!trajectory||
        !cfg||!out||!std::isfinite(baseline_cost)||
@@ -205,11 +231,39 @@ bool full_source_derivatives(
             bool ok=true;
             const auto &state=baseline->states[stage].plant;
             const auto &control=baseline->controls[stage];
-            for(int chunk=0;chunk<2 && ok;++chunk) {
+            // In positive drive the source resets low-speed sticky-tire
+            // histories BEFORE testing either sticky activation. Wheel
+            // dynamics and the physical footprint are independent of
+            // state[18..25]; all 26 source primal values are still
+            // integrated and the timers still exist in the nominal.
+            // Only zero-impact sensitivities are left out of the
+            // optimization's forward tangent propagation.
+            const bool compressed=
+                compress_positive_drive_passive_timers &&
+                control.throttle_command>0.f &&
+                control.throttle_command<=MPC_THROTTLE_MAX;
+            const int chunks=compressed?1:2;
+            if(compressed) {
+                auto &local=(*locals)[stage];
+                // loc is persistent thread-local memory: prevent stale
+                // inactive columns from another epoch reaching the QP.
+                for(int row=0;row<X;++row)
+                    for(int col=18;col<26;++col)
+                        local.source[row][col]=0.;
+                for(int row=0;row<3;++row)
+                    for(int col=18;col<26;++col)
+                        local.body[row][col]=0.;
+                for(int row=0;row<4;++row)
+                    for(int col=18;col<26;++col)
+                        local.slip[row][col]=0.;
+            }
+            for(int chunk=0;chunk<chunks && ok;++chunk) {
                 double state_seeds[X][L]{};
                 double control_seeds[2][L]{};
                 for(int lane=0;lane<L;++lane) {
-                    const int coordinate=chunk*L+lane;
+                    const int coordinate=compressed
+                        ?(lane<18?lane:X+(lane-18))
+                        :chunk*L+lane;
                     if(coordinate<X)
                         state_seeds[coordinate][lane]=1.;
                     else if(coordinate<X+2)
@@ -224,7 +278,9 @@ bool full_source_derivatives(
                 ++worker_plant_calls[stage];
                 if(!ok)break;
                 for(int lane=0;lane<L;++lane) {
-                    const int coordinate=chunk*L+lane;
+                    const int coordinate=compressed
+                        ?(lane<18?lane:X+(lane-18))
+                        :chunk*L+lane;
                     if(coordinate>=X+2)break;
                     for(int row=0;row<X;++row)
                         (*locals)[stage].source[row][coordinate]=
@@ -398,17 +454,27 @@ bool full_source_derivatives(
             const auto score_start=Clock::now();
             if(!scored_tangent(*baseline,*trace,lane,+1,j,normalized_step,
                     trajectory,trajectory_count,lap_length,*cfg,
-                    positive.get(),&cost_plus,wall_plus) ||
+                    positive.get(),&cost_plus,wall_plus,
+                    corridor_only_phase_one && !cfg->model.world_sweep_check) ||
                !scored_tangent(*baseline,*trace,lane,-1,j,normalized_step,
                     trajectory,trajectory_count,lap_length,*cfg,
-                    negative.get(),&cost_minus,wall_minus))
+                    negative.get(),&cost_minus,wall_minus,
+                    corridor_only_phase_one && !cfg->model.world_sweep_check))
                 return false;
             measurement.tangent_scoring_us+=microseconds_since(score_start);
             measurement.score_evaluations+=2;
-            out->gradient[j]=(cost_plus-cost_minus)/(2.*normalized_step);
-            out->positive_diagonal_curvature[j]=std::clamp(
-                (cost_plus-2.*baseline_cost+cost_minus)/
-                    (normalized_step*normalized_step),1.e-4,1.e7);
+            if(!corridor_only_phase_one || cfg->model.world_sweep_check) {
+                out->gradient[j]=(cost_plus-cost_minus)/(2.*normalized_step);
+                out->positive_diagonal_curvature[j]=std::clamp(
+                    (cost_plus-2.*baseline_cost+cost_minus)/
+                        (normalized_step*normalized_step),1.e-4,1.e7);
+            } else {
+                // Phase I uses neither racing gradient nor racing cost
+                // Hessian: its separate feasibility objective is built
+                // from exact physical margin Jacobians.
+                out->gradient[j]=0.;
+                out->positive_diagonal_curvature[j]=1.;
+            }
             if(!std::isfinite(out->gradient[j])||
                !std::isfinite(out->positive_diagonal_curvature[j]))
                 return false;

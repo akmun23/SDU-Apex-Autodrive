@@ -199,7 +199,17 @@ json exact_inner_substep_branch_comparison(
                     {"nominal_slip_x",base.longitudinal_slip},
                     {"nominal_slip_y",base.lateral_slip},
                     {"nominal_combined_utilization",
-                     base.combined_slip_utilization}
+                     base.combined_slip_utilization},
+                    {"nominal_raw_jounce_m",
+                     base.raw_suspension_jounce_m},
+                    {"nominal_ground_forward_speed_mps",
+                     base.wheel_ground_forward_speed_mps},
+                    {"nominal_wheel_surface_speed_mps",
+                     base.wheel_surface_speed_mps},
+                    {"nominal_tire_load_ratio",
+                     base.unfiltered_tire_load_ratio},
+                    {"nominal_combined_demand_squared",
+                     base.normalized_combined_slip_demand_squared}
                 });
             }
         };
@@ -224,6 +234,38 @@ json exact_inner_substep_branch_comparison(
                base.combined_slip_saturated,
                plus.combined_slip_saturated,
                minus.combined_slip_saturated);
+        record("suspension_jounce_region",
+               base.suspension_jounce_region,
+               plus.suspension_jounce_region,
+               minus.suspension_jounce_region);
+        record("longitudinal_slip_denominator_region",
+               base.longitudinal_slip_denominator_region,
+               plus.longitudinal_slip_denominator_region,
+               minus.longitudinal_slip_denominator_region);
+        record("forward_contact_speed_sign",
+               base.forward_contact_speed_sign,
+               plus.forward_contact_speed_sign,
+               minus.forward_contact_speed_sign);
+        record("lateral_contact_speed_sign",
+               base.lateral_contact_speed_sign,
+               plus.lateral_contact_speed_sign,
+               minus.lateral_contact_speed_sign);
+        record("wheel_surface_speed_sign",
+               base.wheel_surface_speed_sign,
+               plus.wheel_surface_speed_sign,
+               minus.wheel_surface_speed_sign);
+        record("steering_target_reached",
+               base.steering_target_reached,
+               plus.steering_target_reached,
+               minus.steering_target_reached);
+        record("zero_throttle_brake_mode",
+               base.zero_throttle_brake_mode,
+               plus.zero_throttle_brake_mode,
+               minus.zero_throttle_brake_mode);
+        record("wheel_substep_count",
+               base.vehicle_substep_count,
+               plus.vehicle_substep_count,
+               minus.vehicle_substep_count);
     }
     result["earliest_changed_fixed_tick_ms"]=earliest;
     result["unmatched_internal_evaluations"]=unmatched;

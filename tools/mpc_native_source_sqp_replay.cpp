@@ -46,8 +46,21 @@ int main(int argc,char **argv) {
         }
         else if(option=="--no-soc")options.second_order_correction=false;
         else if(option=="--gn-hessian")options.use_gauss_newton_hessian=true;
+        else if(option.rfind("--phase1-inexact-qp=",0)==0)
+            options.phase1_inexact_relative_dual=
+                std::stod(option.substr(sizeof("--phase1-inexact-qp=")-1));
+        else if(option=="--branch-source-two-cut-qp")
+            options.use_two_source_branch_qp=true;
+        else if(option=="--two-branch-prune-box-dominated")
+            options.use_two_branch_box_presolve=true;
         else if(option=="--stage-jacobians")
             options.use_stage_local_jacobians=true;
+        else if(option=="--phase1-corridor-only")
+            options.use_phase1_corridor_only_scoring=true;
+        else if(option=="--compress-positive-drive-timers") {
+            options.use_stage_local_jacobians=true;
+            options.compress_positive_drive_passive_timer_sensitivities=true;
+        }
         else if(option=="--terminal3")options.terminal_lookahead_steps=3;
         else if(option=="--suffix-fd")options.reuse_unperturbed_fd_prefix=true;
         else if(option=="--full-source-forward")
@@ -239,6 +252,13 @@ int main(int argc,char **argv) {
        <<stats.full_forward_dual_plant_us/1000.
        <<",\"full_forward_tangent_scoring_ms\":"
        <<stats.full_forward_tangent_scoring_us/1000.
+       <<",\"two_branch_source_probes\":"<<stats.two_branch_source_probes
+       <<",\"two_branch_relinearizations\":"<<stats.two_branch_relinearizations
+       <<",\"two_branch_qp_solves\":"<<stats.two_branch_qp_solves
+       <<",\"two_branch_box_redundant_wall_rows\":"<<stats.two_branch_box_redundant_wall_rows
+       <<",\"two_branch_selected_directions\":"<<stats.two_branch_selected_directions
+       <<",\"two_branch_initial_max_wall_defect_m\":"<<stats.two_branch_initial_max_wall_defect_m
+       <<",\"two_branch_selected_wall_v\":"<<stats.two_branch_selected_wall_v
        <<",\"near_feasible_projection_trials\":"<<stats.near_feasible_source_projection_trials
        <<",\"near_feasible_projection_accepts\":"<<stats.near_feasible_source_projection_accepts
        <<",\"qp_solves\":"<<stats.qp_solves

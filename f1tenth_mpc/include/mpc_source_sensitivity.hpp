@@ -28,5 +28,7 @@ bool full_source_derivatives(
     int decision_count,double normalized_step,double baseline_cost,
     double absolute_deadline_us,FullSourceDerivatives *out,
     bool build_gauss_newton_hessian=false,
-    bool use_stage_local_jacobians=false);
+    bool use_stage_local_jacobians=false,
+    bool compress_positive_drive_passive_timers=false,
+    bool corridor_only_phase_one=false);
 } // namespace sdu_apex::source_sqp

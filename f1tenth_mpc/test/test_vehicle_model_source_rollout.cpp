@@ -4247,3 +4247,92 @@ TEST(MpcSourceSecondOrder, InnerSubstepBranchDiagnosticsNeverChangePlant)
   EXPECT_EQ(branches.back().vehicle_substep,4);
   EXPECT_EQ(branches.back().wheel,3);
 }
+
+
+TEST(MpcSourceSecondOrder, OriginalSourceSwitchesWheelSubstepsAtFiveMetresPerSecond)
+{
+    // This is an actual source-integration active set, NOT a tire
+    // friction smoothness assumption. The source's 0.001s wheel solver
+    // changes from five 0.0002s inner steps to one 0.001s inner step.
+    // Branch-exact local AD must never be treated as globally C2 here.
+    f1tenth_mpc::UnitySourcePlantState source{};
+    source.body_height_m=.1;
+    source.wheel_omega_radps={84.5,84.5,84.5,84.5};
+    const f1tenth_mpc::UnitySourcePlantInput drive{.23,.4};
+    for(const double speed:{4.999,5.001}) {
+        source.u_mps=speed;
+        f1tenth_mpc::UnitySourcePlantOutput normal{},traced{};
+        std::vector<f1tenth_mpc::UnitySourceBranchObservation> events;
+        ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step(
+            source,drive,.001,&normal));
+        ASSERT_TRUE(f1tenth_mpc::unity_source_plant_trace_branches(
+            source,drive,.001,&events,&traced));
+        const int substeps=speed<5.?5:1;
+        ASSERT_EQ(events.size(),std::size_t(4*substeps));
+        for(const auto &event:events) {
+            EXPECT_EQ(event.vehicle_substep_count,substeps);
+            EXPECT_FALSE(event.zero_throttle_brake_mode);
+            if(event.grounded) {
+                EXPECT_EQ(event.combined_slip_saturated,
+                    event.normalized_combined_slip_demand_squared>1.);
+                const int denom=std::abs(event.wheel_surface_speed_mps)>
+                                 std::abs(event.wheel_ground_forward_speed_mps)
+                    ?1:(std::abs(event.wheel_surface_speed_mps)<
+                         std::abs(event.wheel_ground_forward_speed_mps)?-1:0);
+                EXPECT_EQ(event.longitudinal_slip_denominator_region,denom);
+            }
+        }
+        EXPECT_DOUBLE_EQ(normal.state.u_mps,traced.state.u_mps);
+        EXPECT_DOUBLE_EQ(normal.state.v_mps,traced.state.v_mps);
+        EXPECT_DOUBLE_EQ(normal.state.yaw_rate_radps,
+                         traced.state.yaw_rate_radps);
+    }
+}
+
+TEST(MpcSourceSecondOrder,
+     PassivePositiveDriveTimerSensitivitiesDoNotInfluencePhysicalSource)
+{
+  // Exact source proof obligation for skipping 8 AD lanes per stage:
+  // at throttle > 0, sticky forward/side modes are never activated,
+  // and the low-speed timers [18..25] are only passive bookkeeping.
+  // Their OUTPUT values can persist while airborne, but they cannot
+  // influence body, wheel physics, displacement or wheel-slip excess.
+  for(float initial_u : {0.6f,2.4f,4.9f,5.1f,7.5f}) {
+    for(float throttle : {0.001f,0.12f,0.6f,1.0f}) {
+      MpcModelState_t state{};
+      state.u=initial_u;
+      state.v=.05f;
+      state.r=.6f;
+      state.actual_steering_angle=.18f;
+      state.e_y=.03f;
+      state.e_psi=.02f;
+      ASSERT_TRUE(vehicle_model_initialize_plant_state(&state));
+      // Nonzero passive histories are important; a test with all zeros
+      // might accidentally miss a dependence on persistence.
+      for(int wheel=0;wheel<4;++wheel) {
+        state.source_plant_internal_state[
+            MPC_PLANT_STATE_LOW_FORWARD_SPEED_TIME_FL+wheel]=.28+wheel*.13;
+        state.source_plant_internal_state[
+            MPC_PLANT_STATE_LOW_SIDE_SPEED_TIME_FL+wheel]=.42+wheel*.11;
+      }
+      const MpcModelControl_t control{.22f,throttle};
+      double seeds[26][20]{},cmd_seeds[2][20]{};
+      double output[26][20]{},body[3][20]{},slip[4][20]{};
+      for(int column=18;column<26;++column)
+          seeds[column][column-18]=1.;
+      ASSERT_TRUE(vehicle_model_full_source_interval_sensitivities(
+          &state,&control,.025f,seeds,cmd_seeds,output,body,slip));
+      for(int coordinate=0;coordinate<18;++coordinate)
+          for(int lane=0;lane<8;++lane)
+              EXPECT_NEAR(output[coordinate][lane],0.,1.e-7)
+                  <<"v="<<initial_u<<" q="<<throttle
+                  <<" output="<<coordinate<<" passive="<<lane;
+      for(int coordinate=0;coordinate<3;++coordinate)
+          for(int lane=0;lane<8;++lane)
+              EXPECT_NEAR(body[coordinate][lane],0.,1.e-7);
+      for(int coordinate=0;coordinate<4;++coordinate)
+          for(int lane=0;lane<8;++lane)
+              EXPECT_NEAR(slip[coordinate][lane],0.,1.e-7);
+    }
+  }
+}

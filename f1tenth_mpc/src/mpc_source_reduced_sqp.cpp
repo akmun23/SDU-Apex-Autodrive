@@ -338,7 +338,9 @@ bool deriv(Evaluation &eval,const Vec &y,const Sample &base,
     double h,bool feasible,int decision_count,
     bool use_full_source_forward_sensitivities,
     bool use_gauss_newton_hessian,
-    bool use_stage_local_jacobians,Derivatives &out) {
+    bool use_stage_local_jacobians,
+    bool compress_positive_drive_passive_timers,
+    bool phase1_corridor_only,Derivatives &out) {
     if(use_full_source_forward_sensitivities) {
         // No heap churn for ~90 kB of derivative columns every callback.
         // The output is always reset before propagation; thread-local means
@@ -351,7 +353,9 @@ bool deriv(Evaluation &eval,const Vec &y,const Sample &base,
                 eval.trajectory_count,eval.lap_length,eval.dt,eval.cfg,
                 decision_count,h,base.cost,eval.deadline_us,result.get(),
                 use_gauss_newton_hessian && feasible,
-                use_stage_local_jacobians);
+                use_stage_local_jacobians,
+                compress_positive_drive_passive_timers,
+                phase1_corridor_only && !feasible);
         // Always retain partial profiling counters when a REAL deadline
         // interrupts derivative propagation. Otherwise a live 20ms miss
         // looks indistinguishable from never entering the source Jacobian.
@@ -458,7 +462,8 @@ bool newton(const Qp &qp,const Eigen::LDLT<Eigen::MatrixXd> &ldlt,
 // No "solved" flag is accepted without an independent primal certificate.
 QpAnswer solve_qp(const Qp &qp,int maximum,double deadline_us=0.,
                   const Eigen::VectorXd *warm_primal=nullptr,
-                  bool capture_offline_duals=false) {
+                  bool capture_offline_duals=false,
+                  double inexact_phase1_relative_dual=0.) {
     QpAnswer result{};
     const int m=qp.b.size(),n=qp.q.size();
     if(n==0||m==0||qp.H.rows()!=n||qp.H.cols()!=n||
@@ -518,6 +523,20 @@ QpAnswer solve_qp(const Qp &qp,int maximum,double deadline_us=0.,
         if(violation<1.e-7 && result.relative_dual<1.e-7 && mu<1.e-7) {
             result.status=1;stop_reason=1;break;
         }
+        // Source-SQP needs an affine-feasible *direction*, not a fully
+        // optimal QP point. Inexact inner SQP is legitimate only when
+        // ALL physical affine inequalities are truly satisfied, the
+        // primal residual and complementarity are tiny, and the scaled
+        // dual residual meets the explicitly selected numerical threshold.
+        // This code is disabled by default and never bypasses the full
+        // nonlinear source/collision certificate.
+        if(inexact_phase1_relative_dual>0. &&
+           result.iterations>=4 &&
+           violation<1.e-7 && mu<1.e-7 &&
+           result.relative_dual<inexact_phase1_relative_dual &&
+           max_violation(qp,x)<=1.e-8) {
+            result.status=2;stop_reason=9;break;
+        }
         if(!finite(mu)||mu<=0.||mu>1e30||!finite(violation)) {
             stop_reason=3;break;
         }
@@ -576,7 +595,8 @@ QpAnswer solve_qp(const Qp &qp,int maximum,double deadline_us=0.,
         result.offline_wall_duals=lambda;
     result.max_violation=max_violation(qp,x);
     if(result.status!=-2 &&
-       (result.status!=1 || result.max_violation>1e-5 ||
+       ((result.status!=1 && result.status!=2) ||
+        result.max_violation>(result.status==2?1.e-8:1.e-5) ||
         !finite(result.max_violation)))result.status=0;
     if(std::getenv("SDU_APEX_SOURCE_QP_DEBUG")) {
         std::fprintf(stderr,
@@ -668,6 +688,7 @@ bool qp_step(const Vec &y,const Sample &base,
     const Derivatives &d,const Mat &H,const MpcRtiConfiguration_t &model,
     int max_qp_iter,int walls,int decision_count,double deadline_us,
     Vec &step,Statistics &stats,
+    double phase1_inexact_relative_dual=0.,
     DerivativeSnapshot *offline_snapshot=nullptr) {
     const bool phase1=!base.strict_valid ||base.wall_v>1.e-12 ||
         base.rate_v>1.e-10;
@@ -689,10 +710,11 @@ bool qp_step(const Vec &y,const Sample &base,
     }
     step.setZero();
     auto solve=[&](const Qp &problem,
-                   const Eigen::VectorXd *warm=nullptr) {
+                   const Eigen::VectorXd *warm=nullptr,
+                   double inexact_dual=0.) {
         const double start=now_us();
         auto res=solve_qp(problem,max_qp_iter,deadline_us,warm,
-                          offline_snapshot!=nullptr);
+                          offline_snapshot!=nullptr,inexact_dual);
         if(res.status==-2)stats.deadline_exhausted=true;
         stats.qp_us+=now_us()-start;
         stats.qp_iterations+=res.iterations;
@@ -767,7 +789,7 @@ bool qp_step(const Vec &y,const Sample &base,
     // second QP to choose a different elastic search direction when the
     // hard linearized problem is in fact solvable. Only enter the true
     // slack LP when this hard QP is independently uncertified.
-    const auto direct=solve(hard);
+    const auto direct=solve(hard,nullptr,phase1_inexact_relative_dual);
     // Inexact-SQP feasibility direction: the local HARD inequalities
     // are independently satisfied, complementary gap has collapsed, and
     // the *scaled* dual residual is small compared with source-model
@@ -784,7 +806,8 @@ bool qp_step(const Vec &y,const Sample &base,
         direct.max_violation<=kPhaseOnePrimalTolerance &&
         direct.relative_dual<=kPhaseOneRelativeDualTolerance &&
         direct.gap<=kPhaseOneComplementarityTolerance;
-    if(direct.status==1 || certified_inexact_direction) {
+    if(direct.status==1 || direct.status==2 ||
+       certified_inexact_direction) {
         snapshot_wall_duals(direct,false);
         step.head(decision_count)=direct.x;
         return step.allFinite();
@@ -812,6 +835,130 @@ bool qp_step(const Vec &y,const Sample &base,
         step.head(decision_count)=stage2.x;
     }
     return step.allFinite();
+}
+// Source-branch multicut Phase I (offline only). The constraints are two
+// SEPARATE affine models of the ORIGINAL physical corridor, evaluated at
+// exact 26-state source trajectories on both sides of a potential tire
+// switch. Averaging the Jacobians would erase the distinct branch
+// geometries; an arbitrary reserve would introduce a different problem.
+// Both models are necessary, but neither is a nonlinear source certificate.
+bool solve_two_source_branch_qp(const Vec &y,const Sample &base,
+    const Derivatives &derivative,const Vec &first_direction,
+    const Sample &full_source,const Derivatives &end_derivative,
+    const MpcRtiConfiguration_t &model,int qp_max,int walls,
+    double deadline,bool use_box_presolve,
+    Vec &output,Statistics &stats)
+{
+    const Qp original=assemble_hard(y,base,derivative,model,
+        Mat::Identity(),Vec::Zero(),walls);
+    const int n=original.q.size();
+    const int suffix_rows=original.A.rows()-walls;
+    Qp multi{};
+    multi.H=original.H;multi.q=original.q;
+    multi.A=Eigen::MatrixXd::Zero(original.A.rows()+walls,n);
+    multi.b=Eigen::VectorXd::Zero(original.b.size()+walls);
+    // Source-local first branch: c(y) + J(y)*delta >= real wall limit.
+    multi.A.topRows(walls)=original.A.topRows(walls);
+    multi.b.head(walls)=original.b.head(walls);
+    // Physical second branch: c(y+p)+J(y+p)*(delta-p) >= SAME limit.
+    multi.A.middleRows(walls,walls)=-end_derivative.wall.topRows(walls);
+    multi.b.segment(walls,walls)=
+        full_source.wall.head(walls)-
+        end_derivative.wall.topRows(walls)*first_direction-
+        Wall::Constant(kMarginBuffer).head(walls);
+    // Retain every original hard physical command box/rate inequality.
+    multi.A.bottomRows(suffix_rows)=original.A.bottomRows(suffix_rows);
+    multi.b.tail(suffix_rows)=original.b.tail(suffix_rows);
+    multi.box_row_start=original.box_row_start+walls;
+    multi.box_variable_count=original.box_variable_count;
+    if(use_box_presolve) {
+        // Exact affine presolve: A_wall*d <= b_wall is redundant if its
+        // global maximum over the ORIGINAL full vehicle-command box is
+        // <= b_wall. This uses NO previous-iterate trust region and
+        // CANNOT shrink the QP feasible set. Strictly conservative
+        // floating-point buffer leaves borderline rows untouched.
+        std::array<double,D> lo{},hi{};
+        for(int col=0;col<n;++col) {
+            const int box=original.box_row_start+2*col;
+            hi[col]=original.b[box];
+            lo[col]=-original.b[box+1];
+        }
+        std::array<int,2*BaseW> retained{};
+        int wall_count=0;
+        for(int row=0;row<2*walls;++row) {
+            double maximum=0.;
+            for(int col=0;col<n;++col) {
+                const double a=multi.A(row,col);
+                maximum+=a*(a>=0.?hi[col]:lo[col]);
+            }
+            // Keep a margin for the 64-bit accumulation error and
+            // subsequent QP primal certificate tolerance.
+            const bool redundant=
+                std::isfinite(maximum) && std::isfinite(multi.b[row]) &&
+                maximum < multi.b[row]-1.e-8*
+                    std::max({1.,std::abs(maximum),std::abs(multi.b[row])});
+            if(!redundant)
+                retained[wall_count++]=row;
+        }
+        if(wall_count<2*walls) {
+            Qp compact{};
+            compact.H=multi.H;
+            compact.q=multi.q;
+            compact.A=Eigen::MatrixXd::Zero(wall_count+suffix_rows,n);
+            compact.b=Eigen::VectorXd::Zero(wall_count+suffix_rows);
+            for(int row=0;row<wall_count;++row) {
+                compact.A.row(row)=multi.A.row(retained[row]);
+                compact.b[row]=multi.b[retained[row]];
+            }
+            compact.A.bottomRows(suffix_rows)=
+                multi.A.bottomRows(suffix_rows);
+            compact.b.tail(suffix_rows)=
+                multi.b.tail(suffix_rows);
+            compact.box_row_start=original.box_row_start-walls+wall_count;
+            compact.box_variable_count=original.box_variable_count;
+            stats.two_branch_box_redundant_wall_rows+=
+                2*walls-wall_count;
+            multi=std::move(compact);
+        }
+    }
+    const double start=now_us();
+    // Phase I needs a certified affine-feasible direction, not an
+    // optimally minimized QP objective to 1e-7 while its gradient is
+    // noisy at tire switches. Strict source validation remains separate.
+    const auto result=solve_qp(multi,qp_max,deadline,nullptr,false,1.e-4);
+    stats.qp_us+=now_us()-start;
+    stats.qp_iterations+=result.iterations;
+    ++stats.qp_solves;
+    ++stats.two_branch_qp_solves;
+    stats.last_qp_status=result.status;
+    if(result.status==-2)stats.deadline_exhausted=true;
+    if((result.status!=1 && result.status!=2) ||
+       result.x.size()!=n || !result.x.allFinite() ||
+       result.max_violation>1.e-8)return false;
+    output=result.x;
+    if(!output.allFinite())return false;
+    // Independent ORIGINAL affine QP certificate. Especially important
+    // after algebraically removing physical-box-dominated rows: never
+    // treat a reduced matrix residual as proof about an incorrect cut.
+    const Wall original_branch=base.wall+derivative.wall*output;
+    const Wall endpoint_branch=full_source.wall+
+        end_derivative.wall*(output-first_direction);
+    constexpr double kAffineTolerance=1.e-7;
+    if(original_branch.head(walls).minCoeff()<
+           kMarginBuffer-kAffineTolerance ||
+       endpoint_branch.head(walls).minCoeff()<
+           kMarginBuffer-kAffineTolerance)
+        return false;
+    for(int col=0;col<n;++col) {
+        const double physical=(y[col]+output[col])*kScale[col%2];
+        const double limit=col%2 ? double(MPC_THROTTLE_MAX):
+                        double(model.max_steering_rad);
+        const double lower=col%2 ? double(MPC_THROTTLE_MIN_DRIVE):
+                        -double(model.max_steering_rad);
+        if(physical<lower-1.e-7 || physical>limit+1.e-7)
+            return false;
+    }
+    return true;
 }
 bool corrected_step(const Vec &trial,const Sample &at_trial,
     const Derivatives &d,const MpcRtiConfiguration_t &model,
@@ -869,12 +1016,25 @@ bool optimize(const MpcRtiState_t *initial,double progress,
        !finite(dt)||dt<=0.f||options.max_iterations<1||
        options.max_iterations>12||options.qp_max_iterations<1||
        options.derivative_step<=0.||options.derivative_step>.05||
+       (!std::isfinite(options.phase1_inexact_relative_dual) ||
+        options.phase1_inexact_relative_dual<0. ||
+        options.phase1_inexact_relative_dual>.1)||
        (options.terminal_lookahead_steps!=0 &&
         options.terminal_lookahead_steps!=3) ||
        (options.control_decision_stages!=20 &&
         options.control_decision_stages!=N) ||
+       (options.use_two_source_branch_qp && (
+        !options.use_full_source_forward_sensitivities ||
+        !options.use_stage_local_jacobians ||
+        options.control_decision_stages!=N)) ||
+       (options.use_two_branch_box_presolve &&
+        !options.use_two_source_branch_qp) ||
        ((options.use_gauss_newton_hessian ||
          options.use_stage_local_jacobians) &&
+        !options.use_full_source_forward_sensitivities) ||
+       (options.compress_positive_drive_passive_timer_sensitivities &&
+        !options.use_stage_local_jacobians) ||
+       (options.use_phase1_corridor_only_scoring &&
         !options.use_full_source_forward_sensitivities) ||
        (options.use_full_source_forward_sensitivities &&
         options.terminal_lookahead_steps!=0))
@@ -976,7 +1136,10 @@ bool optimize(const MpcRtiState_t *initial,double progress,
                 evaluator,y,base,options.derivative_step,feasible,
                 decision_count,options.use_full_source_forward_sensitivities,
                 options.use_gauss_newton_hessian,
-                options.use_stage_local_jacobians,derivative);
+                options.use_stage_local_jacobians,
+                options.compress_positive_drive_passive_timer_sensitivities,
+                options.use_phase1_corridor_only_scoring,
+                derivative);
         stats.derivative_us+=now_us()-derivative_start;
         if(!derivatives_valid || stats.deadline_exhausted)break;
         if(!options.use_full_source_forward_sensitivities)
@@ -1035,9 +1198,72 @@ bool optimize(const MpcRtiState_t *initial,double progress,
                 options.qp_max_iterations,
                 options.terminal_lookahead_steps==3?W:BaseW,
                 decision_count,options.absolute_deadline_us,delta,stats,
+                options.phase1_inexact_relative_dual,
                 iteration==0?options.first_derivative_snapshot:nullptr))
             break;
         stats.first_qp_direction_norm[iteration]=delta.norm();
+        if(options.use_two_source_branch_qp && !feasible &&
+           iteration==0 && delta.squaredNorm()>1.e-14 &&
+           !stats.deadline_exhausted) {
+            // A large candidate may cross a true physical tire/contact
+            // switching surface. Build the SECOND source branch at the
+            // original full-step QP endpoint; never replace the initial
+            // branch derivative or smooth the native tire model.
+            const Vec endpoint=y+delta;
+            Sample full_source{};
+            ++stats.two_branch_source_probes;
+            if(evaluator.evaluate(endpoint,false,full_source)) {
+                const Wall defect=full_source.wall-
+                    (base.wall+derivative.wall*delta);
+                stats.two_branch_initial_max_wall_defect_m=
+                    defect.cwiseAbs().maxCoeff();
+                if(defect.cwiseAbs().maxCoeff()>1.e-6) {
+                    Derivatives end_derivative{};
+                    const double tangent_start=now_us();
+                    const bool exact_derivatives=deriv(
+                        evaluator,endpoint,full_source,
+                        options.derivative_step,false,decision_count,
+                        options.use_full_source_forward_sensitivities,
+                        false,options.use_stage_local_jacobians,
+                        options.compress_positive_drive_passive_timer_sensitivities,
+                        options.use_phase1_corridor_only_scoring,
+                        end_derivative);
+                    stats.derivative_us+=now_us()-tangent_start;
+                    ++stats.two_branch_relinearizations;
+                    if(exact_derivatives && !stats.deadline_exhausted) {
+                        Vec candidate=Vec::Zero();
+                        if(solve_two_source_branch_qp(
+                            y,base,derivative,delta,full_source,
+                            end_derivative,configuration->model,
+                            options.qp_max_iterations,
+                            options.terminal_lookahead_steps==3?W:BaseW,
+                            options.absolute_deadline_us,
+                            options.use_two_branch_box_presolve,
+                            candidate,stats) &&
+                           (candidate-delta).norm()>1.e-8) {
+                            Sample second_source{};
+                            ++stats.two_branch_source_probes;
+                            // Competing QP directions are compared by
+                            // the ORIGINAL exact-source nonlinear
+                            // feasibility merit, never their affine value.
+                            if(evaluator.evaluate(y+candidate,false,
+                                   second_source) &&
+                               (second_source.wall_v+1.e-12<
+                                    full_source.wall_v ||
+                                (std::abs(second_source.wall_v-
+                                   full_source.wall_v)<=1.e-12 &&
+                                 second_source.rate_v+1.e-12<
+                                    full_source.rate_v))) {
+                                delta=candidate;
+                                ++stats.two_branch_selected_directions;
+                                stats.two_branch_selected_wall_v=
+                                    second_source.wall_v;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if(iteration==0 && options.first_derivative_snapshot) {
             auto &snapshot=*options.first_derivative_snapshot;
             snapshot.qp_direction_valid=true;
