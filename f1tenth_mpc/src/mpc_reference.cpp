@@ -184,6 +184,85 @@ int mpc_trajectory_sample(
     return sample_with_frame(points, count, length, s, sample, NULL);
 }
 
+static int sample_segment_slope(const MpcTrajectorySample_t *points,
+    size_t count,double lap_length,size_t segment,
+    MpcTrajectorySample_t *slope)
+{
+    if(!slope || segment>=count)return 0;
+    const size_t next=(segment+1)%count;
+    const MpcTrajectorySample_t &a=points[segment], &b=points[next];
+    const double span=(next==0 ? b.s+lap_length : b.s)-a.s;
+    if(!(span>0.) || !isfinite(span))return 0;
+    const double inv=1./span;
+    *slope=MpcTrajectorySample_t{};
+    slope->s=1.;
+    slope->x=(b.x-a.x)*inv;
+    slope->y=(b.y-a.y)*inv;
+    slope->heading=((next==0 ? unwrap_near(b.heading,a.heading) :
+        b.heading)-a.heading)*inv;
+    slope->curvature=(b.curvature-a.curvature)*inv;
+    slope->speed=(b.speed-a.speed)*inv;
+    slope->left_bound=(b.left_bound-a.left_bound)*inv;
+    slope->right_bound=(b.right_bound-a.right_bound)*inv;
+    slope->acceleration=(b.acceleration-a.acceleration)*inv;
+    slope->robust_contour_lateral_offset_m=
+        (b.robust_contour_lateral_offset_m-
+         a.robust_contour_lateral_offset_m)*inv;
+    slope->robust_contour_heading_offset_rad=
+        (b.robust_contour_heading_offset_rad-
+         a.robust_contour_heading_offset_rad)*inv;
+    slope->robust_contour_curvature_delta_radpm=
+        (b.robust_contour_curvature_delta_radpm-
+         a.robust_contour_curvature_delta_radpm)*inv;
+    if(a.source_witness_valid && b.source_witness_valid) {
+        slope->source_heading_error=wrap_angle(
+            b.source_heading_error-a.source_heading_error)*inv;
+        slope->source_v_rear=(b.source_v_rear-a.source_v_rear)*inv;
+        slope->source_yaw_rate=(b.source_yaw_rate-a.source_yaw_rate)*inv;
+        slope->source_physical_steering=
+            (b.source_physical_steering-a.source_physical_steering)*inv;
+    }
+    // Source throttle and steering targets are held over packets in
+    // sample_with_frame, never interpolated.
+    return isfinite(slope->heading)&&isfinite(slope->left_bound)&&
+        isfinite(slope->right_bound)&&isfinite(slope->speed);
+}
+
+int mpc_trajectory_sample_progress_differential(
+    const MpcTrajectorySample_t *points,size_t count,
+    double length,double progress,MpcTrajectoryProgressDifferential_t *out)
+{
+    if(!out || !valid_path(points,count,length) || !isfinite(progress))
+        return 0;
+    // Exactly the same periodic wrap and interval ownership as
+    // sample_with_frame (the actual source MPC reference evaluator).
+    const double first=points[0].s;
+    double wrapped=fmod(progress-first,length);
+    if(wrapped<0.)wrapped+=length;
+    wrapped+=first;
+    size_t forward=count-1;
+    if(wrapped<points[count-1].s) {
+        size_t lo=0,hi=count-1;
+        while(hi-lo>1) {
+            const size_t mid=lo+(hi-lo)/2;
+            if(points[mid].s<=wrapped)lo=mid;
+            else hi=mid;
+        }
+        forward=lo;
+    }
+    const bool knot=wrapped==points[forward].s;
+    const size_t backward=knot?(forward==0?count-1:forward-1):forward;
+    MpcTrajectoryProgressDifferential_t result{};
+    result.forward_segment=forward;
+    result.backward_segment=backward;
+    result.at_knot=knot?1:0;
+    if(!sample_segment_slope(points,count,length,forward,&result.forward) ||
+       !sample_segment_slope(points,count,length,backward,&result.backward))
+        return 0;
+    *out=result;
+    return 1;
+}
+
 /* Invert P=C(s)+e_y*N(s) for the same interpolated heading that the MPC
  * uses to reconstruct its world pose. A chord-only projection and a
  * constant-curvature propagation do not define that same coordinate map. */

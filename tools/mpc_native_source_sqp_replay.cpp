@@ -4,7 +4,9 @@
  * after mathematical qualification, using a recorded source context/seed.
  */
 #include "mpc_source_reduced_sqp.hpp"
+#include "mpc_source_sensitivity.hpp"
 #include "mpc_qp_failure_context.hpp"
+#include <array>
 #include <algorithm>
 #include <cstdlib>
 #include <cmath>
@@ -38,6 +40,8 @@ int main(int argc,char **argv) {
     std::string control_output;
     bool oracle_only=false;
     bool oracle_details=false;
+    std::string source_slip_direction_file;
+    bool source_slip_reuse_cache=false;
     for(int i=4;i<argc;++i) {
         const std::string option(argv[i]);
         if(option=="--oracle-only")oracle_only=true;
@@ -46,6 +50,18 @@ int main(int argc,char **argv) {
         }
         else if(option=="--no-soc")options.second_order_correction=false;
         else if(option=="--gn-hessian")options.use_gauss_newton_hessian=true;
+        else if(option.rfind("--source-slip-direction=",0)==0) {
+            source_slip_direction_file=option.substr(24);
+            oracle_only=true;
+        }
+        else if(option=="--source-slip-reuse-stage-cache") {
+            source_slip_reuse_cache=true;
+            oracle_only=true;
+        }
+        else if(option.rfind("--phase1-gn-damping=",0)==0)
+            options.phase1_gn_damping=std::stod(option.substr(20));
+        else if(option.rfind("--phase1-gn-band=",0)==0)
+            options.phase1_gn_margin_band_m=std::stod(option.substr(17));
         else if(option.rfind("--phase1-inexact-qp=",0)==0)
             options.phase1_inexact_relative_dual=
                 std::stod(option.substr(sizeof("--phase1-inexact-qp=")-1));
@@ -57,6 +73,10 @@ int main(int argc,char **argv) {
             options.use_stage_local_jacobians=true;
         else if(option=="--phase1-corridor-only")
             options.use_phase1_corridor_only_scoring=true;
+        else if(option=="--exact-stage-corridor-fd") {
+            options.use_phase1_corridor_only_scoring=true;
+            options.use_exact_stage_corridor_fd=true;
+        }
         else if(option=="--compress-positive-drive-timers") {
             options.use_stage_local_jacobians=true;
             options.compress_positive_drive_passive_timer_sensitivities=true;
@@ -125,8 +145,20 @@ int main(int argc,char **argv) {
                 minimum=std::min(minimum,c);
                 violation+=std::min(0.,c)*std::min(0.,c);
             }
+        double source_slip_cost=0.;
+        for(int stage=1;stage<=PREDICTION_HORIZON;++stage) {
+            const auto &ref=cfg.objective_schedule->references[stage];
+            const double weight=cfg.model.weight_longitudinal_slip*
+                (1.+cfg.model.longitudinal_slip_curvature_gain_m*
+                    std::abs(ref.path_curvature))*
+                (stage==PREDICTION_HORIZON
+                    ?cfg.model.terminal_multiplier:1.);
+            for(double slip:nominal->states[stage].incoming_wheel_slip_excess_mps)
+                source_slip_cost+=weight*slip*slip;
+        }
         std::cout<<std::setprecision(17)
             <<"{\"source_exact_nominal\":true,\"cost\":"<<cost
+            <<",\"source_longitudinal_slip_cost\":"<<source_slip_cost
             <<",\"wall_violation_m2\":"<<violation
             <<",\"min_wall_clearance_m\":"<<minimum
             <<",\"walls\":[";
@@ -137,6 +169,42 @@ int main(int argc,char **argv) {
             }
         }
         std::cout<<"]";
+        if(!source_slip_direction_file.empty()) {
+            std::array<double,60> direction{};
+            std::ifstream input(source_slip_direction_file);
+            if(!input)return 11;
+            for(int col=0;col<60;++col) {
+                int index=-1;
+                if(!(input>>index>>direction[col]) || index!=col ||
+                   !std::isfinite(direction[col]))return 12;
+            }
+            if(source_slip_reuse_cache) {
+                auto precomputed=std::make_unique<
+                    sdu_apex::source_sqp::FullSourceDerivatives>();
+                if(!sdu_apex::source_sqp::full_source_derivatives(
+                    nominal.get(),ctx.trajectory.data(),ctx.trajectory.size(),
+                    ctx.lap_length_m,ctx.prediction_dt,&cfg,60,.002,cost,
+                    0.,precomputed.get(),false,true,true,false,false))return 14;
+            }
+            sdu_apex::source_sqp::SourceSlipDirectionalCurvature curvature{};
+            if(!sdu_apex::source_sqp::source_slip_directional_curvature(
+                nominal.get(),&cfg,ctx.prediction_dt,direction.data(),
+                &curvature,source_slip_reuse_cache))return 13;
+            std::cout<<",\"source_slip_lagrangian_curvature\":{"
+                <<"\"reused_stage_jacobians\":"
+                    <<(source_slip_reuse_cache?"true":"false")<<","
+                <<"\"gauss_newton\":"<<curvature.gauss_newton
+                <<",\"residual_weighted\":"<<curvature.residual_weighted
+                <<",\"front_lateral_gauss_newton\":"
+                    <<curvature.front_lateral_gauss_newton
+                <<",\"front_lateral_residual_weighted\":"
+                    <<curvature.front_lateral_residual_weighted
+                <<",\"total\":"<<curvature.total
+                <<",\"first_source_parity_max_error\":"
+                    <<curvature.max_first_source_mismatch
+                <<",\"stages\":"<<curvature.stages
+                <<",\"elapsed_us\":"<<curvature.elapsed_us<<"}";
+        }
         if(oracle_details) {
             std::cout<<",\"source_states\":[";
             for(int stage=0;stage<=PREDICTION_HORIZON;++stage) {
@@ -163,7 +231,27 @@ int main(int argc,char **argv) {
                     if(i)std::cout<<",";
                     std::cout<<state.incoming_wheel_slip_excess_mps[i];
                 }
-                std::cout<<"]}";
+                std::cout<<"]";
+                if(stage>0) {
+                    MpcRtiCorridorDifferential_t d{};
+                    const bool ok=mpc_rti_corridor_differential_at_progress(
+                        &x,ctx.trajectory.data(),ctx.trajectory.size(),
+                        ctx.lap_length_m,nominal->progress[stage],
+                        &cfg.model,stage,&d)!=0;
+                    std::cout<<",\"corridor_branch_derivative\":";
+                    if(ok) {
+                        std::cout<<"{\"lower_d_ey\":"<<d.lower_d_ey
+                            <<",\"upper_d_ey\":"<<d.upper_d_ey
+                            <<",\"lower_d_epsi\":"<<d.lower_d_epsi
+                            <<",\"upper_d_epsi\":"<<d.upper_d_epsi
+                            <<",\"lower_d_progress_forward\":"<<d.lower_d_progress_forward
+                            <<",\"lower_d_progress_backward\":"<<d.lower_d_progress_backward
+                            <<",\"upper_d_progress_forward\":"<<d.upper_d_progress_forward
+                            <<",\"upper_d_progress_backward\":"<<d.upper_d_progress_backward
+                            <<"}";
+                    } else std::cout<<"null";
+                }
+                std::cout<<"}";
             }
             std::cout<<"]";
         }
@@ -198,6 +286,18 @@ int main(int argc,char **argv) {
         gradient_file<<std::setprecision(17);
         for(int col=0;col<60;++col)
             gradient_file<<col<<" "<<derivative_snapshot->gradient[col]<<"\n";
+        if(derivative_snapshot->source_cost_hessian_valid) {
+            // Export the nonlinear cost model even if the QP solver
+            // fails to produce a direction. No extra source evaluation.
+            std::ofstream source_hessian(dump_base+"_source_cost_hessian.txt");
+            source_hessian<<std::setprecision(17);
+            for(int row=0;row<60;++row) {
+                for(int col=0;col<60;++col)
+                    source_hessian<<(col?" ":"")
+                        <<derivative_snapshot->source_cost_hessian[row][col];
+                source_hessian<<"\n";
+            }
+        }
         if(derivative_snapshot->qp_direction_valid) {
             std::ofstream direction_file(dump_base+"_qp_direction.txt");
             direction_file<<std::setprecision(17)

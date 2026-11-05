@@ -9,7 +9,7 @@ extern "C" {
  * capture evaluator. state[] ordering is documented in this header so C and
  * Python callers do not depend on the C++ std::array ABI. */
 enum { UNITY_SOURCE_PLANT_STATE_SIZE = 26 };
-enum { UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH = 20 };
+enum { UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH = 28 };
 /* Exact physical command limit. Float-valued ROS/MPC interfaces round 30 deg
  * slightly upward, so plant inputs are clipped to this double boundary. */
 #define UNITY_SOURCE_MAX_STEERING_RAD 0.52359877559829887308
@@ -139,10 +139,137 @@ int unity_source_plant_step_directional_curvature_c(
     const double direction_control[2],
     UnitySourcePlantDirectionalCurvatureC *out);
 
+/* Separate one-sided directional source-plant interface. Does NOT
+ * change existing C source step/Jacobian/curvature ABI. When report.valid=0
+ * the sampled physical source direction crosses a discrete/noncontinuous
+ * branch and MUST NOT be used as a finite source gradient by the NLP. */
+typedef struct {
+  int exact_physical_switch_ties;
+  int derivative_selected_switch_ties;
+  int contact_switch_ties;
+  int zero_throttle_brake_switches;
+  int discrete_substep_schedule_switches;
+  int valid_one_sided_directional;
+} UnitySourceDirectionalBranchReportC;
+int unity_source_plant_step_one_sided_directional_c(
+    const UnitySourcePlantInputC *input,double duration_s,
+    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double direction_control[2],
+    UnitySourcePlantDirectionalCurvatureC *out,
+    UnitySourceDirectionalBranchReportC *report);
+
+/* Exact original 1ms/0.2ms physical source branch comparison.
+ * Both sides are independently evaluated through the ORIGINAL plant,
+ * not through finite-difference forces or surrogate tire curves.
+ * Counts compare matching wheel/tick/substep IDs and expose discrete
+ * schedule changes separately. Audit-only and excluded from production. */
+typedef struct {
+  int original_internal_events;
+  int perturbed_internal_events;
+  int mismatched_substep_schedule_events;
+  int contact_grounded_changes;
+  int sticky_forward_changes;
+  int sticky_side_changes;
+  int longitudinal_spline_region_changes;
+  int lateral_spline_region_changes;
+  int tire_load_filter_changes;
+  int combined_slip_saturation_changes;
+  int suspension_jounce_region_changes;
+  int slip_denominator_region_changes;
+  int steering_target_reached_changes;
+  int throttle_brake_mode_changes;
+  int first_changed_fixed_tick;
+  int first_changed_vehicle_substep;
+  int first_changed_wheel;
+  int valid;
+} UnitySourcePhysicalBranchComparisonC;
+int unity_source_plant_compare_physical_branches_c(
+    const UnitySourcePlantInputC *original,
+    const UnitySourcePlantInputC *candidate,
+    double duration_s,
+    UnitySourcePhysicalBranchComparisonC *out);
+
 /* Exact source wheel-contact lateral slip at this state, without
  * advancing the plant. No ABI changes to existing step/sensitivity structs. */
 int unity_source_plant_instantaneous_lateral_slip_c(
     const double state[UNITY_SOURCE_PLANT_STATE_SIZE], double slip[4]);
+
+/* Original WheelHit lateral-slip expression and its analytic 26-state
+ * source AD Jacobian. New explicit API, existing C structs/ABI unchanged. */
+int unity_source_plant_instantaneous_lateral_slip_ad_c(
+    const double state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    double slip[4],
+    double jacobian[4][UNITY_SOURCE_PLANT_STATE_SIZE]);
+
+/* Exact branch-local source directional second derivative for the
+ * instantaneous WheelHit lateral-slip objective. The caller supplies both
+ * first and second 26-state horizon sensitivities. */
+int unity_source_plant_instantaneous_lateral_slip_second_c(
+    const double state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double first_state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double second_state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    double slip[4],double first_slip[4],double second_slip[4]);
+
+/* Offline exact source trace of the internal peak-longitudinal-slip
+ * branch. Reuses the original substep tire expression; no extrapolation.
+ * Tied maxima are explicitly exposed rather than smoothed. */
+typedef struct {
+  double actual_source_max_excess_mps;
+  double traced_max_excess_mps;
+  double runner_up_excess_mps;
+  int active_fixed_tick;
+  int active_vehicle_substep;
+  int equal_max_substeps;
+  int traced_substeps;
+} UnitySourcePeakSlipTraceC;
+/* Every ORIGINAL 1ms/vehicle-substep positive slip excess. The maximum
+ * over these values and zero equals the original source slip-cost feature.
+ * This is an optional offline nonlinear-epigraph evaluator; no force
+ * recomputation or fabricated slip curve. One trace event is produced for
+ * every tire and internal substep; airborne wheels have zero excess.
+ */
+typedef struct {
+    int fixed_tick;
+    int vehicle_substep;
+    int wheel;
+    double positive_excess_mps;
+} UnitySourceSlipSubstepC;
+int unity_source_plant_all_slip_substeps_c(
+    const UnitySourcePlantInputC *input,double duration_s,
+    UnitySourceSlipSubstepC *samples,int capacity,int *count,
+    double exact_source_maximum[4]);
+
+/* Source AD of every ORIGINAL internal tire-slip substep.
+ * The caller selects up to 20 independent source-state/command directions.
+ * Results have the same time/wheel indexing as the primal substep trace.
+ * At switching surfaces the returned derivative is the selected source
+ * one-sided branch, not an assumed smooth derivative.
+ */
+typedef struct {
+    UnitySourceSlipSubstepC original;
+    double derivative[UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
+} UnitySourceSlipSubstepSensitivityC;
+int unity_source_plant_all_slip_substep_sensitivity_c(
+    const UnitySourcePlantInputC *input,double duration_s,
+    const UnitySourcePlantSensitivitySeedsC *seeds,
+    UnitySourceSlipSubstepSensitivityC *samples,int capacity,int *count);
+
+/* One authoritative source-plant AD interval simultaneously returns the
+ * source-exact 26-state/body/maximum-slip tangent AND every ORIGINAL
+ * 0.2ms/1ms tire slip-substep AD row in the same physical source pass.
+ * This avoids independent source evaluations choosing inconsistent
+ * tire/contact branches for dynamics versus epigraph constraints.
+ */
+int unity_source_plant_full_and_substep_sensitivity_c(
+    const UnitySourcePlantInputC *input,double duration_s,
+    const UnitySourcePlantSensitivitySeedsC *seeds,
+    UnitySourcePlantSensitivityC *out,
+    UnitySourceSlipSubstepSensitivityC *samples,
+    int capacity,int *count);
+
+int unity_source_plant_peak_slip_trace_c(
+    const UnitySourcePlantInputC *input,double duration_s,
+    UnitySourcePeakSlipTraceC out[4]);
 
 /* Evaluate Unity's source slip equation at the supplied physical plant state.
  * The excess is wheel-surface-speed mismatch beyond the source curve's force

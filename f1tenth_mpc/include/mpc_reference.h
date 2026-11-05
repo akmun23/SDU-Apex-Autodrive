@@ -68,6 +68,28 @@ typedef struct
     double dheading_ds;
 } MpcPathFrame_t;
 
+/* Exact one-sided slopes of the ORIGINAL periodic, piecewise-linear
+ * trajectory interpolation. Source-optimizer spline control points are
+ * already sampled before they reach the MPC; do not invent a different
+ * cubic interpolation or smooth over a waypoint discontinuity.
+ *
+ * Each slope is per metre of unwrapped progress. At an exact trajectory
+ * knot the two adjacent segments are returned independently. Held source
+ * command targets have zero within-segment derivative, but can jump at
+ * knots (at_knot=1): never treat this output as a smooth derivative of a
+ * command packet across that discontinuity. */
+typedef struct {
+    MpcTrajectorySample_t forward;
+    MpcTrajectorySample_t backward;
+    size_t forward_segment;
+    size_t backward_segment;
+    int at_knot;
+} MpcTrajectoryProgressDifferential_t;
+
+int mpc_trajectory_sample_progress_differential(
+    const MpcTrajectorySample_t *points,size_t point_count,
+    double lap_length,double s,MpcTrajectoryProgressDifferential_t *out);
+
 /* Advance the physical body displacement through the actual loaded path
  * frame. Optional Jacobian columns are e_y, e_psi, body dx, body dy, body yaw.
  * No tire/actuator calculation is repeated here. */

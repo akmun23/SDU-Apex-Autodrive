@@ -7,134 +7,131 @@
 namespace f1tenth_mpc {
 namespace {
 
-// Fixed twenty-lane forward-mode scalar used to differentiate the production
-// source plant. Its primal value selects the same active branch as the ordinary
-// double rollout; derivatives are propagated only through that branch.
-struct alignas(16) Dual20 {
-  // Tangents are stored in the MPC's float Jacobian. Twenty lanes carry all
-  // plant-dependent columns through one 25 ms source-plant evaluation. Keep
-  // them first in an aligned object so the compiler can vector-load complete
-  // tangent vectors; the primal remains double precision.
-  std::array<float, kUnityPlantSensitivityWidth> derivative{};
+// Twenty-eight-lane forward AD of the ORIGINAL double-precision source plant.
+// The branch-selecting primal stays bitwise identical; the propagated
+// tangents now use double, avoiding cumulative 32-bit sensitivity rounding
+// across the original substep tire/contact integration.
+struct alignas(16) Dual28 {
+  std::array<double, kUnityPlantSensitivityWidth> derivative{};
   double value{};
 
-  Dual20() = default;
-  Dual20(double v) : value(v) {}
+  Dual28() = default;
+  Dual28(double v) : value(v) {}
 };
 
-Dual20 operator+(const Dual20 &a, const Dual20 &b)
+Dual28 operator+(const Dual28 &a, const Dual28 &b)
 {
-  Dual20 out(a.value + b.value);
+  Dual28 out(a.value + b.value);
   for (std::size_t i = 0; i < out.derivative.size(); ++i)
     out.derivative[i] = a.derivative[i] + b.derivative[i];
   return out;
 }
 
-Dual20 operator-(const Dual20 &a, const Dual20 &b)
+Dual28 operator-(const Dual28 &a, const Dual28 &b)
 {
-  Dual20 out(a.value - b.value);
+  Dual28 out(a.value - b.value);
   for (std::size_t i = 0; i < out.derivative.size(); ++i)
     out.derivative[i] = a.derivative[i] - b.derivative[i];
   return out;
 }
 
-Dual20 operator-(const Dual20 &a)
+Dual28 operator-(const Dual28 &a)
 {
-  Dual20 out(-a.value);
+  Dual28 out(-a.value);
   for (std::size_t i = 0; i < out.derivative.size(); ++i)
     out.derivative[i] = -a.derivative[i];
   return out;
 }
 
-Dual20 operator*(const Dual20 &a, const Dual20 &b)
+Dual28 operator*(const Dual28 &a, const Dual28 &b)
 {
-  Dual20 out(a.value * b.value);
+  Dual28 out(a.value * b.value);
   for (std::size_t i = 0; i < out.derivative.size(); ++i)
-    out.derivative[i] = a.derivative[i] * static_cast<float>(b.value) +
-                        static_cast<float>(a.value) * b.derivative[i];
+    out.derivative[i] = a.derivative[i] * static_cast<double>(b.value) +
+                        static_cast<double>(a.value) * b.derivative[i];
   return out;
 }
 
-Dual20 operator/(const Dual20 &a, const Dual20 &b)
+Dual28 operator/(const Dual28 &a, const Dual28 &b)
 {
-  Dual20 out(a.value / b.value);
-  const float inverse_square = static_cast<float>(
+  Dual28 out(a.value / b.value);
+  const double inverse_square = static_cast<double>(
       1.0 / (b.value * b.value));
   for (std::size_t i = 0; i < out.derivative.size(); ++i)
-    out.derivative[i] = (a.derivative[i] * static_cast<float>(b.value) -
-                         static_cast<float>(a.value) * b.derivative[i]) *
+    out.derivative[i] = (a.derivative[i] * static_cast<double>(b.value) -
+                         static_cast<double>(a.value) * b.derivative[i]) *
         inverse_square;
   return out;
 }
 
 /* Most source equations combine differentiated values with scalar vehicle
- * constants. Avoid materializing a zero-tangent Dual20 and traversing all 20
+ * constants. Avoid materializing a zero-tangent Dual28 and traversing all 28
  * lanes for those operations; the derivatives below are the same forward-mode
- * rules as the Dual20/Dual20 overloads. */
-Dual20 operator+(const Dual20 &a, double b)
+ * rules as the Dual28/Dual28 overloads. */
+Dual28 operator+(const Dual28 &a, double b)
 {
-  Dual20 out(a.value + b);
+  Dual28 out(a.value + b);
   out.derivative = a.derivative;
   return out;
 }
 
-Dual20 operator+(double a, const Dual20 &b) { return b + a; }
+Dual28 operator+(double a, const Dual28 &b) { return b + a; }
 
-Dual20 operator-(const Dual20 &a, double b)
+Dual28 operator-(const Dual28 &a, double b)
 {
-  Dual20 out(a.value - b);
+  Dual28 out(a.value - b);
   out.derivative = a.derivative;
   return out;
 }
 
-Dual20 operator-(double a, const Dual20 &b)
+Dual28 operator-(double a, const Dual28 &b)
 {
-  Dual20 out(a - b.value);
+  Dual28 out(a - b.value);
   for (std::size_t i = 0; i < out.derivative.size(); ++i)
     out.derivative[i] = -b.derivative[i];
   return out;
 }
 
-Dual20 operator*(const Dual20 &a, double b)
+Dual28 operator*(const Dual28 &a, double b)
 {
-  Dual20 out(a.value * b);
-  const float scale = static_cast<float>(b);
+  Dual28 out(a.value * b);
+  const double scale = static_cast<double>(b);
   for (std::size_t i = 0; i < out.derivative.size(); ++i)
     out.derivative[i] = a.derivative[i] * scale;
   return out;
 }
 
-Dual20 operator*(double a, const Dual20 &b) { return b * a; }
+Dual28 operator*(double a, const Dual28 &b) { return b * a; }
 
-Dual20 operator/(const Dual20 &a, double b)
+Dual28 operator/(const Dual28 &a, double b)
 {
-  Dual20 out(a.value / b);
-  const float scalar = static_cast<float>(b);
-  const float inverse_square = static_cast<float>(1.0 / (b * b));
+  Dual28 out(a.value / b);
+  const double scalar = static_cast<double>(b);
+  const double inverse_square = static_cast<double>(1.0 / (b * b));
   for (std::size_t i = 0; i < out.derivative.size(); ++i)
     out.derivative[i] = a.derivative[i] * scalar * inverse_square;
   return out;
 }
 
-Dual20 operator/(double a, const Dual20 &b)
+Dual28 operator/(double a, const Dual28 &b)
 {
-  Dual20 out(a / b.value);
-  const float scalar = static_cast<float>(a);
-  const float inverse_square = static_cast<float>(1.0 / (b.value * b.value));
+  Dual28 out(a / b.value);
+  const double scalar = static_cast<double>(a);
+  const double inverse_square = static_cast<double>(1.0 / (b.value * b.value));
   for (std::size_t i = 0; i < out.derivative.size(); ++i)
     out.derivative[i] = -scalar * b.derivative[i] * inverse_square;
   return out;
 }
 
-Dual20 &operator+=(Dual20 &a, const Dual20 &b) { return a = a + b; }
-Dual20 &operator-=(Dual20 &a, const Dual20 &b) { return a = a - b; }
-Dual20 &operator*=(Dual20 &a, const Dual20 &b) { return a = a * b; }
+Dual28 &operator+=(Dual28 &a, const Dual28 &b) { return a = a + b; }
+Dual28 &operator-=(Dual28 &a, const Dual28 &b) { return a = a - b; }
+Dual28 &operator*=(Dual28 &a, const Dual28 &b) { return a = a * b; }
 
 
 // Branch-local exact second derivative in ONE direction. Unlike a central
 // finite difference, this never samples a different tire/contact/steering
 // regime to manufacture a Hessian. The nominal/source branch is selected
-// identically to the double and 20-lane first-order source evaluation.
+// identically to the double and 28-lane first-order source evaluation.
 // At a true switching surface this is one selected generalized derivative,
 // NOT proof that an ordinary C2 Hessian exists.
 struct SourceJet2 {
@@ -144,6 +141,31 @@ struct SourceJet2 {
   SourceJet2() = default;
   SourceJet2(double v) : value(v) {}
 };
+// Scoped strictly to the new accuracy-audit derivative kernel. Default
+// forward AD, second-order AD and original double source evaluation have
+// exactly their prior branch selection and floating-point arithmetic.
+struct OneSidedSourceBranchScope {
+  int exact_ties{};
+  int derivative_resolved_ties{};
+  int contact_switch_ties{};
+  int discrete_control_switches{};
+  int discontinuous_substep_schedules{};
+};
+thread_local OneSidedSourceBranchScope *source_one_sided_scope=nullptr;
+
+struct ScopedSourceOneSidedBranch {
+  OneSidedSourceBranchScope *previous{};
+  explicit ScopedSourceOneSidedBranch(OneSidedSourceBranchScope *scope)
+      : previous(source_one_sided_scope) {
+    source_one_sided_scope=scope;
+  }
+  ~ScopedSourceOneSidedBranch() {
+    source_one_sided_scope=previous;
+  }
+  ScopedSourceOneSidedBranch(const ScopedSourceOneSidedBranch &)=delete;
+  ScopedSourceOneSidedBranch &operator=(const ScopedSourceOneSidedBranch &)=delete;
+};
+
 SourceJet2 operator+(SourceJet2 a,SourceJet2 b) {
   SourceJet2 r(a.value+b.value);
   r.first=a.first+b.first;r.second=a.second+b.second;
@@ -226,12 +248,33 @@ SourceJet2 atan(SourceJet2 a) {
 }
 double primal(const SourceJet2 &v){return v.value;}
 SourceJet2 scalar_max(const SourceJet2 &a,const SourceJet2 &b) {
+  if(source_one_sided_scope && a.value==b.value) {
+    ++source_one_sided_scope->exact_ties;
+    if(a.first!=b.first) {
+      ++source_one_sided_scope->derivative_resolved_ties;
+      return a.first<b.first?b:a;
+    }
+  }
   return a.value < b.value ? b : a;
 }
 SourceJet2 scalar_max(double a,const SourceJet2 &b) {
+  if(source_one_sided_scope && a==b.value) {
+    ++source_one_sided_scope->exact_ties;
+    if(b.first!=0.) {
+      ++source_one_sided_scope->derivative_resolved_ties;
+      return b.first>0.?b:SourceJet2(a);
+    }
+  }
   return a < b.value ? b : SourceJet2(a);
 }
 SourceJet2 scalar_max(const SourceJet2 &a,double b) {
+  if(source_one_sided_scope && a.value==b) {
+    ++source_one_sided_scope->exact_ties;
+    if(a.first!=0.) {
+      ++source_one_sided_scope->derivative_resolved_ties;
+      return a.first>0.?a:SourceJet2(b);
+    }
+  }
   return a.value < b ? SourceJet2(b) : a;
 }
 
@@ -241,7 +284,59 @@ double primal(const Scalar &value)
   return static_cast<double>(value);
 }
 
-double primal(const Dual20 &value) { return value.value; }
+double primal(const Dual28 &value) { return value.value; }
+
+// SourceJet2 may be evaluated in a physically meaningful ONE-SIDED
+// direction. At an exact switch tie select the branch of the original
+// equation reached by x + epsilon*d as epsilon -> 0+. Never average
+// contact/force/spline branches. This is disabled for all other scalars.
+double source_branch_tangent(double) { return 0.; }
+double source_branch_tangent(const Dual28 &) { return 0.; }
+double source_branch_tangent(const SourceJet2 &a) { return a.first; }
+
+template <typename A,typename B>
+int source_directional_compare(const A &a,const B &b)
+{
+  const double va=primal(a),vb=primal(b);
+  // The ORIGINAL source's <, >, <=, >= all return false for NaN.
+  // Preserve that branch selection exactly in the normal double path;
+  // the separate source-plant validity checks still reject bad states.
+  if(std::isnan(va)||std::isnan(vb))return 2; // unordered
+  if(va<vb)return -1;
+  if(va>vb)return 1;
+  if(source_one_sided_scope) {
+    ++source_one_sided_scope->exact_ties;
+    const double da=source_branch_tangent(a);
+    const double db=source_branch_tangent(b);
+    if(da<db) {
+      ++source_one_sided_scope->derivative_resolved_ties;
+      return -1;
+    }
+    if(da>db) {
+      ++source_one_sided_scope->derivative_resolved_ties;
+      return 1;
+    }
+  }
+  return 0;
+}
+template <typename A,typename B>
+bool source_branch_lt(const A &a,const B &b) {
+  return source_directional_compare(a,b)==-1;
+}
+template <typename A,typename B>
+bool source_branch_gt(const A &a,const B &b) {
+  return source_directional_compare(a,b)==1;
+}
+template <typename A,typename B>
+bool source_branch_le(const A &a,const B &b) {
+  const int cmp=source_directional_compare(a,b);
+  return cmp==-1||cmp==0;
+}
+template <typename A,typename B>
+bool source_branch_ge(const A &a,const B &b) {
+  const int cmp=source_directional_compare(a,b);
+  return cmp==0||cmp==1;
+}
 
 template <typename Scalar>
 Scalar scalar_sin(const Scalar &value)
@@ -252,10 +347,10 @@ Scalar scalar_sin(const Scalar &value)
 
 double scalar_sin(double value) { return std::sin(value); }
 
-Dual20 sin(const Dual20 &value)
+Dual28 sin(const Dual28 &value)
 {
-  Dual20 out(std::sin(value.value));
-  const float slope = static_cast<float>(std::cos(value.value));
+  Dual28 out(std::sin(value.value));
+  const double slope = static_cast<double>(std::cos(value.value));
   for (std::size_t i = 0; i < out.derivative.size(); ++i)
     out.derivative[i] = slope * value.derivative[i];
   return out;
@@ -270,39 +365,39 @@ Scalar scalar_cos(const Scalar &value)
 
 double scalar_cos(double value) { return std::cos(value); }
 
-Dual20 cos(const Dual20 &value)
+Dual28 cos(const Dual28 &value)
 {
-  Dual20 out(std::cos(value.value));
-  const float slope = static_cast<float>(-std::sin(value.value));
+  Dual28 out(std::cos(value.value));
+  const double slope = static_cast<double>(-std::sin(value.value));
   for (std::size_t i = 0; i < out.derivative.size(); ++i)
     out.derivative[i] = slope * value.derivative[i];
   return out;
 }
 
-Dual20 sqrt(const Dual20 &value)
+Dual28 sqrt(const Dual28 &value)
 {
   const double root = std::sqrt(value.value);
-  Dual20 out(root);
-  const float slope = root > 0.0 ? static_cast<float>(0.5 / root) : 0.0f;
+  Dual28 out(root);
+  const double slope = root > 0.0 ? static_cast<double>(0.5 / root) : 0.0f;
   for (std::size_t i = 0; i < out.derivative.size(); ++i)
     out.derivative[i] = slope * value.derivative[i];
   return out;
 }
 
-Dual20 tan(const Dual20 &value)
+Dual28 tan(const Dual28 &value)
 {
   const double tangent = std::tan(value.value);
-  Dual20 out(tangent);
-  const float slope = static_cast<float>(1.0 + tangent * tangent);
+  Dual28 out(tangent);
+  const double slope = static_cast<double>(1.0 + tangent * tangent);
   for (std::size_t i = 0; i < out.derivative.size(); ++i)
     out.derivative[i] = slope * value.derivative[i];
   return out;
 }
 
-Dual20 atan(const Dual20 &value)
+Dual28 atan(const Dual28 &value)
 {
-  Dual20 out(std::atan(value.value));
-  const float slope = static_cast<float>(
+  Dual28 out(std::atan(value.value));
+  const double slope = static_cast<double>(
       1.0 / (1.0 + value.value * value.value));
   for (std::size_t i = 0; i < out.derivative.size(); ++i)
     out.derivative[i] = slope * value.derivative[i];
@@ -339,39 +434,40 @@ double scalar_atan(double value) { return std::atan(value); }
 template <typename Scalar>
 Scalar scalar_abs(const Scalar &value)
 {
-  return primal(value) < 0.0 ? -value : value;
+  return source_branch_lt(value,0.0) ? -value : value;
 }
 
-Dual20 scalar_abs(const Dual20 &value)
+Dual28 scalar_abs(const Dual28 &value)
 {
   return value.value < 0.0 ? -value : value;
 }
 
 double scalar_max(double a, double b) { return std::max(a, b); }
-Dual20 scalar_max(const Dual20 &a, const Dual20 &b)
+Dual28 scalar_max(const Dual28 &a, const Dual28 &b)
 {
   return a.value < b.value ? b : a;
 }
-Dual20 scalar_max(double a, const Dual20 &b)
+Dual28 scalar_max(double a, const Dual28 &b)
 {
-  return a < b.value ? b : Dual20(a);
+  return a < b.value ? b : Dual28(a);
 }
-Dual20 scalar_max(const Dual20 &a, double b)
+Dual28 scalar_max(const Dual28 &a, double b)
 {
-  return a.value < b ? Dual20(b) : a;
+  return a.value < b ? Dual28(b) : a;
 }
 
 template <typename Scalar>
 Scalar scalar_clamp(const Scalar &value, double low, double high)
 {
-  return primal(value) < low ? Scalar(low) :
-      (primal(value) > high ? Scalar(high) : value);
+  return source_branch_lt(value,low) ? Scalar(low) :
+      (source_branch_gt(value,high) ? Scalar(high) : value);
 }
 
 template <typename Scalar>
 Scalar scalar_copysign(const Scalar &magnitude, const Scalar &sign)
 {
-  return primal(sign) < 0.0 ? -scalar_abs(magnitude) : scalar_abs(magnitude);
+  return source_branch_lt(sign,0.) ?
+      -scalar_abs(magnitude) : scalar_abs(magnitude);
 }
 
 template <typename Scalar>
@@ -564,7 +660,7 @@ constexpr unsigned int kStickyTireSolverIterations = 7;
 template <typename Scalar>
 using Vec3T = std::array<Scalar, 3>;
 using Vec3 = Vec3T<double>;
-using DVec3 = Vec3T<Dual20>;
+using DVec3 = Vec3T<Dual28>;
 
 template <typename Scalar>
 Vec3T<Scalar> convert_vec3(const std::array<double, 3> &value)
@@ -774,8 +870,13 @@ bool wheel_contact_kinematics(const UnitySourcePlantStateT<Scalar> &s,
       2.0 * kWheelRadiusM + kSuspensionMaxCompressionM;
   const Scalar ray_jounce = rest_travel - ray_travel;
   out->raw_jounce_m = ray_jounce;
-  out->grounded = primal(ray_travel) > 0.0 &&
-      primal(ray_jounce) > -kSuspensionMaxDroopM;
+  if(source_one_sided_scope &&
+     ((primal(ray_travel)==0.&&source_branch_tangent(ray_travel)!=0.) ||
+      (primal(ray_jounce)==-kSuspensionMaxDroopM &&
+       source_branch_tangent(ray_jounce)!=0.)))
+    ++source_one_sided_scope->contact_switch_ties;
+  out->grounded = source_branch_gt(ray_travel,0.0) &&
+      source_branch_gt(ray_jounce,-kSuspensionMaxDroopM);
   out->jounce_m = scalar_clamp(
       ray_jounce, -kSuspensionMaxDroopM,
       kSuspensionMaxCompressionM);
@@ -838,10 +939,10 @@ Scalar curve_base_response(Scalar slip, const std::array<double, 5> &curve)
   const double asymptote_slip = curve[2];
   const double asymptote_value = curve[3];
   Scalar response;
-  if (primal(magnitude) < extremum_slip) {
+  if (source_branch_lt(magnitude,extremum_slip)) {
     const Scalar t = magnitude / extremum_slip;
     response = extremum_value * (t + t * t - t * t * t);
-  } else if (primal(magnitude) < asymptote_slip) {
+  } else if (source_branch_lt(magnitude,asymptote_slip)) {
     const Scalar t = (magnitude - extremum_slip) /
         (asymptote_slip - extremum_slip);
     const Scalar smooth = 3.0 * t * t - 2.0 * t * t * t;
@@ -858,9 +959,9 @@ Scalar tire_load(Scalar suspension_force, double sprung_mass)
   const double rest_load = (sprung_mass + kWheelMassKg) * kGravity;
   const Scalar normalized = suspension_force / rest_load;
   Scalar filtered;
-  if (primal(normalized) <= kTireLoadFilterMin) {
+  if (source_branch_le(normalized,kTireLoadFilterMin)) {
     filtered = kTireLoadFilterMinValue;
-  } else if (primal(normalized) >= kTireLoadFilterMax) {
+  } else if (source_branch_ge(normalized,kTireLoadFilterMax)) {
     filtered = kTireLoadFilterMaxValue;
   } else {
     filtered = kTireLoadFilterMinValue +
@@ -959,9 +1060,9 @@ Scalar integrate_no_drive_wheel_speed(Scalar omega, Scalar drive_torque,
   // wheel zero signed brake torque (computeSign(0)==0), integrates tire and
   // drive torque with implicit wheel damping, then applies its source lock
   // rule whenever an active brake would leave the wheel at/crossing zero.
-  const Scalar signed_brake_torque = primal(omega) > 0.0
+  const Scalar signed_brake_torque = source_branch_gt(omega,0.0)
       ? -raw_brake_torque
-      : (primal(omega) < 0.0 ? raw_brake_torque : Scalar(0.0));
+      : (source_branch_lt(omega,0.0) ? raw_brake_torque : Scalar(0.0));
   const bool brake_applied = primal(raw_brake_torque) != 0.0;
   const double reciprocal_inertia = 1.0 / kWheelInertiaKgM2;
   const double dt_over_inertia = duration * reciprocal_inertia;
@@ -969,7 +1070,7 @@ Scalar integrate_no_drive_wheel_speed(Scalar omega, Scalar drive_torque,
       (omega + dt_over_inertia *
           (tire_torque + drive_torque + signed_brake_torque)) /
       (1.0 + kWheelDampingRate * dt_over_inertia);
-  return brake_applied && primal(omega * next) <= 0.0 ? Scalar(0.0) : next;
+  return brake_applied && source_branch_le(omega * next,0.0) ? Scalar(0.0) : next;
 }
 
 template <typename Scalar>
@@ -1040,7 +1141,8 @@ void solve_sticky_tire_constraints(
         inverse_inertia_times(rows[row].angular_direction_body);
     const Scalar response = inverse_mass +
         dot(rows[row].angular_direction_body, angular_response[row]);
-    if (!(primal(response) > 0.0) || !scalar_finite(response)) continue;
+    if (!source_branch_gt(response,0.) || !scalar_finite(response))
+      continue;
     active_rows[valid_count++] = row;
     velocity_multiplier[row] = -x * spring_a / response;
     constant[row] =
@@ -1105,13 +1207,25 @@ std::array<Scalar, 2> euler_roll_pitch_rates(
     attitude.cr * pitch_body_rate - attitude.sr * yaw_body_rate};
 }
 
-template <typename Scalar>
+// The AD trace is populated with values from the ORIGINAL tire-force
+// expression inside its original integration loop. There is no new slip
+// model and no scalarized replacement. Plain-primal and second-order source
+// variants can instantiate the loop without paying for or using the trace.
+template<typename Scalar>
+std::array<double,kUnityPlantSensitivityWidth> source_tangents(
+    const Scalar &) { return {}; }
+std::array<double,kUnityPlantSensitivityWidth> source_tangents(
+    const Dual28 &value) { return value.derivative; }
+
+template <typename Scalar, bool CompleteOutput>
 bool step(const UnitySourcePlantStateT<Scalar> &input_state,
           const UnitySourcePlantInputT<Scalar> &input, double duration,
-          UnitySourcePlantOutputT<Scalar> *out, bool complete_output,
+          UnitySourcePlantOutputT<Scalar> *out,
           bool collect_slip_diagnostics,
           std::vector<UnitySourceBranchObservation> *branch_trace=nullptr,
-          int fixed_tick=0)
+          int fixed_tick=0,
+          std::vector<UnitySourceSlipSubstepSensitivity>
+              *all_slip_substeps=nullptr)
 {
   if (!out || !finite_state(input_state) ||
       !scalar_finite(input.steering_target_rad) ||
@@ -1137,12 +1251,12 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
     const Scalar threshold = last_internal_deg / 30.0;
     const double increment = kSteeringRateDegps * kDt;
     const Scalar target_deg = -command_norm * 30.0;
-    if (primal(command_norm) > primal(threshold)) {
+    if (source_branch_gt(command_norm,threshold)) {
       internal_deg -= increment;
-      if (primal(internal_deg) <= primal(target_deg)) internal_deg = target_deg;
+      if (source_branch_le(internal_deg,target_deg)) internal_deg = target_deg;
     } else {
       internal_deg += increment;
-      if (primal(internal_deg) >= primal(target_deg)) internal_deg = target_deg;
+      if (source_branch_ge(internal_deg,target_deg)) internal_deg = target_deg;
     }
     s.physical_steering_rad = -internal_deg * (kPi / 180.0);
   }
@@ -1160,12 +1274,31 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
   std::array<Scalar, 4> maximum_positive_slip{};
   std::array<Scalar, 4> maximum_slip_excess_mps{};
   std::array<StickyTireConstraint<Scalar>, 8> sticky_tire_rows{};
+  // EXACT zero throttle chooses the entirely different brake mode.
+  // At u=0 and du>0, its one-sided value is discontinuous: no finite
+  // derivative of that source transition exists. Never report the
+  // nominal brake-branch tangent as a valid one-sided derivative.
+  if(source_one_sided_scope &&
+     primal(input.throttle_normalized)==0. &&
+     source_branch_tangent(input.throttle_normalized)!=0.)
+    ++source_one_sided_scope->discrete_control_switches;
   const Scalar drive_torque = primal(input.throttle_normalized) == 0.0
       ? Scalar(0.0) : kMotorTorqueNm * input.throttle_normalized / 4.0;
   const Scalar brake_torque = primal(input.throttle_normalized) == 0.0
       ? Scalar(kMotorTorqueNm) : Scalar(0.0);
-  const unsigned int substep_count =
+  unsigned int substep_count =
       unity_source_wheel_substep_count(primal(s.u_mps));
+  // 5.0 m/s is a literal discrete PxVehicle substep-schedule switch,
+  // not a smooth dynamic. At equality, differentiate the one-sided
+  // branch only and MARK it as discontinuous for the NLP.
+  if(source_one_sided_scope &&
+     std::abs(primal(s.u_mps))==kWheelSubstepThresholdMps &&
+     source_branch_tangent(s.u_mps)!=0.) {
+    ++source_one_sided_scope->discontinuous_substep_schedules;
+    substep_count=source_branch_lt(
+        scalar_abs(s.u_mps),kWheelSubstepThresholdMps)?
+        kWheelSubstepsBelowThreshold:kWheelSubstepsAboveThreshold;
+  }
   const double substep_dt = duration / static_cast<double>(substep_count);
   Scalar yaw_accel = 0.0;
   std::array<Scalar, 4> final_jounce_rate{};
@@ -1194,6 +1327,13 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
     }
     for (std::size_t i = 0; i < 4; ++i) {
       if (!contacts[i].grounded) {
+        if(all_slip_substeps) {
+          UnitySourceSlipSubstepSensitivity feature{};
+          feature.fixed_tick=fixed_tick;
+          feature.vehicle_substep=int(substep);
+          feature.wheel=int(i);
+          all_slip_substeps->push_back(feature);
+        }
         if(branch_trace) {
           UnitySourceBranchObservation event{};
           event.fixed_tick=fixed_tick;
@@ -1235,11 +1375,16 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
       load[i] = tire_load(suspension_force_n[i], kSprungMassKg[i]);
       const bool intention_to_accelerate =
           primal(input.throttle_normalized) != 0.0;
-      const bool tire_force_branch_active = primal(load[i]) > 0.0;
+      // Source tire force selection at zero load can be discontinuous
+      // because the original PhysX load-filter has a nonzero floor.
+      if(source_one_sided_scope && primal(load[i])==0. &&
+         source_branch_tangent(load[i])!=0.)
+        ++source_one_sided_scope->contact_switch_ties;
+      const bool tire_force_branch_active=source_branch_gt(load[i],0.);
       if (tire_force_branch_active &&
-          std::abs(primal(sticky_wheel_forward)) < kStickyTireSpeedThresholdMps &&
-          std::abs(primal(s.wheel_omega_radps[i])) <
-              kStickyTireSpeedThresholdMps / kWheelRadiusM &&
+          source_branch_lt(scalar_abs(sticky_wheel_forward),kStickyTireSpeedThresholdMps) &&
+          source_branch_lt(scalar_abs(s.wheel_omega_radps[i]),
+              kStickyTireSpeedThresholdMps / kWheelRadiusM) &&
           !intention_to_accelerate) {
         s.low_forward_speed_time_s[i] += substep_dt;
       } else if (tire_force_branch_active) {
@@ -1249,24 +1394,43 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
       // intends to accelerate. The side-constraint activation later ignores
       // the intent flag itself, but consumes this already-gated timer.
       if (tire_force_branch_active &&
-          std::abs(primal(sticky_wheel_lateral)) < kStickyTireSpeedThresholdMps &&
+          source_branch_lt(scalar_abs(sticky_wheel_lateral),kStickyTireSpeedThresholdMps) &&
           !intention_to_accelerate) {
         s.low_side_speed_time_s[i] += substep_dt;
       } else if (tire_force_branch_active) {
         s.low_side_speed_time_s[i] = 0.0;
       }
+      if(source_one_sided_scope) {
+        // These are original Boolean sticky-row activation surfaces,
+        // not differentiable tire forces when the row is switched.
+        const auto sticky_tie=[&](const Scalar &x,double boundary) {
+          if(primal(x)==boundary &&
+             source_branch_tangent(x)!=0.)
+            ++source_one_sided_scope->contact_switch_ties;
+        };
+        sticky_tie(scalar_abs(sticky_wheel_forward),
+                   kStickyTireSpeedThresholdMps);
+        sticky_tie(scalar_abs(sticky_wheel_lateral),
+                   kStickyTireSpeedThresholdMps);
+        sticky_tie(scalar_abs(s.wheel_omega_radps[i]),
+                   kStickyTireSpeedThresholdMps / kWheelRadiusM);
+        sticky_tie(s.low_forward_speed_time_s[i],
+                   kStickyTireSpeedThresholdTimeS);
+        sticky_tie(s.low_side_speed_time_s[i],
+                   kStickyTireSpeedThresholdTimeS);
+      }
       const bool sticky_forward_active = input.apply_sticky_tire_constraints &&
           tire_force_branch_active &&
           !intention_to_accelerate &&
           ((input.apply_immediate_sticky_constraints &&
-            std::abs(primal(sticky_wheel_forward)) < kStickyTireSpeedThresholdMps &&
+            source_branch_lt(scalar_abs(sticky_wheel_forward),kStickyTireSpeedThresholdMps) &&
             primal(s.wheel_omega_radps[i]) == 0.0) ||
-           primal(s.low_forward_speed_time_s[i]) >
-               kStickyTireSpeedThresholdTimeS);
+           source_branch_gt(s.low_forward_speed_time_s[i],
+               kStickyTireSpeedThresholdTimeS));
       const bool sticky_side_active = input.apply_sticky_tire_constraints &&
           tire_force_branch_active &&
-          primal(s.low_forward_speed_time_s[i]) > 0.0 &&
-          primal(s.low_side_speed_time_s[i]) > kStickyTireSpeedThresholdTimeS;
+          source_branch_gt(s.low_forward_speed_time_s[i],0.0) &&
+          source_branch_gt(s.low_side_speed_time_s[i],kStickyTireSpeedThresholdTimeS);
       const Vec3T<Scalar> application_point{
           Scalar(kWheelX[i]), Scalar(kWheelY[i]),
           Scalar(kForceApplicationZ[i])};
@@ -1300,17 +1464,27 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
           scalar_max(scalar_abs(wheel_forward), scalar_abs(wheel_surface)) +
               kLongitudinalSlipSpeedOffsetM,
           0.0);
-      const Scalar raw_slip_x = primal(denominator) > 0.0
+      const Scalar raw_slip_x = source_branch_gt(denominator,0.0)
           ? (wheel_surface - wheel_forward) / denominator : Scalar(0.0);
       slip_x[i] = sticky_forward_active ? Scalar(0.0) : raw_slip_x;
+      Scalar original_substep_slip_excess=Scalar(0.0);
       if (collect_slip_diagnostics) {
         maximum_positive_slip[i] =
             scalar_max(maximum_positive_slip[i], slip_x[i]);
-        const Scalar slip_excess = scalar_max(0.0,
+        original_substep_slip_excess = scalar_max(0.0,
             scalar_abs(wheel_surface - wheel_forward) -
                 kForwardCurve[0] * denominator);
         maximum_slip_excess_mps[i] = scalar_max(
-            maximum_slip_excess_mps[i], slip_excess);
+            maximum_slip_excess_mps[i], original_substep_slip_excess);
+      }
+      if(all_slip_substeps) {
+        UnitySourceSlipSubstepSensitivity feature{};
+        feature.fixed_tick=fixed_tick;
+        feature.vehicle_substep=int(substep);
+        feature.wheel=int(i);
+        feature.positive_excess_mps=primal(original_substep_slip_excess);
+        feature.derivative=source_tangents(original_substep_slip_excess);
+        all_slip_substeps->push_back(feature);
       }
       // The tire-force curve uses body-left-positive contact velocity here.
       // Unity's WheelHit.sidewaysSlip reports the opposite sign for the same
@@ -1404,6 +1578,8 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
           event.normalized_combined_slip_demand_squared=demand;
         event.combined_slip_utilization=primal(utilization);
         event.longitudinal_slip=primal(slip_x[i]);
+        event.positive_longitudinal_slip_excess_mps=
+            primal(original_substep_slip_excess);
         event.lateral_slip=primal(slip_y[i]);
         event.normal_load_n=primal(load[i]);
         branch_trace->push_back(event);
@@ -1457,8 +1633,8 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
       const bool brake_applied = primal(brake_torque) != 0.0;
       const bool drive_applied = primal(drive_torque) != 0.0;
       if (contacts[i].grounded && !brake_applied && !drive_applied &&
-          std::abs(primal(contacts[i].forward_speed_mps)) <
-              kWheelAngleBlendSpeedMps) {
+          source_branch_lt(scalar_abs(contacts[i].forward_speed_mps),
+              kWheelAngleBlendSpeedMps)) {
         const Scalar alpha = scalar_abs(contacts[i].forward_speed_mps) /
             kWheelAngleBlendSpeedMps;
         angle_rate = (contacts[i].forward_speed_mps / kWheelRadiusM) *
@@ -1466,9 +1642,9 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
       }
       Scalar next_angle = s.wheel_rotation_angle_rad[i] +
           angle_rate * substep_dt;
-      if (primal(next_angle) >= kWheelRotationAngleWrapRad) {
+      if (source_branch_ge(next_angle,kWheelRotationAngleWrapRad)) {
         next_angle -= kWheelRotationAngleWrapRad;
-      } else if (primal(next_angle) <= -kWheelRotationAngleWrapRad) {
+      } else if (source_branch_le(next_angle,-kWheelRotationAngleWrapRad)) {
         next_angle += kWheelRotationAngleWrapRad;
       }
       s.wheel_rotation_angle_rad[i] = next_angle;
@@ -1538,7 +1714,7 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
     out->maximum_positive_longitudinal_slip = maximum_positive_slip;
     out->maximum_longitudinal_slip_excess_mps = maximum_slip_excess_mps;
   }
-  if (!complete_output) return true;
+  if constexpr (!CompleteOutput) return true;
 
   out->contact_forward_speed_mps = contact_forward_speed;
   out->contact_lateral_speed_mps = contact_lateral_speed;
@@ -1601,7 +1777,9 @@ bool step_interval(const UnitySourcePlantStateT<Scalar> &state,
                    double duration_s,
                    UnitySourcePlantOutputT<Scalar> *output,
                    bool sensitivity_only = false,
-                   std::vector<UnitySourceBranchObservation> *branch_trace=nullptr)
+                   std::vector<UnitySourceBranchObservation> *branch_trace=nullptr,
+                   std::vector<UnitySourceSlipSubstepSensitivity>
+                       *all_slip_substeps=nullptr)
 {
   if (!output || !scalar_finite(Scalar(duration_s)) || duration_s <= 0.0 ||
       duration_s > 0.2500001) return false;
@@ -1618,10 +1796,12 @@ bool step_interval(const UnitySourcePlantStateT<Scalar> &state,
   std::array<Scalar, 4> maximum_slip_excess_mps{};
   for (unsigned int i = 0; i < exact_steps; ++i) {
     const bool final_step = i + 1 == exact_steps;
-    if (!step(current, input, kDt, &result,
-              final_step && !sensitivity_only, true,
-              branch_trace,int(i)))
-      return false;
+    const bool stage_ok=final_step && !sensitivity_only
+        ? step<Scalar,true>(current,input,kDt,&result,true,
+            branch_trace,int(i),all_slip_substeps)
+        : step<Scalar,false>(current,input,kDt,&result,true,
+            branch_trace,int(i),all_slip_substeps);
+    if(!stage_ok)return false;
     const auto &next = result.state;
     const Scalar u_mid = 0.5 * (current.u_mps + next.u_mps);
     const Scalar r_mid =
@@ -1704,6 +1884,159 @@ bool unity_source_plant_lateral_slip_at_state(
   return true;
 }
 
+bool unity_source_plant_lateral_slip_with_sensitivities(
+    const UnitySourcePlantState &state,std::array<double,4> *slip,
+    std::array<std::array<double,kUnityPlantSensitivityStateSize>,4> *jacobian)
+{
+  if(!slip || !jacobian || !finite_state(state))return false;
+  for(auto &wheel:*jacobian)wheel.fill(0.);
+  // The source state has 26 differentiated channels; the exact source
+  // Dual28 kernel provides 28 lanes. Evaluate the physical expression in
+  // two independent batches, never using a chosen finite-difference h.
+  for(int batch=0;batch<int((kUnityPlantSensitivityStateSize+
+              kUnityPlantSensitivityWidth-1)/kUnityPlantSensitivityWidth);++batch) {
+    auto seed=[batch](double value,int index) {
+      Dual28 r(value);
+      const int lane=index-batch*int(kUnityPlantSensitivityWidth);
+      if(lane>=0 && lane<int(kUnityPlantSensitivityWidth))
+        r.derivative[lane]=1.f;
+      return r;
+    };
+    UnitySourcePlantStateT<Dual28> x;
+    x.u_mps=seed(state.u_mps,UNITY_SOURCE_U);
+    x.v_mps=seed(state.v_mps,UNITY_SOURCE_V);
+    x.yaw_rate_radps=seed(state.yaw_rate_radps,UNITY_SOURCE_YAW_RATE);
+    x.physical_steering_rad=seed(
+        state.physical_steering_rad,UNITY_SOURCE_PHYSICAL_STEERING);
+    x.body_height_m=seed(state.body_height_m,UNITY_SOURCE_BODY_HEIGHT);
+    x.body_height_rate_mps=seed(
+        state.body_height_rate_mps,UNITY_SOURCE_BODY_HEIGHT_RATE);
+    x.roll_rad=seed(state.roll_rad,UNITY_SOURCE_ROLL);
+    x.roll_rate_radps=seed(state.roll_rate_radps,UNITY_SOURCE_ROLL_RATE);
+    x.pitch_rad=seed(state.pitch_rad,UNITY_SOURCE_PITCH);
+    x.pitch_rate_radps=seed(state.pitch_rate_radps,UNITY_SOURCE_PITCH_RATE);
+    for(int wheel=0;wheel<4;++wheel) {
+      x.wheel_omega_radps[wheel]=seed(
+          state.wheel_omega_radps[wheel],
+          UNITY_SOURCE_WHEEL_OMEGA_FL+wheel);
+      x.wheel_rotation_angle_rad[wheel]=Dual28(
+          state.wheel_rotation_angle_rad[wheel]);
+      x.suspension_jounce_m[wheel]=seed(
+          state.suspension_jounce_m[wheel],
+          UNITY_SOURCE_SUSPENSION_JOUNCE_FL+wheel);
+      x.low_forward_speed_time_s[wheel]=seed(
+          state.low_forward_speed_time_s[wheel],
+          UNITY_SOURCE_LOW_FORWARD_SPEED_TIME_FL+wheel);
+      x.low_side_speed_time_s[wheel]=seed(
+          state.low_side_speed_time_s[wheel],
+          UNITY_SOURCE_LOW_SIDE_SPEED_TIME_FL+wheel);
+    }
+    x.suspension_history_initialized=state.suspension_history_initialized;
+    AttitudeBasis<Dual28> attitude;
+    if(!make_attitude_basis(x,&attitude))return false;
+    const auto steering=make_wheel_steering_basis(
+        x.physical_steering_rad);
+    const Vec3T<Dual28> velocity{
+        x.u_mps,x.v_mps,body_vertical_speed(x,attitude)};
+    const Vec3T<Dual28> angular{
+        x.roll_rate_radps,x.pitch_rate_radps,x.yaw_rate_radps};
+    for(int wheel=0;wheel<4;++wheel) {
+      WheelContactKinematics<Dual28> contact;
+      if(!wheel_contact_kinematics(x,attitude,velocity,angular,wheel,
+                                  steering[wheel],&contact))
+        return false;
+      const Dual28 value=contact.grounded
+          ? -scalar_atan(contact.lateral_speed_mps/
+              (scalar_abs(contact.forward_speed_mps)+
+               kMinLateralSpeedForTireModelMps))
+          : Dual28(0.);
+      if(!std::isfinite(value.value))return false;
+      if(batch==0)(*slip)[wheel]=value.value;
+      else if(std::abs((*slip)[wheel]-value.value)>1.e-10)return false;
+      for(int lane=0;lane<int(kUnityPlantSensitivityWidth);++lane) {
+        const int col=batch*int(kUnityPlantSensitivityWidth)+lane;
+        if(col>=int(kUnityPlantSensitivityStateSize))break;
+        if(!std::isfinite(value.derivative[lane]))return false;
+        (*jacobian)[wheel][col]=value.derivative[lane];
+      }
+    }
+  }
+  return true;
+}
+
+bool unity_source_plant_lateral_slip_directional_second(
+    const UnitySourcePlantState &state,
+    const std::array<double,kUnityPlantSensitivityStateSize> &first_state,
+    const std::array<double,kUnityPlantSensitivityStateSize> &second_state,
+    std::array<double,4> *slip,std::array<double,4> *first_slip,
+    std::array<double,4> *second_slip)
+{
+  if(!slip || !first_slip || !second_slip || !finite_state(state))
+    return false;
+  for(double v:first_state)if(!std::isfinite(v))return false;
+  for(double v:second_state)if(!std::isfinite(v))return false;
+  const auto seeded=[&](double value,int index) {
+    SourceJet2 jet(value);
+    jet.first=first_state[index];
+    jet.second=second_state[index];
+    return jet;
+  };
+  UnitySourcePlantStateT<SourceJet2> x{};
+  x.u_mps=seeded(state.u_mps,UNITY_SOURCE_U);
+  x.v_mps=seeded(state.v_mps,UNITY_SOURCE_V);
+  x.yaw_rate_radps=seeded(state.yaw_rate_radps,UNITY_SOURCE_YAW_RATE);
+  x.physical_steering_rad=seeded(
+      state.physical_steering_rad,UNITY_SOURCE_PHYSICAL_STEERING);
+  x.body_height_m=seeded(state.body_height_m,UNITY_SOURCE_BODY_HEIGHT);
+  x.body_height_rate_mps=seeded(
+      state.body_height_rate_mps,UNITY_SOURCE_BODY_HEIGHT_RATE);
+  x.roll_rad=seeded(state.roll_rad,UNITY_SOURCE_ROLL);
+  x.roll_rate_radps=seeded(state.roll_rate_radps,UNITY_SOURCE_ROLL_RATE);
+  x.pitch_rad=seeded(state.pitch_rad,UNITY_SOURCE_PITCH);
+  x.pitch_rate_radps=seeded(state.pitch_rate_radps,UNITY_SOURCE_PITCH_RATE);
+  for(int wheel=0;wheel<4;++wheel) {
+    x.wheel_omega_radps[wheel]=seeded(
+        state.wheel_omega_radps[wheel],
+        UNITY_SOURCE_WHEEL_OMEGA_FL+wheel);
+    x.wheel_rotation_angle_rad[wheel]=SourceJet2(
+        state.wheel_rotation_angle_rad[wheel]);
+    x.suspension_jounce_m[wheel]=seeded(
+        state.suspension_jounce_m[wheel],
+        UNITY_SOURCE_SUSPENSION_JOUNCE_FL+wheel);
+    x.low_forward_speed_time_s[wheel]=seeded(
+        state.low_forward_speed_time_s[wheel],
+        UNITY_SOURCE_LOW_FORWARD_SPEED_TIME_FL+wheel);
+    x.low_side_speed_time_s[wheel]=seeded(
+        state.low_side_speed_time_s[wheel],
+        UNITY_SOURCE_LOW_SIDE_SPEED_TIME_FL+wheel);
+  }
+  x.suspension_history_initialized=state.suspension_history_initialized;
+  AttitudeBasis<SourceJet2> attitude;
+  if(!make_attitude_basis(x,&attitude))return false;
+  const auto steering=make_wheel_steering_basis(x.physical_steering_rad);
+  const Vec3T<SourceJet2> velocity{
+      x.u_mps,x.v_mps,body_vertical_speed(x,attitude)};
+  const Vec3T<SourceJet2> angular{
+      x.roll_rate_radps,x.pitch_rate_radps,x.yaw_rate_radps};
+  for(int wheel=0;wheel<4;++wheel) {
+    WheelContactKinematics<SourceJet2> contact;
+    if(!wheel_contact_kinematics(x,attitude,velocity,angular,wheel,
+                                 steering[wheel],&contact))
+      return false;
+    const SourceJet2 result=contact.grounded
+        ? -scalar_atan(contact.lateral_speed_mps/
+            (scalar_abs(contact.forward_speed_mps)+
+             kMinLateralSpeedForTireModelMps))
+        : SourceJet2(0.);
+    if(!std::isfinite(result.value) || !std::isfinite(result.first) ||
+       !std::isfinite(result.second))return false;
+    (*slip)[wheel]=result.value;
+    (*first_slip)[wheel]=result.first;
+    (*second_slip)[wheel]=result.second;
+  }
+  return true;
+}
+
 bool unity_source_plant_reconcile_suspension_jounce(
     UnitySourcePlantState *state)
 {
@@ -1736,7 +2069,7 @@ bool unity_source_plant_step_1ms(const UnitySourcePlantState &state,
                                 const UnitySourcePlantInput &input,
                                 UnitySourcePlantOutput *output)
 {
-  return step(state, input, kDt, output, true, true);
+  return step<double,true>(state, input, kDt, output, true);
 }
 
 bool unity_source_plant_step_1ms_minimal(
@@ -1744,7 +2077,7 @@ bool unity_source_plant_step_1ms_minimal(
     const UnitySourcePlantInput &input,
     UnitySourcePlantOutput *output)
 {
-  return step(state, input, kDt, output, false, true);
+  return step<double,false>(state, input, kDt, output, true);
 }
 
 bool unity_source_plant_step(const UnitySourcePlantState &state,
@@ -1760,17 +2093,18 @@ bool unity_source_plant_step_with_sensitivities(
     const UnitySourcePlantInput &input,
     double duration_s,
     const UnitySourcePlantSensitivitySeeds &seeds,
-    UnitySourcePlantSensitivity *sensitivity)
+    UnitySourcePlantSensitivity *sensitivity,
+    std::vector<UnitySourceSlipSubstepSensitivity> *all_slip_substeps)
 {
   if (!sensitivity || !finite_state(state)) return false;
   auto seeded = [&seeds](double value, std::size_t index) {
-    Dual20 result(value);
+    Dual28 result(value);
     for (std::size_t lane = 0; lane < kUnityPlantSensitivityWidth; ++lane)
       result.derivative[lane] =
-          static_cast<float>(seeds.state[index][lane]);
+          static_cast<double>(seeds.state[index][lane]);
     return result;
   };
-  UnitySourcePlantStateT<Dual20> dual_state;
+  UnitySourcePlantStateT<Dual28> dual_state;
   dual_state.u_mps = seeded(state.u_mps, UNITY_SOURCE_U);
   dual_state.v_mps = seeded(state.v_mps, UNITY_SOURCE_V);
   dual_state.yaw_rate_radps = seeded(state.yaw_rate_radps,
@@ -1779,7 +2113,7 @@ bool unity_source_plant_step_with_sensitivities(
     dual_state.wheel_omega_radps[wheel] = seeded(
         state.wheel_omega_radps[wheel], UNITY_SOURCE_WHEEL_OMEGA_FL + wheel);
     dual_state.wheel_rotation_angle_rad[wheel] =
-        Dual20(state.wheel_rotation_angle_rad[wheel]);
+        Dual28(state.wheel_rotation_angle_rad[wheel]);
     dual_state.suspension_jounce_m[wheel] = seeded(
         state.suspension_jounce_m[wheel],
         UNITY_SOURCE_SUSPENSION_JOUNCE_FL + wheel);
@@ -1805,24 +2139,26 @@ bool unity_source_plant_step_with_sensitivities(
   dual_state.suspension_history_initialized =
       state.suspension_history_initialized;
 
-  UnitySourcePlantInputT<Dual20> dual_input;
-  dual_input.steering_target_rad = Dual20(input.steering_target_rad);
+  UnitySourcePlantInputT<Dual28> dual_input;
+  dual_input.steering_target_rad = Dual28(input.steering_target_rad);
   for (std::size_t lane = 0; lane < kUnityPlantSensitivityWidth; ++lane) {
     dual_input.steering_target_rad.derivative[lane] =
-        static_cast<float>(seeds.steering_target[lane]);
+        static_cast<double>(seeds.steering_target[lane]);
   }
-  dual_input.throttle_normalized = Dual20(input.throttle_normalized);
+  dual_input.throttle_normalized = Dual28(input.throttle_normalized);
   for (std::size_t lane = 0; lane < kUnityPlantSensitivityWidth; ++lane) {
     dual_input.throttle_normalized.derivative[lane] =
-        static_cast<float>(seeds.throttle[lane]);
+        static_cast<double>(seeds.throttle[lane]);
   }
   dual_input.apply_sticky_tire_constraints =
       input.apply_sticky_tire_constraints;
   dual_input.apply_immediate_sticky_constraints =
       input.apply_immediate_sticky_constraints;
 
-  UnitySourcePlantOutputT<Dual20> dual_output;
-  if (!step_interval(dual_state, dual_input, duration_s, &dual_output, true))
+  UnitySourcePlantOutputT<Dual28> dual_output;
+  if(all_slip_substeps)all_slip_substeps->clear();
+  if (!step_interval(dual_state, dual_input, duration_s, &dual_output,
+                     true,nullptr,all_slip_substeps))
     return false;
   for (std::size_t wheel = 0; wheel < 4; ++wheel) {
     const auto &excess = dual_output.maximum_longitudinal_slip_excess_mps[wheel];
@@ -1833,7 +2169,7 @@ bool unity_source_plant_step_with_sensitivities(
   }
   for (std::size_t state_index = 0;
        state_index < kUnityPlantSensitivityStateSize; ++state_index) {
-    const Dual20 *value = nullptr;
+    const Dual28 *value = nullptr;
     switch (state_index) {
       case UNITY_SOURCE_U: value = &dual_output.state.u_mps; break;
       case UNITY_SOURCE_V: value = &dual_output.state.v_mps; break;
@@ -1852,7 +2188,7 @@ bool unity_source_plant_step_with_sensitivities(
         value = &dual_output.state.physical_steering_rad; break;
       default: break;
     }
-    const std::array<float, kUnityPlantSensitivityWidth> *derivative = value
+    const std::array<double, kUnityPlantSensitivityWidth> *derivative = value
         ? &value->derivative : nullptr;
     if (!derivative && state_index >= UNITY_SOURCE_WHEEL_OMEGA_FL &&
         state_index <= UNITY_SOURCE_WHEEL_OMEGA_RR) {
@@ -1901,14 +2237,18 @@ bool unity_source_plant_trace_branches(
                          traced_output?traced_output:&local,false,trace);
 }
 
-bool unity_source_plant_step_with_directional_curvature(
+static bool source_step_with_directional_curvature_impl(
     const UnitySourcePlantState &state,
     const UnitySourcePlantInput &input,
     double duration_s,
     const std::array<double,kUnityPlantSensitivityStateSize> &ds,
     const std::array<double,2> &du,
-    UnitySourcePlantDirectionalCurvature *output)
+    UnitySourcePlantDirectionalCurvature *output,
+    UnitySourceDirectionalBranchReport *branch_report)
 {
+  OneSidedSourceBranchScope one_sided{};
+  ScopedSourceOneSidedBranch scope(branch_report?&one_sided:nullptr);
+  if(branch_report)*branch_report={};
   if(!output || !finite_state(state))return false;
   for(double v:ds)if(!std::isfinite(v))return false;
   for(double v:du)if(!std::isfinite(v))return false;
@@ -2000,7 +2340,45 @@ bool unity_source_plant_step_with_directional_curvature(
     curvature.second_body[i]=body[i].second;
   }
   *output=curvature;
+  if(branch_report) {
+    branch_report->exact_physical_switch_ties=one_sided.exact_ties;
+    branch_report->derivative_selected_switch_ties=
+        one_sided.derivative_resolved_ties;
+    branch_report->contact_switch_ties=one_sided.contact_switch_ties;
+    branch_report->zero_throttle_brake_switches=
+        one_sided.discrete_control_switches;
+    branch_report->discrete_substep_schedule_switches=
+        one_sided.discontinuous_substep_schedules;
+    branch_report->valid_one_sided_directional=
+        one_sided.contact_switch_ties==0 &&
+        one_sided.discrete_control_switches==0 &&
+        one_sided.discontinuous_substep_schedules==0;
+  }
   return true;
+}
+
+bool unity_source_plant_step_with_directional_curvature(
+    const UnitySourcePlantState &state,
+    const UnitySourcePlantInput &input,double duration_s,
+    const std::array<double,kUnityPlantSensitivityStateSize> &ds,
+    const std::array<double,2> &du,
+    UnitySourcePlantDirectionalCurvature *output)
+{
+  return source_step_with_directional_curvature_impl(
+      state,input,duration_s,ds,du,output,nullptr);
+}
+
+bool unity_source_plant_step_one_sided_directional(
+    const UnitySourcePlantState &state,
+    const UnitySourcePlantInput &input,double duration_s,
+    const std::array<double,kUnityPlantSensitivityStateSize> &ds,
+    const std::array<double,2> &du,
+    UnitySourcePlantDirectionalCurvature *output,
+    UnitySourceDirectionalBranchReport *branch_report)
+{
+  if(!branch_report)return false;
+  return source_step_with_directional_curvature_impl(
+      state,input,duration_s,ds,du,output,branch_report);
 }
 
 bool unity_source_plant_slip_excess(

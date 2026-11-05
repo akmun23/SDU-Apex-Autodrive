@@ -115,18 +115,44 @@ typedef struct
 extern "C" {
 #endif
 
-/* Full 26-channel source-plant tangent integration in 20 independent
+/* Canonical physical MPC <-> original 26-coordinate source conversion.
+ * Exactly the conversion used by the original vehicle dynamics. Import
+ * changes only physical state coordinates; path errors, actuator history
+ * and source-initialized flags remain owned by the caller.
+ */
+int vehicle_model_pack_source_state(
+    const MpcModelState_t *state,
+    double source_state[UNITY_SOURCE_PLANT_STATE_SIZE]);
+int vehicle_model_inject_source_state(
+    MpcModelState_t *state,
+    const double source_state[UNITY_SOURCE_PLANT_STATE_SIZE]);
+
+/* Full 26-channel source-plant tangent integration in 28 independent
  * directions. Unlike the reduced 23-state QP Jacobian, the caller seeds and
  * receives ALL wheel/suspension/sticky-tire history coordinates, plus body
  * displacement and within-step slip derivatives. Requires a source-initialized
  * full state. No physics substitution and no finite-difference plant steps. */
 int vehicle_model_full_source_interval_sensitivities(
     const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
-    const double seed_state[26][20],
-    const double seed_control[2][20],
-    double next_state[26][20],
-    double body_motion[3][20],
-    double slip_excess[4][20]);
+    const double seed_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    const double seed_control[2][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double next_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double body_motion[3][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double slip_excess[4][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH]);
+
+/* One original source-plant AD evaluation returns the full physical
+ * transition/body/peak tangents AND ALL physically observed substep tire
+ * slip derivatives. Both components have exactly the same source branch
+ * decisions; this feeds the sparse source-exact NLP in a single pass.
+ */
+int vehicle_model_full_source_interval_and_substep_sensitivities(
+    const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
+    const double seed_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    const double seed_control[2][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double next_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],double body_motion[3][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double slip_excess[4][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    UnitySourceSlipSubstepSensitivityC *samples,
+    int capacity,int *count);
 
 /* Full-source second-order directional transition oracle.
  *
@@ -178,6 +204,34 @@ int vehicle_model_full_source_interval_analytic_directional_second_order(
 int vehicle_model_initialize_plant_state(MpcModelState_t *state);
 
 /* Unity-source tire slip metrics for the current MPC plant state. */
+/* Exact source WheelHit instantaneous lateral-slip directional curvature.
+ * Inputs are the 26-source-coordinate first and second horizon tangents
+ * (not the reduced state). Uses source contact geometry and Jet2, not FD. */
+/* Exact original substep tire-slip maximum/active-branch trace.
+ * Offline diagnostic only. No duplicate source-plant implementation. */
+/* All real internal source substep slip-penalty features. Used for
+ * a nonlinear epigraph representation of the actual source maximum. */
+int vehicle_model_source_slip_substeps(
+    const MpcModelState_t *state,const MpcModelControl_t *control,
+    float dt,UnitySourceSlipSubstepC *samples,int capacity,
+    int *count,double source_maximum[4]);
+
+int vehicle_model_source_slip_substep_sensitivities(
+    const MpcModelState_t *state,const MpcModelControl_t *control,
+    float dt,const double seed_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    const double seed_control[2][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    UnitySourceSlipSubstepSensitivityC *samples,int capacity,int *count);
+
+int vehicle_model_trace_peak_longitudinal_slip(
+    const MpcModelState_t *state,const MpcModelControl_t *control,
+    float dt,UnitySourcePeakSlipTraceC out[4]);
+
+int vehicle_model_source_lateral_slip_second(
+    const MpcModelState_t *state,
+    const double first_source[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double second_source[UNITY_SOURCE_PLANT_STATE_SIZE],
+    double lateral_slip[4],double first_slip[4],double second_slip[4]);
+
 int vehicle_model_longitudinal_slip_excess(
     const MpcModelState_t *state,
     double excess_speed_mps[4],

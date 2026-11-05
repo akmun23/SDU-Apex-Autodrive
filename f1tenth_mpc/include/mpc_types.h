@@ -2,8 +2,7 @@
  * @file mpc_types.h
  * @brief Type definitions and compile-time constants for the MPC system.
  * @details Defines all shared constants and data structures used by the MPC
- *          pipeline, including model parameters, trajectory references, and
- *          Riccati-ADMM solver data.
+ *          pipeline, including source model parameters and trajectory references.
  * @dependencies none
  */
 
@@ -82,8 +81,6 @@ enum
     MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND = 22,
     MPC_OPTIMIZER_NX = 23
 };
-#define RICCATI_MAX_NX MPC_OPTIMIZER_NX
-#define RICCATI_MAX_NU MPC_MODEL_NU
 /* command-time prediction advances the measured state to the next bridge
  * request epoch before solving. The newly optimized input is active at that
  * boundary, so the MPC horizon starts with a direct-input plant transition. */
@@ -93,22 +90,15 @@ enum
 #define PREDICTION_DT_SECONDS 0.025f                    /* Nominal 40 Hz prediction-step duration. */
 
 /* Other swept MPC defaults */
-#define MAX_ITERATIONS 300                             /* Storage/runtime cap; more iterations did not improve IROS feasibility. */
-#define ADMM_RHO 7.0f                                  /* Primary ADMM penalty balancing feasibility and optimality progress. */
-#define ADMM_RHO_U 7.0f                                /* ADMM penalty applied to control-variable projection terms. */
-#define CONVERGENCE_TOLERANCE 0.01f                     /* Residual threshold used to declare solver convergence. */
 #define PREDICTION_HORIZON 30
 /* Equal-duration, 75 ms exact validation for rejected-plan proposals and
  * retained actions. Independent of in-horizon delay: command-time prediction
  * has already handled the external actuator queue before this horizon. */
-#define MPC_RECOVERY_PREFIX_HORIZON 3
 /* Prediction and optimization use the same 30 transitions from the command
  * application epoch; there is no extra in-horizon queued-command stage. */
-#define RICCATI_HORIZON (PREDICTION_HORIZON - MPC_COMMAND_DELAY_STEPS)
 #define TIME_STEP_SECONDS 0.025f                         /* Default model integration period per horizon stage. */
 
 /* Solver and model safeguards */
-#define BIG_BOUND 50.0f                                  /* Sentinel magnitude representing an effectively unconstrained bound. */
 
 /* Current Unity source anchors and controller output policy. */
 #define SOURCE_MAX_STEERING_RAD 0.5235987756f            /* VehicleController SteeringLimit: 30 deg. */
@@ -175,178 +165,5 @@ typedef struct
     float left_wall_bound;               /* Maximum leftward bound from path centerline [meters]. */
     float right_wall_bound;              /* Maximum rightward bound from path centerline [meters]. */
 } TrajectoryReferencePoint_t;
-
-/*===========================================================================
- * Riccati-ADMM Solver Types
- *===========================================================================*/
-
-/**
- * @brief Per-stage dynamics, cost, and box-constraint data for Riccati-ADMM.
- * @details Represents one prediction step used by the constrained LQR solve.
- *          Q_diag/Q_offdiag and R_diag/R_cross represent symmetric state
- *          and control Hessians; N is the complete state-input cross term.
- *          x/u bounds define box constraints for ADMM projection.
- */
-typedef struct
-{
-    float A[RICCATI_MAX_NX][RICCATI_MAX_NX];
-    float B[RICCATI_MAX_NX][RICCATI_MAX_NU];
-    float d[RICCATI_MAX_NX];
-    float Q_diag[RICCATI_MAX_NX];
-    /* Symmetric OFF-diagonal state Hessian (diagonal is only Q_diag). */
-    float Q_offdiag[RICCATI_MAX_NX][RICCATI_MAX_NX];
-    float q[RICCATI_MAX_NX];
-    float N[RICCATI_MAX_NX][RICCATI_MAX_NU];
-    float R_diag[RICCATI_MAX_NU];
-    /* Full 2-input curvature; diagonal remains only in R_diag. */
-    float R_cross;
-    float r[RICCATI_MAX_NU];
-    float x_lb[RICCATI_MAX_NX];
-    float x_ub[RICCATI_MAX_NX];
-    float u_lb[RICCATI_MAX_NU];
-    float u_ub[RICCATI_MAX_NU];
-} RiccatiStepData_t;
-
-/**
- * @brief ADMM configuration parameters for the Riccati solver.
- * @details Controls augmented-Lagrangian penalties, convergence criteria,
- *          iteration budget, and optional adaptive-rho logic. `tolerance` is
- *          the absolute maximum allowed raw primal and dual residual; it is
- *          not scaled by unrelated state magnitudes because MPC channels have
- *          different physical units.
- */
-enum { RICCATI_STATE_POLYGON_MAX_PLANES = 8 };
-
-/* Affine half-planes in e_y, e_psi; the original nonlinear source-plant
- * rollout and exact body-footprint checker remain the collision authority. */
-typedef struct
-{
-    int count;
-    float normal[RICCATI_STATE_POLYGON_MAX_PLANES][2];
-    float upper[RICCATI_STATE_POLYGON_MAX_PLANES];
-    /* Optional local derivative of each physical footprint plane with
-     * respect to progress deviation (optimizer coordinate 20).
-     * Zero preserves the original exact 2D projection and old fixtures. */
-    float progress_normal[RICCATI_STATE_POLYGON_MAX_PLANES];
-    /* Zero: original HARD halfplanes. Positive: convex elastic-QP halfplanes,
-     * min_{xi>=0, a*z<=b+xi} (w/2) sum xi^2.
-     * ADMM eliminates xi EXACTLY in the split proximal objective:
-     * w/2 sum max(0,a*z-b)^2. Never makes source validation elastic. */
-    float elastic_weight;
-} RiccatiStatePolygon_t;
-
-/* General terminal halfspaces C*x[N] <= upper. Split independently in
- * ADMM so the Riccati recursion retains its block structure. */
-enum { RICCATI_TERMINAL_MAX_PLANES = 10 };
-typedef struct
-{
-    int count;
-    float normal[RICCATI_TERMINAL_MAX_PLANES][RICCATI_MAX_NX];
-    float upper[RICCATI_TERMINAL_MAX_PLANES];
-    float rho;
-} RiccatiTerminalConstraints_t;
-
-typedef struct
-{
-    float rho;
-    float rho_u;
-    /* Optional per-state penalties; zero inherits rho. */
-    float rho_x_by_state[RICCATI_MAX_NX];
-    /* Optional per-control ADMM penalties. A nonpositive entry inherits
-     * rho_u; input 0 is steering and input 1 is throttle in the MPC model. */
-    float rho_u_by_input[RICCATI_MAX_NU];
-    /* Upper bound for adaptive penalties; zero preserves the generic 127 cap. */
-    float rho_max;
-    float tolerance;
-    int max_iterations;
-    int adaptive_rho;
-    /* Discard the previous ADMM primal, dual, and penalty iterate before
-     * each QP solve. Zero preserves warm-start behavior. */
-    int cold_start_each_solve;
-    /* A second SQP QP describes the same command epoch: retain stage indices
-     * instead of shifting the persistent split/dual iterate by 25 ms again.
-     * Zero means the ordinary next-control-epoch warm start (one shift). */
-    int reuse_same_epoch;
-    /* Re-factor only every Nth ADMM iteration when adapting rho; zero keeps
-     * the historical per-iteration update cadence. */
-    int adaptive_rho_update_period;
-    int shared_rho;
-    /* ADMM over-relaxation in [1, 2]; zero selects the unrelaxed baseline. */
-    float over_relaxation;
-    /* Cooperative wall-time bound for one ADMM solve. Zero disables the
-     * bound. The solver checks after each complete primal/projection pass. */
-    double max_solve_time_us;
-    int use_scaling;
-    float state_scale[RICCATI_MAX_NX];
-    float input_scale[RICCATI_MAX_NU];
-    RiccatiStatePolygon_t state_polygons[RICCATI_HORIZON + 1];
-    RiccatiTerminalConstraints_t terminal_constraints;
-} RiccatiAdmmConfig_t;
-
-/**
- * @brief Termination status codes returned by Riccati-ADMM.
- * @details Distinguishes converged solves, iteration-limit exits, and hard
- *          input/runtime errors.
- */
-typedef enum
-{
-    RICCATI_STATUS_OPTIMAL = 0,
-    RICCATI_STATUS_MAX_ITERATIONS = 1,
-    RICCATI_STATUS_ERROR = 2
-} RiccatiStatus_t;
-
-/**
- * @brief Output trajectories and convergence metrics from Riccati-ADMM.
- * @details Stores the solved state/control horizon together with residuals,
- *          iteration count, and final status.
- */
-typedef struct
-{
-    float x[RICCATI_HORIZON + 1][RICCATI_MAX_NX];
-    float u[RICCATI_HORIZON][RICCATI_MAX_NU];
-    int iterations;
-    /* Separates a wall-budget stop from reaching max_iterations while both
-     * continue to use MAX_ITERATIONS as the candidate-validity status. */
-    int time_budget_exhausted;
-    float primal_residual;
-    float dual_residual;
-    /* Final ADMM residual components in the solver's scaled coordinates. */
-    float state_primal_residual;
-    float state_dual_residual;
-    float input_primal_residual;
-    float input_dual_residual;
-    /* Stage/channel locations of the final maximum residuals; -1 if absent. */
-    int state_primal_stage;
-    int state_primal_index;
-    int state_dual_stage;
-    int state_dual_index;
-    int input_primal_stage;
-    int input_primal_index;
-    int input_dual_stage;
-    int input_dual_index;
-    RiccatiStatus_t status;
-} RiccatiSolution_t;
-
-/**
- * @brief Persistent ADMM warm-start buffers used across solve calls.
- * @details Retains projected variables, dual variables, and adapted penalty
- *          parameters so sequential MPC solves can converge faster.
- */
-typedef struct
-{
-    float z_x[RICCATI_HORIZON + 1][RICCATI_MAX_NX];
-    float z_u[RICCATI_HORIZON][RICCATI_MAX_NU];
-    float y_x[RICCATI_HORIZON + 1][RICCATI_MAX_NX];
-    float y_u[RICCATI_HORIZON][RICCATI_MAX_NU];
-    float rho;
-    float rho_u;
-    /* Stage/channel penalties; shifted with the horizon warm start. */
-    float rho_state[RICCATI_HORIZON + 1][RICCATI_MAX_NX];
-    float rho_input[RICCATI_HORIZON][RICCATI_MAX_NU];
-    int initialized;
-    int scaling_enabled;
-    float state_scale[RICCATI_MAX_NX];
-    float input_scale[RICCATI_MAX_NU];
-} RiccatiAdmmState_t;
 
 #endif /* MPC_TYPES_H */

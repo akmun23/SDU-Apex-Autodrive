@@ -10,6 +10,15 @@ if [[ $# -ne 1 ]]; then
 fi
 run_id="$1"
 [[ "$run_id" =~ ^[[:alnum:]_-]+$ ]] || exit 2
+# The Unity bridge, ROS topics and 40 Hz controller are a shared physical
+# simulation domain. Two simultaneous trials corrupt each other's command
+# epochs and render timing/qualification evidence unusable. Keep one
+# supervisor as the exclusive owner; the OS releases the lock on exit.
+exec {trial_lock_fd}>"${TMPDIR:-/tmp}/sdu_apex_practice_trial.lock"
+if ! flock -n "$trial_lock_fd"; then
+  echo "An Autodrive practice trial already owns the simulator/ROS domain; refusing a concurrent run" >&2
+  exit 73
+fi
 run_dir="live_runs/$run_id"
 [[ ! -e "$run_dir" ]] || { echo "Run already exists: $run_dir" >&2; exit 2; }
 trajectory=f1tenth_planning/trajectories/autodrive_practice_20260924_b/source_command_4p800.csv
@@ -49,7 +58,9 @@ python3 tools/seal_mpc_run_manifest.py --run-id "$run_id" \
   --map "$map" --trajectory "$trajectory" "$@" \
   --initial-pose '{"x":0.8,"y":3.1592,"yaw":-1.5708251687330668}' \
   --supervisor "tools/watch_sim_run.sh $controller $simulator $recorder mpc-lap-$total_laps 180" \
-  --diagnostics on --ros-executor-threads 4 --openmp-threads 8 --jacobian-workers 8
+  --diagnostics on --ros-executor-threads 4 \
+  --openmp-threads "${OMP_NUM_THREADS:-8}" \
+  --jacobian-workers "${OMP_NUM_THREADS:-8}"
 
 cleanup() {
   docker stop --timeout 0 "$simulator" >/dev/null 2>&1 || true
@@ -93,7 +104,8 @@ docker exec "$controller" bash -lc \
 reset_job=$!
 wait_log "$run_dir/controller.log" 'reset ROS callback: True'
 env SDU_APEX_SIM_TRACK=practice SDU_APEX_SIM_MODE=batchmode \
-  SDU_APEX_SIM_CONTAINER="$simulator" SDU_APEX_SIM_CPUSET_CPUS=12-13 \
+  SDU_APEX_SIM_CONTAINER="$simulator" SDU_APEX_SIM_CPUSET_CPUS=12-15 \
+  SDU_APEX_SIM_RUNTIME_AFFINITY_CPUS="${SDU_APEX_TRIAL_SIM_RUNTIME_AFFINITY_CPUS:-}" \
   tools/start_simulator.sh >"$run_dir/simulator.log" 2>&1 &
 simulator_job=$!
 set +e

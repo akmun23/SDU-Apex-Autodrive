@@ -1,7 +1,7 @@
+# mpc_competition.yaml: single original-source full-step nonlinear SQP.
+# Development only: repeated Unity race/feasibility qualification pending.
 /**:
   ros__parameters:
-    # Frozen competition autonomous MPC profile. This file is intentionally
-    # complete so the competition image does not depend on a host overlay.
     enabled: true
     odom_topic: /odom
     pose_topic: /current_map_pose
@@ -9,158 +9,49 @@
     publish_diagnostics: false
     path_frame: map
     command_frame: base_link
-    trajectory_file: ""
-
+    trajectory_file: ''
     max_speed_mps: 16.0
     startup_speed_mps: 1.5
-    # Use the loaded native speed profile immediately; no artificial lap-based
-    # speed ramp in the development/competition vehicle model.
     startup_ramp_laps: 0.0
-
     state_extrapolation_max_s: 0.12
-    # A stale sample is never solved against. Keep the last issued command and
-    # wait briefly for the packet backlog to recover; only a persistent stale
-    # stream latches the controller fault.
     state_stale_fault_grace_s: 0.5
-    # Publication lead is model-predicted separately from sensor-state age.
-    # 500 ms covers the measured practice solve/publish lead (<400 ms) while
-    # remaining inside the offline plant's validated 750 ms prediction span.
     maximum_command_publication_lead_s: 0.5
     command_actuation_delay_s: 0.0
-    # Publish only when acquisition, solve, validation and command preparation
-    # finish in under 20 ms. Command-start prediction lateness is diagnostic;
-    # it does not invalidate an otherwise exact-feasible candidate.
-    end_to_end_cycle_budget_ms: 20.0
+    end_to_end_cycle_budget_ms: 22.0
     max_command_start_lateness_ms: 2.0
-    # The Oct 21 practice MPC capture measured 14.2 ms median callback-to-publish.
     initial_command_publication_lead_ms: 15.0
     unity_plant_state_topic: /odom/unity_plant_state
     drive_command_topic: /mpc/drive_command
     pose_odom_max_skew_s: 0.12
     source_dt_min_s: 0.001
-    source_dt_max_s: 0.250
-    startup_path_max_distance_m: 0.80
+    source_dt_max_s: 0.25
+    startup_path_max_distance_m: 0.8
     startup_path_heading_tolerance_rad: 0.75
-
-    # Loaded-frame geometry, exact nonlinear line search and peak-slip cost.
-    # Oct 28 v343 tracking-reserve target: ten scored laps in 52.239 s,
-    # no collision, maximum publication 19.395 ms. No along-scan likelihood
-    # correction or optional progress reward remains in production.
-    # Evidence: docs/development/RUNTIME_CLEANUP_AND_RACING_20261028.md.
     weight_e_y: 4000.0
     weight_e_psi: 1500.0
     weight_u: 35.0
     weight_u_overspeed: 20.0
-    # Keep extra overspeed pressure in corners without the former 8:1 base
-    # asymmetry that biased speed tracking below the requested profile.
     overspeed_curvature_gain_m: 0.5
-    # Optional candidate-only schedule: reduce speed-catch-up pressure in
-    # tighter turns while retaining the full weight on straights. Zero keeps
-    # the validated production objective unchanged.
     underspeed_curvature_gain_m: 0.0
-    # Cost is the actual held-interval peak; the former 25 weight belonged
-    # to a smaller instantaneous wheel-only QP residual. Physics unchanged.
     weight_longitudinal_slip: 5.0
     weight_v: 5.0
     weight_r: 7.8125
     weight_steering_command: 3.0
-    # Tracks the native commanded target for a source witness, independently
-    # of physical rack angle. Geometry-only paths use zero-effort steering.
-    # Use IPOPT as a spatial path/speed/wall reference, NOT a command/state
-    # replay. MPC owns steering/throttle using its current observed plant.
     geometry_only_raceline_reference: true
     weight_steering_target: 0.0
     weight_throttle_command: 0.1
-    # Penalizes steering-command changes beyond the native target change
-    # (or curvature-derived feedforward for geometry-only paths), allowing a
-    # required sign reversal through a curvature transition. The throttle
-    # slew cost remains centered on zero command increment.
     weight_steering_slew: 2000.0
-    # Retain tested actuator damping; stronger gas/lower-damping bundles
-    # failed the opening hairpin despite producing finite QP iterates.
     weight_throttle_slew: 50.0
     startup_nominal_throttle_seed: 0.25
     terminal_multiplier: 3.0
-
     max_steering_rad: 0.5235987756
-    # Preserve 5 cm physical wall clearance; the vehicle rectangle is projected
-    # per predicted heading in the exact rollout and linearized constraints.
     corridor_margin_m: 0.05
     first_prediction_corridor_margin_m: 0.05
-    corridor_preview_halfwidth_m: 0.10
-    # The .005 m profile completed all ten racing laps below 11 s with no
-    # collision. The .010 m trial collided during the opening hairpin.
+    corridor_preview_halfwidth_m: 0.1
     nonlinear_corridor_tolerance_m: 0.005
-
-    admm_rho: 7.0
-    admm_rho_input: 7.0
-    # Bound adaptive penalties: practice captures repeatedly drove rho_u to
-    # 127 on iteration-limited solves, with larger dual residuals. Cap at 32.
-    admm_rho_max: 32.0
-    # Avoid rapid penalty escalation: restrained 1.25x/0.8x updates were
-    # retained from the previous high-input-rho practice trial.
-    adaptive_rho_update_period: 10
-    adaptive_rho: true
-    admm_over_relaxation: 1.6
-    # Exact coordinate transform for mixed-unit solver state/input channels.
-    solver_state_scaling_enabled: true
-    # In scaled coordinates, 0.02 is the absolute maximum ADMM residual.
-    # Exact nonlinear source-plant/corridor validation is an independent gate.
-    solver_tolerance: 0.02
-    # Per-pass ADMM cap. Optional refinement reserves its measured preparation
-    # cost and nonlinear completion time before building another QP. A valid
-    # lower-cost first pass is retained if refinement cannot improve it.
-    max_solver_iterations: 150
-    # Backtrack a corridor-invalid or higher-cost full step (1/2..1/16).
-    # Select the first exact-valid decrease relative to a valid nominal;
-    # never accept a merely feasible cost increase. Refine damped steps only
-    # if preparation, ADMM and exact validation fit the measured time budget.
-    enable_nonlinear_line_search: true
-    line_search_max_backtracks: 4
-    max_sqp_iterations: 2
-    # Disabled: replay showed that full-horizon suffix validation rejects
-    # otherwise useful short retained prefixes too often.
-    prefer_full_validated_prior_plan_on_rejection: false
-    # On a rejected solve, compare candidate and retained-plan actions over
-    # the same 75 ms using exact source-plant rollout. The hard corridor already
-    # includes the required 5 cm body-to-wall buffer; do not require another
-    # 5 cm of clearance for a bounded stale-plan refresh.
-    quality_aware_prefix_selection_on_rejection: true
-    # Opt-in map-independent 750 ms feasibility restoration, validated against
-    # the same source-plant/body corridor and the 20 ms publication gate.
-    # Keep disabled until repeated independent closed-loop trials pass.
-    viability_recovery_enabled: false
-    # Steady-command experimental bridge can improve high-speed feasibility
-    # but regressed some independent practice laps; isolate it from the
-    # proven tapered-only controller until comprehensive cross-map validation.
-    viability_steady_bridge_enabled: false
-    viability_recovery_max_trials: 16
-    # Trigger a search when the remaining 750ms predicted physical envelope
-    # slack falls under 5cm; it is an early-warning threshold, not a hard
-    # extra clearance constraint or an enforced raceline padding.
-    viability_lookahead_reserve_m: 0.02
-    quality_prefix_clearance_reserve_m: 0.0
-    # At IROS progress 161.46 m an exact-valid candidate improved 75 ms
-    # corridor slack by 13.95 mm while the retained prefix had only 19.08 mm
-    # reserve. The 20 mm threshold kept replaying the worse prefix; a 10 mm
-    # threshold selects the safer candidate. The hard 5 cm vehicle-wall
-    # validation margin is unchanged.
-    quality_prefix_minimum_clearance_gain_m: 0.01
-    # An iteration-limited candidate normally needs residuals within 2x solver
-    # tolerance and a material exact-objective gain. A poor-residual iterate
-    # cannot replace a prior for a small cost/clearance change: on the
-    # 2026-10-25 v300 capture it selected a saturated steering reversal before
-    # losing corridor validity on the next cycle.
-    quality_prefix_iteration_limited_relative_gain: 0.02
-    # After 3 consecutive retained-plan actions, allow an exactly validated
-    # 75 ms candidate prefix to refresh when its exact objective is within 30%
-    # and clearance loss is <=2 cm. Both must still pass the hard corridor;
-    # exact rollout is authoritative, not ADMM residual alone.
-    quality_prefix_stale_prior_refresh_after_actions: 3
-    quality_prefix_stale_prior_max_clearance_loss_m: 0.02
-    quality_prefix_stale_prior_objective_loss_fraction: 0.30
-    rti_cycle_budget_ms: 20.0
-    # Eight persistent workers were exercised by full-speed ten-lap repeats.
-    # One earlier repeat deferred a 20.656 ms cycle; no WCET guarantee claimed.
-    # Zero disables OpenMP parallelism.
+    rti_cycle_budget_ms: 22.0
     jacobian_threads: 8
+    source_exact_nlp_iterations: 3
+    source_exact_nlp_qp_soft_weight: 1000000.0
+    source_exact_nlp_qp_regularization: 1000.0
+    source_exact_nlp_extra_clearance_m: 0.03

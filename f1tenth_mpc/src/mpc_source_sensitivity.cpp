@@ -1,4 +1,5 @@
 #include "mpc_source_sensitivity.hpp"
+#include "mpc_rti_internal.hpp"
 #include "vehicle_model.h"
 #include "unity_source_plant_c.h"
 
@@ -33,6 +34,11 @@ constexpr int D=2*N;
 struct GaussNewtonFeature {
     double ey{},epsi{},u{},v{},r{},steer_queue2{},rack{};
     double slip_excess[4]{};
+    // Only populated when source front lateral slip penalty is enabled.
+    // Carries every exact 26-state source transition sensitivity so its
+    // instantaneous WheelHit contact Jacobian is not approximated as a
+    // bicycle/yaw or reduced-state proxy.
+    double source[UNITY_SOURCE_PLANT_STATE_SIZE]{};
 };
 using GaussNewtonTrace=std::array<std::array<GaussNewtonFeature,D>,N+1>;
 // These are the *local* derivatives of exactly one 25 ms source interval.
@@ -44,11 +50,47 @@ struct StageTransitionJacobian {
     double slip[4][X+2]{};
 };
 using StageJacobianTrace=std::array<StageTransitionJacobian,N>;
-
+// The stage cache is valid ONLY for the exact physical source state and
+// controls that produced it. Reusing by nominal pointer is unsafe because
+// source-SQP overwrites the same nominal allocation after every step.
+struct StageCacheKey {
+    float u{},v{},r{},rack{},steering_target{},throttle{};
+    double memory[MPC_PLANT_INTERNAL_STATE_COUNT]{};
+    int initialized{},suspension_initialized{};
+};
+StageCacheKey stage_key(const MpcModelState_t &state,
+                         const MpcModelControl_t &control) {
+    StageCacheKey key{};
+    key.u=state.u;key.v=state.v;key.r=state.r;
+    key.rack=state.actual_steering_angle;
+    key.steering_target=control.steering_target_rad;
+    key.throttle=control.throttle_command;
+    key.initialized=state.source_plant_initialized;
+    key.suspension_initialized=state.source_suspension_history_initialized;
+    std::copy_n(state.source_plant_internal_state,
+                MPC_PLANT_INTERNAL_STATE_COUNT,key.memory);
+    return key;
+}
+bool same_key(const StageCacheKey &a,const StageCacheKey &b) {
+    if(a.u!=b.u||a.v!=b.v||a.r!=b.r||a.rack!=b.rack||
+       a.steering_target!=b.steering_target||a.throttle!=b.throttle||
+       a.initialized!=b.initialized||
+       a.suspension_initialized!=b.suspension_initialized)return false;
+    for(int i=0;i<MPC_PLANT_INTERNAL_STATE_COUNT;++i)
+        if(a.memory[i]!=b.memory[i])return false;
+    return true;
+}
+struct StageCache {
+    StageJacobianTrace matrices{};
+    std::array<StageCacheKey,N> keys{};
+    float interval_dt{};
+    bool valid{};
+};
+static thread_local auto stage_cache=std::make_unique<StageCache>();
 
 constexpr double kCom=0.15532;
 constexpr double kCommandScale[2]={.15,.25};
-static_assert(X==26 && L==20 && MPC_PLANT_INTERNAL_STATE_COUNT==22);
+static_assert(X==26 && L==28 && MPC_PLANT_INTERNAL_STATE_COUNT==22);
 
 struct StateTangent {
     double source[X]{};
@@ -163,6 +205,148 @@ bool scored_tangent(const MpcRtiNominal_t &nominal,
 }
 } // namespace
 
+bool source_slip_directional_curvature(
+    const MpcRtiNominal_t *nominal,
+    const MpcRtiCycleConfiguration_t *configuration,float dt,
+    const double normalized_control_direction[60],
+    SourceSlipDirectionalCurvature *out,
+    bool reuse_precomputed_stage_jacobians)
+{
+    if(!nominal || !nominal->valid || nominal->horizon!=N ||
+       !configuration || !configuration->objective_schedule ||
+       !configuration->objective_schedule->valid ||
+       !normalized_control_direction || !out ||
+       !std::isfinite(dt) || dt<=0.)return false;
+    const auto begin=Clock::now();
+    *out={};
+    if(reuse_precomputed_stage_jacobians) {
+        if(!stage_cache->valid || stage_cache->interval_dt!=dt)return false;
+        for(int stage=0;stage<N;++stage)
+            if(!same_key(stage_cache->keys[stage],stage_key(
+                nominal->states[stage].plant,nominal->controls[stage])))
+                return false;
+    }
+    // The source model is first-order Markov in ALL 26 physical states.
+    // The incoming second state derivative must be propagated with A_k;
+    // simply summing local f'' at each stage loses most slip curvature.
+    std::array<double,X> first{},second{};
+    for(int stage=0;stage<N;++stage) {
+        const auto &plant=nominal->states[stage].plant;
+        const auto &control=nominal->controls[stage];
+        const double input[2]={
+            normalized_control_direction[2*stage]*kCommandScale[0],
+            normalized_control_direction[2*stage+1]*kCommandScale[1]};
+        if(!std::isfinite(input[0]) || !std::isfinite(input[1]))
+            return false;
+        MpcSourceDirectionalSecondOrder_t local{};
+        if(!vehicle_model_full_source_interval_analytic_directional_second_order(
+            &plant,&control,dt,first.data(),input,&local))return false;
+        // The nominal SQP's full source derivative pass has ALREADY
+        // computed A_k, B_k and slip Jacobians. Reuse them when the exact
+        // source states/controls match, otherwise calculate two lanes
+        // independently for a valid diagnostic oracle.
+        double next_second[X]{},next_first[X]{};
+        double slip_second[4]{},slip_first[4]{};
+        if(reuse_precomputed_stage_jacobians) {
+            const auto &A=stage_cache->matrices[stage];
+            for(int row=0;row<X;++row) {
+                for(int j=0;j<X;++j) {
+                    next_second[row]+=A.source[row][j]*second[j];
+                    next_first[row]+=A.source[row][j]*first[j];
+                }
+                next_first[row]+=A.source[row][X]*input[0]+
+                                 A.source[row][X+1]*input[1];
+            }
+            for(int wheel=0;wheel<4;++wheel) {
+                for(int j=0;j<X;++j) {
+                    slip_second[wheel]+=A.slip[wheel][j]*second[j];
+                    slip_first[wheel]+=A.slip[wheel][j]*first[j];
+                }
+                slip_first[wheel]+=A.slip[wheel][X]*input[0]+
+                                   A.slip[wheel][X+1]*input[1];
+            }
+        } else {
+            double seeds[X][L]{},inputs[2][L]{};
+            for(int i=0;i<X;++i) {
+                seeds[i][0]=second[i];
+                seeds[i][1]=first[i];
+            }
+            inputs[0][1]=input[0];inputs[1][1]=input[1];
+            double next[X][L]{},body[3][L]{},slip[4][L]{};
+            if(!vehicle_model_full_source_interval_sensitivities(
+                &plant,&control,dt,seeds,inputs,next,body,slip))return false;
+            for(int i=0;i<X;++i) {
+                next_second[i]=next[i][0];
+                next_first[i]=next[i][1];
+            }
+            for(int wheel=0;wheel<4;++wheel) {
+                slip_second[wheel]=slip[wheel][0];
+                slip_first[wheel]=slip[wheel][1];
+            }
+        }
+        const auto &reference=configuration->objective_schedule->references[stage+1];
+        const double terminal=(stage+1==N)
+            ?configuration->model.terminal_multiplier:1.;
+        const double weight=terminal*
+            configuration->model.weight_longitudinal_slip*
+            (1.+configuration->model.longitudinal_slip_curvature_gain_m*
+                std::abs(reference.path_curvature));
+        for(int wheel=0;wheel<4;++wheel) {
+            const double residual=nominal->states[stage+1].
+                incoming_wheel_slip_excess_mps[wheel];
+            const double first_slip=local.first_slip_excess_mps[wheel];
+            const double second_slip=local.second_slip_excess_mps[wheel]+
+                slip_second[wheel];
+            out->gauss_newton+=2.*weight*first_slip*first_slip;
+            out->residual_weighted+=2.*weight*residual*second_slip;
+            out->max_first_source_mismatch=std::max(
+                out->max_first_source_mismatch,
+                std::abs(first_slip-slip_first[wheel]));
+        }
+        for(int i=0;i<X;++i) {
+            out->max_first_source_mismatch=std::max(
+                out->max_first_source_mismatch,
+                std::abs(local.first_source[i]-next_first[i]));
+            second[i]=local.second_source[i]+next_second[i];
+            first[i]=local.first_source[i];
+            if(!std::isfinite(first[i])||!std::isfinite(second[i]))
+                return false;
+        }
+        if(configuration->model.weight_source_lateral_slip>0.) {
+            // The exact physical first/second source state tangents have
+            // just been propagated. Evaluate the SAME instantaneous
+            // WheelHit source contact formula used by the original scorer
+            // (front wheels only, signed +/-0.05 rad active reserve).
+            double lateral[4]{},lateral_first[4]{},lateral_second[4]{};
+            if(!vehicle_model_source_lateral_slip_second(
+                &nominal->states[stage+1].plant,
+                first.data(),second.data(),
+                lateral,lateral_first,lateral_second))return false;
+            const double lateral_weight=terminal*
+                configuration->model.weight_source_lateral_slip;
+            for(int front=0;front<2;++front) {
+                if(std::abs(lateral[front])<=
+                   kMpcSourceFrontLateralSlipReserveRad)continue;
+                const double residual=lateral[front]-
+                    std::copysign(kMpcSourceFrontLateralSlipReserveRad,
+                                  lateral[front]);
+                out->front_lateral_gauss_newton+=
+                    2.*lateral_weight*lateral_first[front]*
+                                      lateral_first[front];
+                out->front_lateral_residual_weighted+=
+                    2.*lateral_weight*residual*lateral_second[front];
+            }
+        }
+        ++out->stages;
+    }
+    out->total=out->gauss_newton+out->residual_weighted+
+        out->front_lateral_gauss_newton+
+        out->front_lateral_residual_weighted;
+    out->elapsed_us=microseconds_since(begin);
+    return std::isfinite(out->total)&&
+           std::isfinite(out->max_first_source_mismatch);
+}
+
 bool full_source_derivatives(
     const MpcRtiNominal_t *baseline,
     const MpcTrajectorySample_t *trajectory,std::size_t trajectory_count,
@@ -172,7 +356,8 @@ bool full_source_derivatives(
     bool build_gauss_newton_hessian,
     bool use_stage_local_jacobians,
     bool compress_positive_drive_passive_timers,
-    bool corridor_only_phase_one)
+    bool corridor_only_phase_one,
+    bool exact_stage_corridor_fd)
 {
     if(!baseline||!baseline->valid||baseline->horizon!=N||!trajectory||
        !cfg||!out||!std::isfinite(baseline_cost)||
@@ -197,16 +382,46 @@ bool full_source_derivatives(
     auto *const gn_trace=gn_storage.get();
     if(build_gauss_newton_hessian) *gn_trace={};
 
+    // Use the exact ORIGINAL piecewise-linear reference interpolation,
+    // physical bumper geometry and 10cm preview-min active segments to
+    // construct the smooth-branch footprint Jacobian. This is algebraically
+    // the local derivative of the same scorer used by the original source
+    // model: no finite-difference blending across unrelated reference
+    // segments and no invented spline between waypoint samples.
+    //
+    // Where the reference or heading footprint has a genuine nondifferentiable
+    // switch, the ONE Jacobian demanded by this QP cannot represent both
+    // branches; do not invent a smooth derivative there. Preserve the
+    // independent two-sided ORIGINAL source scorer in those stages only.
+    std::array<MpcRtiCorridorDifferential_t,N> corridor_differential{};
+    std::array<unsigned char,N> corridor_differential_valid{};
+    if(!cfg->model.world_sweep_check) {
+        for(int stage=1;stage<=N;++stage) {
+            MpcRtiCorridorDifferential_t d{};
+            const bool ok=mpc_rti_corridor_differential_at_progress(
+                &baseline->states[stage].plant,trajectory,trajectory_count,
+                lap_length,baseline->progress[stage],&cfg->model,stage,&d);
+            if(ok && !d.progress_reference_kink) {
+                corridor_differential[stage-1]=d;
+                corridor_differential_valid[stage-1]=1;
+                ++out->exact_reference_corridor_stages;
+            } else {
+                ++out->nonsmooth_reference_corridor_stages;
+            }
+        }
+    }
+
     // The primal source transition at each stage is already in baseline.
     // Differentiate the ORIGINAL source model at those exact states into
     // local [A(26x26), B(26x2), motion, slip] matrices. All 30 stages
     // are independent and can be distributed across available CPU cores.
     // Causal multiplication below later assembles all 60 command Jacobians
     // with no 23-state surrogate or frozen physical dynamics.
-    static thread_local auto local_storage=
-        std::make_unique<StageJacobianTrace>();
-    auto *const locals=local_storage.get();
+    auto *const locals=&stage_cache->matrices;
     if(use_stage_local_jacobians) {
+        // Invalidate before rebuilding so an interrupted cycle can never
+        // expose matrices belonging to a partially updated epoch.
+        stage_cache->valid=false;
         std::array<double,N> worker_plant_us{};
         std::array<int,N> worker_plant_calls{};
         std::array<unsigned char,N> worker_ok{};
@@ -242,7 +457,7 @@ bool full_source_derivatives(
                 compress_positive_drive_passive_timers &&
                 control.throttle_command>0.f &&
                 control.throttle_command<=MPC_THROTTLE_MAX;
-            const int chunks=compressed?1:2;
+            const int chunks=compressed?1:(X+2+L-1)/L;
             if(compressed) {
                 auto &local=(*locals)[stage];
                 // loc is persistent thread-local memory: prevent stale
@@ -300,6 +515,10 @@ bool full_source_derivatives(
             out->dual_plant_intervals+=worker_plant_calls[stage];
             if(!worker_ok[stage])return false;
         }
+        for(int stage=0;stage<N;++stage)
+            stage_cache->keys[stage]=stage_key(
+                baseline->states[stage].plant,baseline->controls[stage]);
+        stage_cache->interval_dt=dt;
         if(absolute_deadline_us>0. &&
            monotonic_us()>=absolute_deadline_us) {
             out->deadline_exhausted=true;
@@ -436,6 +655,8 @@ bool full_source_derivatives(
                     f.r=following.source[UNITY_SOURCE_YAW_RATE];
                     f.steer_queue2=following.steer_queue2;
                     f.rack=following.source[UNITY_SOURCE_PHYSICAL_STEERING];
+                    if(cfg->model.weight_source_lateral_slip>0.)
+                        std::copy_n(following.source,X,f.source);
                     for(int w=0;w<4;++w)
                         f.slip_excess[w]=following.slip_excess[w];
                 }
@@ -451,18 +672,26 @@ bool full_source_derivatives(
             }
             double cost_plus=NAN,cost_minus=NAN;
             double wall_plus[2*N]{},wall_minus[2*N]{};
-            const auto score_start=Clock::now();
-            if(!scored_tangent(*baseline,*trace,lane,+1,j,normalized_step,
-                    trajectory,trajectory_count,lap_length,*cfg,
-                    positive.get(),&cost_plus,wall_plus,
-                    corridor_only_phase_one && !cfg->model.world_sweep_check) ||
-               !scored_tangent(*baseline,*trace,lane,-1,j,normalized_step,
-                    trajectory,trajectory_count,lap_length,*cfg,
-                    negative.get(),&cost_minus,wall_minus,
-                    corridor_only_phase_one && !cfg->model.world_sweep_check))
-                return false;
-            measurement.tangent_scoring_us+=microseconds_since(score_start);
-            measurement.score_evaluations+=2;
+            const bool use_exact_stage=exact_stage_corridor_fd &&
+                corridor_only_phase_one && !cfg->model.world_sweep_check;
+            if(!use_exact_stage) {
+                const auto score_start=Clock::now();
+                if(!scored_tangent(*baseline,*trace,lane,+1,j,normalized_step,
+                        trajectory,trajectory_count,lap_length,*cfg,
+                        positive.get(),&cost_plus,wall_plus,
+                        corridor_only_phase_one && !cfg->model.world_sweep_check) ||
+                   !scored_tangent(*baseline,*trace,lane,-1,j,normalized_step,
+                        trajectory,trajectory_count,lap_length,*cfg,
+                        negative.get(),&cost_minus,wall_minus,
+                        corridor_only_phase_one && !cfg->model.world_sweep_check))
+                    return false;
+                measurement.tangent_scoring_us+=
+                    microseconds_since(score_start);
+                measurement.score_evaluations+=2;
+            } else {
+                // The racing objective is absent in Phase I.
+                cost_plus=cost_minus=baseline_cost;
+            }
             if(!corridor_only_phase_one || cfg->model.world_sweep_check) {
                 out->gradient[j]=(cost_plus-cost_minus)/(2.*normalized_step);
                 out->positive_diagonal_curvature[j]=std::clamp(
@@ -478,9 +707,83 @@ bool full_source_derivatives(
             if(!std::isfinite(out->gradient[j])||
                !std::isfinite(out->positive_diagonal_curvature[j]))
                 return false;
-            for(int row=0;row<2*N;++row)
-                out->footprint[row][j]=(wall_plus[row]-wall_minus[row])/
-                    (2.*normalized_step);
+            if(use_exact_stage) {
+                // This is algebraically the SAME source finite-difference
+                // derivative as scored_tangent(), but evaluates ONLY the
+                // three physical coordinates that can enter the footprint
+                // at each affected prediction stage (e_y,e_psi,progress).
+                // Evaluate the ORIGINAL loaded width interpolation and
+                // physical footprint code for BOTH signed perturbations,
+                // including nonsmooth map/bumper transitions and float
+                // arithmetic. Other 26-state physical channels retain
+                // their source-exact tangent propagation and actuator
+                // rate sensitivities.
+                for(int stage=j/2+1;stage<=N;++stage) {
+                    const auto &v=(*trace)[stage][lane];
+                    if(corridor_differential_valid[stage-1]) {
+                        const auto &d=corridor_differential[stage-1];
+                        out->footprint[2*(stage-1)][j]=
+                            d.lower_d_ey*v.ey+
+                            d.lower_d_epsi*v.epsi+
+                            d.lower_d_progress_forward*v.progress;
+                        out->footprint[2*(stage-1)+1][j]=
+                            d.upper_d_ey*v.ey+
+                            d.upper_d_epsi*v.epsi+
+                            d.upper_d_progress_forward*v.progress;
+                        continue;
+                    }
+                    double side[2][2]{};
+                    for(int sign=0;sign<2;++sign) {
+                        const double perturb=(sign==0?1.:-1.)*
+                            normalized_step;
+                        MpcModelState_t state=baseline->states[stage].plant;
+                        state.e_y+=static_cast<float>(perturb*v.ey);
+                        state.e_psi+=static_cast<float>(perturb*v.epsi);
+                        const double progress=baseline->progress[stage]+
+                            perturb*v.progress;
+                        MpcRtiReference_t reference{};
+                        if(!mpc_rti_reference_at_progress(
+                              trajectory,trajectory_count,lap_length,
+                              progress,&cfg->model,&reference))
+                            return false;
+                        float lower=NAN,upper=NAN;
+                        if(!mpc_rti_compute_corridor_slack(
+                            &state,reference.left_bound,reference.right_bound,
+                            &cfg->model,stage,&lower,&upper))
+                            return false;
+                        side[sign][0]=lower;
+                        side[sign][1]=upper;
+                    }
+                    out->footprint[2*(stage-1)][j]=
+                        (side[0][0]-side[1][0])/(2.*normalized_step);
+                    out->footprint[2*(stage-1)+1][j]=
+                        (side[0][1]-side[1][1])/(2.*normalized_step);
+                }
+                // Causal zero prefix is part of the original source
+                // physical dynamics; a later command cannot affect an
+                // earlier state or corridor width.
+                for(int stage=1;stage<=j/2;++stage) {
+                    out->footprint[2*(stage-1)][j]=0.;
+                    out->footprint[2*(stage-1)+1][j]=0.;
+                }
+            } else {
+                for(int row=0;row<2*N;++row)
+                    out->footprint[row][j]=(wall_plus[row]-wall_minus[row])/
+                        (2.*normalized_step);
+                for(int stage=j/2+1;stage<=N;++stage) {
+                    if(!corridor_differential_valid[stage-1])continue;
+                    const auto &d=corridor_differential[stage-1];
+                    const auto &v=(*trace)[stage][lane];
+                    out->footprint[2*(stage-1)][j]=
+                        d.lower_d_ey*v.ey+
+                        d.lower_d_epsi*v.epsi+
+                        d.lower_d_progress_forward*v.progress;
+                    out->footprint[2*(stage-1)+1][j]=
+                        d.upper_d_ey*v.ey+
+                        d.upper_d_epsi*v.epsi+
+                        d.upper_d_progress_forward*v.progress;
+                }
+            }
             for(int stage=0;stage<N;++stage) {
                 // No rate residual at stage < command j/2 can depend on
                 // command j. The trace retains unrelated old-batch entries
@@ -544,7 +847,10 @@ bool full_source_derivatives(
         out->deadline_exhausted|=measurement.deadline_exhausted;
         all_valid &= succeeded[batch]!=0;
     }
-    if(!all_valid || !build_gauss_newton_hessian) return all_valid;
+    if(!all_valid || !build_gauss_newton_hessian) {
+        if(all_valid && use_stage_local_jacobians)stage_cache->valid=true;
+        return all_valid;
+    }
     // Build a PSD J'WJ from the SAME 26-physical-state tangent trace used
     // for the objective gradient. This retains every steering/throttle and
     // cross-stage coupling rather than projecting only diagonal curvature.
@@ -585,6 +891,51 @@ bool full_source_derivatives(
                  [](const auto &t){return t.steer_queue2;});
         tracking(model.weight_steering_command,
                  [](const auto &t){return t.rack;});
+        if(stage>0 && model.weight_source_lateral_slip>0.) {
+            // The ORIGINAL source scorer penalizes only FRONT contact
+            // WheelHit lateral-slip excess beyond its 0.05 rad reserve.
+            // Use its SAME source-contact AD Jacobian and all 26 source
+            // state tangents. This term was missing from the condensed
+            // source-SQP GN Hessian even though it exists in the objective.
+            double lateral_slip[4]{};
+            double J[4][MPC_OPT_PHYSICAL_NX]{};
+            if(!vehicle_model_source_lateral_slip(&state,lateral_slip,J))
+                return false;
+            constexpr int source_column[MPC_OPT_PHYSICAL_NX]={
+                -1,-1,UNITY_SOURCE_U,UNITY_SOURCE_V,
+                UNITY_SOURCE_YAW_RATE,UNITY_SOURCE_PHYSICAL_STEERING,
+                UNITY_SOURCE_WHEEL_OMEGA_FL,UNITY_SOURCE_WHEEL_OMEGA_FR,
+                UNITY_SOURCE_WHEEL_OMEGA_RL,UNITY_SOURCE_WHEEL_OMEGA_RR,
+                UNITY_SOURCE_BODY_HEIGHT,UNITY_SOURCE_BODY_HEIGHT_RATE,
+                UNITY_SOURCE_ROLL,UNITY_SOURCE_ROLL_RATE,
+                UNITY_SOURCE_PITCH,UNITY_SOURCE_PITCH_RATE,
+                UNITY_SOURCE_SUSPENSION_JOUNCE_FL,
+                UNITY_SOURCE_SUSPENSION_JOUNCE_FR,
+                UNITY_SOURCE_SUSPENSION_JOUNCE_RL,
+                UNITY_SOURCE_SUSPENSION_JOUNCE_RR
+            };
+            static_assert(sizeof(source_column)/sizeof(source_column[0])==
+                          MPC_OPT_PHYSICAL_NX);
+            for(int front=0;front<2;++front) {
+                if(std::abs(lateral_slip[front])<=
+                   kMpcSourceFrontLateralSlipReserveRad)continue;
+                jac.fill(0.);
+                const double sign=lateral_slip[front]>0.?1.:-1.;
+                for(int col=0;col<decision_count;++col) {
+                    const auto &physical=(*gn_trace)[stage][col].source;
+                    double diff=0.;
+                    for(int coordinate=2;coordinate<MPC_OPT_PHYSICAL_NX;
+                        ++coordinate) {
+                        double tangent=physical[source_column[coordinate]];
+                        if(coordinate==MPC_OPT_IDX_V)
+                            tangent-=kCom*physical[UNITY_SOURCE_YAW_RATE];
+                        diff+=J[front][coordinate]*tangent;
+                    }
+                    jac[col]=sign*diff;
+                }
+                append(term*model.weight_source_lateral_slip,jac);
+            }
+        }
         if(stage>0) {
             const double slip_weight=model.weight_longitudinal_slip*
                 (1.+model.longitudinal_slip_curvature_gain_m*
@@ -651,6 +1002,7 @@ bool full_source_derivatives(
         // hard restriction on physical steering/throttle changes.
         out->gn_hessian[i][i]+=1.e-4;
     }
+    if(use_stage_local_jacobians)stage_cache->valid=true;
     return true;
 }
 } // namespace sdu_apex::source_sqp

@@ -107,11 +107,29 @@ def _groups(rows: list[dict[str, Any]],
             "initial_source_state_forward_velocity_error_mps": _metric(
                 [row.get("initial_source_u_error_mps", math.nan)
                  for row in selected]),
+            "source_physical_transition_forward_velocity_error_mps": _metric(
+                [row.get("one_step_transition_error_mps", math.nan)
+                 for row in selected]),
             "slot1_forward_velocity_error_mps": _metric(
                 [row.get("slot1_u_error_mps", math.nan)
                  for row in selected]),
             "next_feedback_forward_velocity_error_mps": _metric(
                 [row.get("next_feedback_u_error_mps", math.nan)
+                 for row in selected]),
+            "bridge_sent_throttle_forward_velocity_error_mps": _metric(
+                [row.get("bridge_sent_u_error_mps", math.nan)
+                 for row in selected]),
+            "bridge_sent_throttle_physical_transition_error_mps": _metric(
+                [row.get("bridge_sent_one_step_transition_error_mps",
+                         math.nan) for row in selected]),
+            "bridge_sent_throttle_yaw_rate_error_radps": _metric(
+                [row.get("bridge_sent_yaw_rate_error_radps", math.nan)
+                 for row in selected]),
+            "bridge_sent_both_source_transition_error_mps": _metric(
+                [row.get("bridge_sent_both_forward_transition_error_mps",
+                         math.nan) for row in selected]),
+            "bridge_sent_both_source_yaw_rate_error_radps": _metric(
+                [row.get("bridge_sent_both_yaw_rate_error_radps", math.nan)
                  for row in selected]),
             "same_epoch_GT_motion_state_oracle_error_mps": _metric(
                 [row.get("oracle_motion_u_error_mps", math.nan)
@@ -151,6 +169,8 @@ def _groups(rows: list[dict[str, Any]],
                 selected, "slot1_u_error_mps"),
             "paired_next_epoch_feedback_oracle": _paired_alternative(
                 selected, "next_feedback_u_error_mps"),
+            "paired_bridge_sent_throttle": _paired_alternative(
+                selected, "bridge_sent_u_error_mps"),
             "paired_same_epoch_GT_motion_state_oracle": _paired_alternative(
                 selected, "oracle_motion_u_error_mps"),
             "paired_IMU_trapezoid_from_GT_start_oracle": _paired_alternative(
@@ -379,20 +399,55 @@ def analyze(bag: Path, library_path: Path) -> tuple[dict[str, Any], list[dict[st
             failed_steps += 1
             continue
 
-        def alternate_throttle_prediction(throttle: float) -> float:
+        def alternate_command_source_state(
+                throttle: float, steering_target_rad: float
+                ) -> tuple[float, float, float]:
             alternate = evaluator.UnitySourcePlantInputC()
             ctypes.memmove(ctypes.byref(alternate), ctypes.byref(value),
                            ctypes.sizeof(value))
             alternate.throttle_normalized = throttle
+            alternate.steering_target_rad = steering_target_rad
             alternate_output = evaluator.UnitySourcePlantOutputC()
             if not step(ctypes.byref(alternate),
                         evaluator.ENCODER_SAMPLE_PERIOD_S,
                         ctypes.byref(alternate_output)):
-                return math.nan
-            return float(alternate_output.state[0])
+                return math.nan, math.nan, math.nan
+            return (float(alternate_output.state[0]),
+                    float(alternate_output.state[1]),
+                    float(alternate_output.state[2]))
+
+        def alternate_throttle_source_state(
+                throttle: float) -> tuple[float, float, float]:
+            return alternate_command_source_state(
+                throttle, float(value.steering_target_rad))
+
+        def alternate_throttle_prediction(throttle: float) -> float:
+            return alternate_throttle_source_state(throttle)[0]
 
         predicted_slot1_u = alternate_throttle_prediction(
             start["delayed_throttle_1"])
+        # The command serialized by the bridge at this ROS request
+        # need not equal the controller's newest proposed queue slot.
+        # Evaluate it as a separate PHYSICAL source input hypothesis.
+        # This remains an offline diagnostic: a bridge timestamp does
+        # NOT identify the exact PhysX FixedUpdate application epoch.
+        bridge_start = bridge_by_epoch.get(start_ns, {})
+        bridge_sent_throttle = _safe_float(
+            bridge_start.get("sent_throttle_norm", math.nan))
+        bridge_u, bridge_v, bridge_r = (
+            alternate_throttle_source_state(bridge_sent_throttle)
+            if math.isfinite(bridge_sent_throttle) else
+            (math.nan, math.nan, math.nan))
+        predicted_bridge_sent_u = bridge_u
+        bridge_sent_steering_norm = _safe_float(
+            bridge_start.get("sent_steering_norm", math.nan))
+        bridge_both_u, bridge_both_v, bridge_both_r = (
+            alternate_command_source_state(
+                bridge_sent_throttle,
+                bridge_sent_steering_norm * evaluator.MAX_STEERING_RAD)
+            if (math.isfinite(bridge_sent_throttle) and
+                math.isfinite(bridge_sent_steering_norm))
+            else (math.nan, math.nan, math.nan))
         feedback_next = _safe_float(
             plant.get(next_ns, {}).get("throttle_feedback", math.nan))
         predicted_next_feedback_u = (
@@ -467,6 +522,25 @@ def analyze(bag: Path, library_path: Path) -> tuple[dict[str, Any], list[dict[st
                 (start["u"] - actual_start["u"])),
             "predicted_slot1_u_mps": predicted_slot1_u,
             "slot1_u_error_mps": predicted_slot1_u - actual_next["u"],
+            "predicted_bridge_sent_u_mps": predicted_bridge_sent_u,
+            "bridge_sent_u_error_mps":
+                predicted_bridge_sent_u - actual_next["u"],
+            "bridge_sent_one_step_transition_error_mps": (
+                predicted_bridge_sent_u - actual_next["u"] -
+                (start["u"] - actual_start["u"])),
+            "bridge_sent_v_com_error_mps":
+                bridge_v - actual_next["v"],
+            "bridge_sent_yaw_rate_error_radps":
+                bridge_r - actual_next["r"],
+            "bridge_sent_both_u_error_mps":
+                bridge_both_u - actual_next["u"],
+            "bridge_sent_both_forward_transition_error_mps": (
+                bridge_both_u - actual_next["u"] -
+                (start["u"] - actual_start["u"])),
+            "bridge_sent_both_v_com_error_mps":
+                bridge_both_v - actual_next["v"],
+            "bridge_sent_both_yaw_rate_error_radps":
+                bridge_both_r - actual_next["r"],
             "predicted_next_feedback_u_mps": predicted_next_feedback_u,
             "next_feedback_u_error_mps": (
                 predicted_next_feedback_u - actual_next["u"]),
@@ -542,8 +616,9 @@ def analyze(bag: Path, library_path: Path) -> tuple[dict[str, Any], list[dict[st
             "queue_throttle_delta": (
                 value.throttle_normalized - start["delayed_throttle_1"]),
             "throttle_feedback_next_epoch": feedback_next,
-            "bridge_sent_throttle_start_epoch": _safe_float(
-                bridge_start.get("sent_throttle_norm")),
+            "bridge_sent_throttle_start_epoch": bridge_sent_throttle,
+            "bridge_sent_steering_normalized_start_epoch":
+                bridge_sent_steering_norm,
             "bridge_feedback_throttle_next_epoch": _safe_float(
                 bridge_next.get("simulator_feedback_throttle_norm")),
             "bridge_physics_step_start": bridge_start.get(
@@ -638,6 +713,7 @@ def analyze(bag: Path, library_path: Path) -> tuple[dict[str, Any], list[dict[st
             "newest (slot-2) queued steering/throttle for one nominal 25ms "
             "source-model step; truth is only the next-epoch score"),
         "command_epoch_limits": [
+            "Bridge-sent throttle is evaluated as a SEPARATE physical command hypothesis; it does not certify which command PhysX applied at each internal FixedUpdate.",
             "Queue slot is a host-side ROS association, not a Unity applied-command sequence.",
             "Bridge feedback at the next request can confirm feedback/request lag, not the exact FixedUpdate torque-application epoch.",
             "Wheel/body mismatch is an encoder/estimated-wheel proxy, not independent per-wheel Unity truth.",
@@ -650,6 +726,8 @@ def analyze(bag: Path, library_path: Path) -> tuple[dict[str, Any], list[dict[st
                 rows, "slot1_u_error_mps"),
             "next_epoch_throttle_feedback_oracle": _paired_alternative(
                 rows, "next_feedback_u_error_mps"),
+            "bridge_sent_request_throttle_hypothesis": _paired_alternative(
+                rows, "bridge_sent_u_error_mps"),
             "same_epoch_GT_motion_state_oracle": _paired_alternative(
                 rows, "oracle_motion_u_error_mps"),
             "IMU_trapezoid_from_GT_start_oracle": _paired_alternative(

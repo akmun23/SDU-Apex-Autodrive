@@ -110,7 +110,14 @@ int main(int argc,char**argv) {
     const int iters=argc>=4?std::stoi(argv[3]):2;
     bool terminal3=false,opt20=false,suffix_fd=false,adaptive=false;
     bool forward_source=false,source_gn=false,stage_jacobians=false;
+    bool original_source_nlp=false;
+    bool source_constrained_qp=false;
+    bool source_compact_qp=false;
+    double original_source_qp_regularization=1.;
+    int original_source_nlp_trials=8;
+    double original_source_nlp_clearance_m=.03;
     double hard_deadline_budget_us=0.;
+    std::string original_source_seed_file;
     for(int i=6;i<argc;++i) {
         const std::string flag(argv[i]);
         if(flag=="--terminal3")terminal3=true;
@@ -120,6 +127,38 @@ int main(int argc,char**argv) {
         else if(flag=="--full-source-forward")forward_source=true;
         else if(flag=="--gn-hessian")source_gn=true;
         else if(flag=="--stage-jacobians")stage_jacobians=true;
+        else if(flag=="--original-source-nlp")original_source_nlp=true;
+        else if(flag=="--source-constrained-qp") {
+            original_source_nlp=true;
+            source_constrained_qp=true;
+        }
+        else if(flag=="--source-compact-qp") {
+            original_source_nlp=true;
+            source_constrained_qp=true;
+            source_compact_qp=true;
+        }
+        else if(flag.rfind("--source-nlp-qp-regularization=",0)==0) {
+            try { original_source_qp_regularization=
+                std::stod(flag.substr(31)); }
+            catch(...) {return 2;}
+            if(!(original_source_qp_regularization>0.) ||
+               original_source_qp_regularization>100000.)return 2;
+        }
+        else if(flag.rfind("--source-nlp-trials=",0)==0) {
+            try {original_source_nlp_trials=std::stoi(flag.substr(20));}
+            catch(...) {return 2;}
+            if(original_source_nlp_trials<1 ||
+               original_source_nlp_trials>128)return 2;
+        }
+        else if(flag.rfind("--source-nlp-clearance-m=",0)==0) {
+            try {original_source_nlp_clearance_m=std::stod(flag.substr(25));}
+            catch(...) {return 2;}
+            if(!std::isfinite(original_source_nlp_clearance_m) ||
+                original_source_nlp_clearance_m<0. ||
+                original_source_nlp_clearance_m>.1)return 2;
+        }
+        else if(flag.rfind("--source-seed=",0)==0)
+            original_source_seed_file=flag.substr(14);
         else if(flag.rfind("--deadline-us=",0)==0) {
             try {hard_deadline_budget_us=std::stod(flag.substr(14));}
             catch(...) {return 2;}
@@ -138,7 +177,19 @@ int main(int argc,char**argv) {
     cfg.solver.max_solve_time_us=0.;
     cfg.solver.reuse_same_epoch=1;
     cfg.max_sqp_iterations=2;
-    cfg.native_source_reduced_sqp=1;
+    cfg.native_source_reduced_sqp=original_source_nlp?0:1;
+    cfg.source_exact_nlp_live=original_source_nlp?1:0;
+    cfg.source_exact_nlp_constrained_qp=source_constrained_qp?1:0;
+    cfg.source_exact_nlp_compact_qp=source_compact_qp?1:0;
+    cfg.source_exact_nlp_parallel_trials=
+        std::getenv("MPC_SOURCE_NLP_PARALLEL_TRIALS")!=nullptr?1:0;
+    cfg.source_exact_nlp_qp_regularization=
+        static_cast<float>(original_source_qp_regularization);
+    cfg.source_exact_nlp_iterations=std::min(iters,3);
+    cfg.source_exact_nlp_max_trials_per_iteration=
+        original_source_nlp_trials;
+    cfg.source_exact_nlp_extra_clearance_m=
+        float(original_source_nlp_clearance_m);
     cfg.native_source_reduced_sqp_iterations=iters;
     cfg.native_source_sqp_terminal_lookahead_stages=
         terminal3?3:0;
@@ -184,6 +235,14 @@ int main(int argc,char**argv) {
         memory->warm_start_control_count=PREDICTION_HORIZON;
         std::copy_n(ctx->r1_nominal,PREDICTION_HORIZON,
                     memory->warm_start_controls);
+        if(!original_source_seed_file.empty()) {
+            std::ifstream seed_file(original_source_seed_file);
+            if(!seed_file)return 10;
+            for(auto &u:memory->warm_start_controls)
+                if(!(seed_file>>u.steering_target_rad>>u.throttle_command) ||
+                   !std::isfinite(u.steering_target_rad) ||
+                   !std::isfinite(u.throttle_command))return 10;
+        }
     }
     if(hard_deadline_budget_us>0.)
         cfg.absolute_deadline_monotonic_us=
@@ -235,9 +294,11 @@ int main(int argc,char**argv) {
     }
     const bool exportable=verified&&first_control_matches&&memory_matches&&epoch_matches;
     if(exportable) {
-        if(argc>=6) {
-            fs::create_directories(fs::path(argv[5]).parent_path());
-            if(!write_persistent_memory(argv[5],memory.get()))
+        if(argc>=6 && std::string(argv[5])!="-") {
+            const fs::path next_memory_path(argv[5]);
+            if(!next_memory_path.parent_path().empty())
+                fs::create_directories(next_memory_path.parent_path());
+            if(!write_persistent_memory(next_memory_path,memory.get()))
                 return 9;
         }
         fs::create_directories(output.parent_path());
@@ -256,6 +317,15 @@ int main(int argc,char**argv) {
        <<"{\"controller_entry\":true,\"accepted\":"<<(exportable?"true":"false")
        <<",\"deadline_requested_us\":"<<hard_deadline_budget_us
        <<",\"status\":"<<int(status)
+       <<",\"source_exact_nlp_active\":"<<(result->source_exact_nlp_active?"true":"false")
+       <<",\"source_exact_nlp_accepted_iterations\":"<<result->source_exact_nlp_accepted_iterations
+       <<",\"source_exact_nlp_exact_trial_evaluations\":"<<result->source_exact_nlp_source_trial_evaluations
+       <<",\"source_exact_nlp_deadline_exhausted\":"<<(result->source_exact_nlp_deadline_exhausted?"true":"false")
+       <<",\"source_exact_nlp_final_source_feasible\":"<<(result->source_exact_nlp_final_source_feasible?"true":"false")
+       <<",\"source_exact_nlp_original_cost_before\":"<<result->source_exact_nlp_initial_source_cost
+       <<",\"source_exact_nlp_original_cost_after\":"<<result->source_exact_nlp_final_source_cost
+       <<",\"source_exact_nlp_original_minimum_margin_m\":"<<result->source_exact_nlp_final_original_margin_m
+       <<",\"source_exact_nlp_original_constraint_violation\":"<<result->source_exact_nlp_final_original_violation
        <<",\"input_failure_reason\":"<<result->input_failure_reason
        <<",\"nominal_failure_stage\":"<<result->nominal_build_failure_stage
        <<",\"nominal_build_us\":"<<result->nominal_build_us

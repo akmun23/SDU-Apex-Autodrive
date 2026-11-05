@@ -20,6 +20,15 @@ if [[ "${SDU_APEX_BUILD_MOUNTED_SOURCE:-0}" == "1" ]]; then
       exit 2
       ;;
   esac
+  source_mpc_lto=false
+  case "${SDU_APEX_MPC_LTO:-false}" in
+    true)
+      echo "MPC link-time source optimization enabled (same source model)"
+      source_mpc_lto=true
+      ;;
+    false) ;;
+    *) echo "SDU_APEX_MPC_LTO must be true or false" >&2; exit 2 ;;
+  esac
   parallel_source_sensitivities=false
   case "${SDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES:-false}" in
     true)
@@ -54,6 +63,7 @@ if [[ "${SDU_APEX_BUILD_MOUNTED_SOURCE:-0}" == "1" ]]; then
     --merge-install --symlink-install \
     --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
       "-DSDU_APEX_MPC_NATIVE_TUNING=${native_tuning}" \
+      "-DSDU_APEX_MPC_LTO=${source_mpc_lto}" \
       "-DSDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES=${parallel_source_sensitivities}"
   source /workspace/install/setup.bash
 else

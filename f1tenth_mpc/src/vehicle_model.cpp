@@ -214,6 +214,39 @@ static void write_source_plant_state(
            4 * sizeof(source_state[0]));
 }
 
+int vehicle_model_pack_source_state(
+    const MpcModelState_t *state,
+    double source[UNITY_SOURCE_PLANT_STATE_SIZE])
+{
+    if(!state||!source||!state->source_plant_initialized)
+        return 0;
+    write_source_plant_state(state,source);
+    for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i)
+        if(!std::isfinite(source[i]))return 0;
+    return 1;
+}
+
+int vehicle_model_inject_source_state(
+    MpcModelState_t *state,
+    const double source[UNITY_SOURCE_PLANT_STATE_SIZE])
+{
+    if(!state||!source||!state->source_plant_initialized)
+        return 0;
+    for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i)
+        if(!std::isfinite(source[i]))return 0;
+    state->u=static_cast<float>(source[UNITY_SOURCE_U]);
+    state->r=static_cast<float>(source[UNITY_SOURCE_YAW_RATE]);
+    state->v=static_cast<float>(
+        source[UNITY_SOURCE_V]-
+        kComForwardFromRearAxleM*source[UNITY_SOURCE_YAW_RATE]);
+    state->actual_steering_angle=static_cast<float>(
+        source[UNITY_SOURCE_PHYSICAL_STEERING]);
+    source_state_to_internal(state,source);
+    return std::isfinite(state->u) && std::isfinite(state->v) &&
+           std::isfinite(state->r) &&
+           std::isfinite(state->actual_steering_angle);
+}
+
 int vehicle_model_full_source_interval_analytic_directional_second_order(
     const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
     const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
@@ -364,16 +397,18 @@ int vehicle_model_full_source_interval_directional_second_order(
     return 1;
 }
 
-int vehicle_model_full_source_interval_sensitivities(
+int vehicle_model_full_source_interval_and_substep_sensitivities(
     const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
-    const double seed_state[26][20],
-    const double seed_control[2][20],
-    double next_state[26][20],
-    double body_motion[3][20],
-    double slip_excess[4][20])
+    const double seed_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    const double seed_control[2][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double next_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double body_motion[3][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double slip_excess[4][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    UnitySourceSlipSubstepSensitivityC *samples,
+    int capacity,int *count)
 {
     static_assert(UNITY_SOURCE_PLANT_STATE_SIZE==26);
-    static_assert(UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH==20);
+    static_assert(UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH==28);
     if(!state||!control||!seed_state||!seed_control||!next_state||
        !body_motion||!slip_excess||!state->source_plant_initialized||
        !std::isfinite(state->u)||!std::isfinite(state->v)||
@@ -395,15 +430,22 @@ int vehicle_model_full_source_interval_sensitivities(
     // Every state and command seed lane is populated before the C call.
     UnitySourcePlantSensitivitySeedsC seeds;
     for(int k=0;k<26;++k)
-        for(int lane=0;lane<20;++lane)
+        for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane)
             seeds.state[k][lane]=seed_state[k][lane];
+    // At a legal actuator bound the QP can only move INWARD. The original
+    // source steering clamp uses strict (<,>) branch tests, so its dual
+    // derivative at equality is the physically correct inward one-sided
+    // sensitivity. Zeroing that column at +/-max steering or full throttle
+    // incorrectly tells the QP that backing away from saturation has no
+    // influence on the car. At zero throttle, however, the source switches
+    // to full braking and has no classical derivative; keep that distinct.
     const bool steer_interior=
-        control->steering_target_rad> -active_parameters.max_steering_angle &&
-        control->steering_target_rad< active_parameters.max_steering_angle;
+        control->steering_target_rad>= -active_parameters.max_steering_angle &&
+        control->steering_target_rad<= active_parameters.max_steering_angle;
     const bool throttle_interior=
         control->throttle_command>MPC_THROTTLE_MIN &&
-        control->throttle_command<MPC_THROTTLE_MAX;
-    for(int lane=0;lane<20;++lane) {
+        control->throttle_command<=MPC_THROTTLE_MAX;
+    for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane) {
         seeds.steering_target[lane]=steer_interior?
             seed_control[0][lane]:0.;
         seeds.throttle[lane]=throttle_interior?
@@ -412,15 +454,24 @@ int vehicle_model_full_source_interval_sensitivities(
     // The C sensitivity API fills all consumed result coordinates on
     // success; avoid zeroing 26x20 tangents before every model interval.
     UnitySourcePlantSensitivityC result;
-    if(!unity_source_plant_step_sensitivity_c(&input,dt,&seeds,&result))
-        return 0;
+    if(samples) {
+        if(!count || capacity<=0 ||
+           !unity_source_plant_full_and_substep_sensitivity_c(
+                &input,dt,&seeds,&result,samples,capacity,count))
+            return 0;
+    } else {
+        if(!unity_source_plant_step_sensitivity_c(
+                &input,dt,&seeds,&result))
+            return 0;
+        if(count)*count=0;
+    }
     for(int k=0;k<26;++k)
-        for(int lane=0;lane<20;++lane) {
+        for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane) {
             const double value=result.state[k][lane];
             if(!std::isfinite(value))return 0;
             next_state[k][lane]=value;
         }
-    for(int lane=0;lane<20;++lane) {
+    for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane) {
         body_motion[0][lane]=result.body_forward_displacement[lane];
         body_motion[1][lane]=result.body_lateral_displacement[lane];
         body_motion[2][lane]=result.yaw_delta[lane];
@@ -433,6 +484,101 @@ int vehicle_model_full_source_interval_sensitivities(
         }
     }
     return 1;
+}
+
+int vehicle_model_full_source_interval_sensitivities(
+    const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
+    const double seed_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    const double seed_control[2][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double next_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double body_motion[3][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double slip_excess[4][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH])
+{
+    return vehicle_model_full_source_interval_and_substep_sensitivities(
+        state,control,dt,seed_state,seed_control,next_state,body_motion,
+        slip_excess,nullptr,0,nullptr);
+}
+
+int vehicle_model_source_slip_substep_sensitivities(
+    const MpcModelState_t *state,const MpcModelControl_t *control,
+    float dt,const double seed_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    const double seed_control[2][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    UnitySourceSlipSubstepSensitivityC *samples,int capacity,int *count)
+{
+    if(!state||!control||!seed_state||!seed_control||!count||
+       !state->source_plant_initialized||!std::isfinite(dt)||dt<=0.f)
+        return 0;
+    UnitySourcePlantInputC original{};
+    write_source_plant_state(state,original.state);
+    original.steering_target_rad=clamp_source_steering_target(
+        control->steering_target_rad);
+    original.throttle_normalized=control->throttle_command;
+    original.suspension_history_initialized=
+        state->source_suspension_history_initialized;
+    UnitySourcePlantSensitivitySeedsC seeds{};
+    for(int row=0;row<26;++row)
+        for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane)
+            seeds.state[row][lane]=seed_state[row][lane];
+    for(int row=0;row<2;++row)
+        for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane) {
+            if(row==0)seeds.steering_target[lane]=
+                seed_control[row][lane];
+            else seeds.throttle[lane]=seed_control[row][lane];
+        }
+    return unity_source_plant_all_slip_substep_sensitivity_c(
+        &original,dt,&seeds,samples,capacity,count);
+}
+
+int vehicle_model_source_slip_substeps(
+    const MpcModelState_t *state,const MpcModelControl_t *control,
+    float dt,UnitySourceSlipSubstepC *samples,int capacity,
+    int *count,double source_maximum[4])
+{
+    if(!state||!control||!state->source_plant_initialized||
+       !std::isfinite(dt)||dt<=0.f)return 0;
+    UnitySourcePlantInputC original{};
+    write_source_plant_state(state,original.state);
+    original.steering_target_rad=clamp_source_steering_target(
+        control->steering_target_rad);
+    original.throttle_normalized=control->throttle_command;
+    original.suspension_history_initialized=
+        state->source_suspension_history_initialized;
+    return unity_source_plant_all_slip_substeps_c(
+        &original,dt,samples,capacity,count,source_maximum);
+}
+
+int vehicle_model_trace_peak_longitudinal_slip(
+    const MpcModelState_t *state,const MpcModelControl_t *control,
+    float dt,UnitySourcePeakSlipTraceC out[4])
+{
+    if(!state||!control||!out||!state->source_plant_initialized||
+       !std::isfinite(dt)||dt<=0.f)return 0;
+    UnitySourcePlantInputC original{};
+    write_source_plant_state(state,original.state);
+    original.steering_target_rad=clamp_source_steering_target(
+        control->steering_target_rad);
+    original.throttle_normalized=control->throttle_command;
+    original.suspension_history_initialized=
+        state->source_suspension_history_initialized;
+    return unity_source_plant_peak_slip_trace_c(
+        &original,dt,out);
+}
+
+int vehicle_model_source_lateral_slip_second(
+    const MpcModelState_t *state,
+    const double first_source[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double second_source[UNITY_SOURCE_PLANT_STATE_SIZE],
+    double lateral_slip[4],double first_slip[4],double second_slip[4])
+{
+    if(!state || !first_source || !second_source ||
+       !lateral_slip || !first_slip || !second_slip)return 0;
+    MpcModelState_t prepared=*state;
+    if(!vehicle_model_initialize_plant_state(&prepared))return 0;
+    double source[UNITY_SOURCE_PLANT_STATE_SIZE]{};
+    write_source_plant_state(&prepared,source);
+    return unity_source_plant_instantaneous_lateral_slip_second_c(
+        source,first_source,second_source,lateral_slip,
+        first_slip,second_slip);
 }
 
 int vehicle_model_longitudinal_slip_excess(
@@ -461,48 +607,50 @@ int vehicle_model_source_lateral_slip(
     if(!vehicle_model_initialize_plant_state(&prepared))return 0;
     double src[UNITY_SOURCE_PLANT_STATE_SIZE]{};
     write_source_plant_state(&prepared,src);
-    if(!unity_source_plant_instantaneous_lateral_slip_c(src,slip))
+    if(!derivative)
+        return unity_source_plant_instantaneous_lateral_slip_c(src,slip);
+    double source_jacobian[4][UNITY_SOURCE_PLANT_STATE_SIZE]{};
+    if(!unity_source_plant_instantaneous_lateral_slip_ad_c(
+            src,slip,source_jacobian))
         return 0;
-    if(!derivative)return 1;
-    for(int wheel=0;wheel<4;++wheel)
-        for(int col=0;col<MPC_OPT_PHYSICAL_NX;++col)
-            derivative[wheel][col]=0.;
-    constexpr int coords[]={
-        MPC_OPT_IDX_U,MPC_OPT_IDX_V,MPC_OPT_IDX_R,
+    // Source is expressed at the COM; the MPC state stores rear-axle
+    // lateral velocity. Chain the *exact* source AD through that geometry.
+    // Every other source physical state uses its one-to-one coordinate.
+    constexpr int model_coord[]={
+        MPC_OPT_IDX_U,MPC_OPT_IDX_V,
         MPC_OPT_IDX_ACTUAL_STEERING_ANGLE,
+        MPC_OPT_IDX_WHEEL_OMEGA_FL,MPC_OPT_IDX_WHEEL_OMEGA_FR,
+        MPC_OPT_IDX_WHEEL_OMEGA_RL,MPC_OPT_IDX_WHEEL_OMEGA_RR,
         MPC_OPT_IDX_BODY_HEIGHT,MPC_OPT_IDX_BODY_HEIGHT_RATE,
         MPC_OPT_IDX_ROLL,MPC_OPT_IDX_ROLL_RATE,
-        MPC_OPT_IDX_PITCH,MPC_OPT_IDX_PITCH_RATE};
-    constexpr int source_coords[]={
-        UNITY_SOURCE_U,UNITY_SOURCE_V,UNITY_SOURCE_YAW_RATE,
+        MPC_OPT_IDX_PITCH,MPC_OPT_IDX_PITCH_RATE,
+        MPC_OPT_IDX_SUSPENSION_JOUNCE_FL,
+        MPC_OPT_IDX_SUSPENSION_JOUNCE_FR,
+        MPC_OPT_IDX_SUSPENSION_JOUNCE_RL,
+        MPC_OPT_IDX_SUSPENSION_JOUNCE_RR};
+    constexpr int source_coord[]={
+        UNITY_SOURCE_U,UNITY_SOURCE_V,
         UNITY_SOURCE_PHYSICAL_STEERING,
+        UNITY_SOURCE_WHEEL_OMEGA_FL,UNITY_SOURCE_WHEEL_OMEGA_FR,
+        UNITY_SOURCE_WHEEL_OMEGA_RL,UNITY_SOURCE_WHEEL_OMEGA_RR,
         UNITY_SOURCE_BODY_HEIGHT,UNITY_SOURCE_BODY_HEIGHT_RATE,
         UNITY_SOURCE_ROLL,UNITY_SOURCE_ROLL_RATE,
-        UNITY_SOURCE_PITCH,UNITY_SOURCE_PITCH_RATE};
-    for(int entry=0;entry<10;++entry) {
-        const int model_col=coords[entry];
-        const int physical_col=source_coords[entry];
-        const double h=model_col==MPC_OPT_IDX_BODY_HEIGHT ? 1.e-5 :
-            model_col==MPC_OPT_IDX_ACTUAL_STEERING_ANGLE ? 1.e-5 : 1.e-4;
-        double plus[UNITY_SOURCE_PLANT_STATE_SIZE]{};
-        double minus[UNITY_SOURCE_PLANT_STATE_SIZE]{};
-        std::copy_n(src,UNITY_SOURCE_PLANT_STATE_SIZE,plus);
-        std::copy_n(src,UNITY_SOURCE_PLANT_STATE_SIZE,minus);
-        plus[physical_col]+=h;minus[physical_col]-=h;
-        if(model_col==MPC_OPT_IDX_R) {
-            // Stored QP v is rear-axle v, but source uses centre-of-mass v.
-            // An r perturbation also moves the source COM lateral velocity.
-            plus[UNITY_SOURCE_V]+=h*kComForwardFromRearAxleM;
-            minus[UNITY_SOURCE_V]-=h*kComForwardFromRearAxleM;
-        }
-        double plus_slip[4]{},minus_slip[4]{};
-        if(!unity_source_plant_instantaneous_lateral_slip_c(
-              plus,plus_slip) ||
-           !unity_source_plant_instantaneous_lateral_slip_c(
-              minus,minus_slip))return 0;
-        for(int wheel=0;wheel<4;++wheel)
-            derivative[wheel][model_col]=
-                (plus_slip[wheel]-minus_slip[wheel])/(2.*h);
+        UNITY_SOURCE_PITCH,UNITY_SOURCE_PITCH_RATE,
+        UNITY_SOURCE_SUSPENSION_JOUNCE_FL,
+        UNITY_SOURCE_SUSPENSION_JOUNCE_FR,
+        UNITY_SOURCE_SUSPENSION_JOUNCE_RL,
+        UNITY_SOURCE_SUSPENSION_JOUNCE_RR};
+    static_assert(sizeof(model_coord)==sizeof(source_coord));
+    for(int wheel=0;wheel<4;++wheel) {
+        for(int c=0;c<MPC_OPT_PHYSICAL_NX;++c)
+            derivative[wheel][c]=0.;
+        for(size_t j=0;j<sizeof(model_coord)/sizeof(model_coord[0]);++j)
+            derivative[wheel][model_coord[j]]=
+                source_jacobian[wheel][source_coord[j]];
+        derivative[wheel][MPC_OPT_IDX_R]=
+            source_jacobian[wheel][UNITY_SOURCE_YAW_RATE]+
+            kComForwardFromRearAxleM*
+                source_jacobian[wheel][UNITY_SOURCE_V];
     }
     return 1;
 }

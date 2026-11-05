@@ -31,13 +31,25 @@ fi
 
 container_player_binary="./AutoDRIVE Simulator.x86_64"
 simulator_log_file="${SDU_APEX_SIM_LOG_FILE:--}"
+# Docker --cpuset-cpus is silently discarded on some user hosts.
+# This opt-in Linux process affinity applies to the Unity executable
+# itself, keeping PhysX workers off the six P-cores used by source MPC.
+simulator_affinity=""
+if [[ -n "${SDU_APEX_SIM_RUNTIME_AFFINITY_CPUS:-}" ]]; then
+  if [[ ! "${SDU_APEX_SIM_RUNTIME_AFFINITY_CPUS}" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then
+    echo 'Invalid SDU_APEX_SIM_RUNTIME_AFFINITY_CPUS' >&2
+    exit 2
+  fi
+  simulator_affinity="taskset --cpu-list ${SDU_APEX_SIM_RUNTIME_AFFINITY_CPUS} "
+  echo "Running Unity/PhysX on CPUs ${SDU_APEX_SIM_RUNTIME_AFFINITY_CPUS}"
+fi
 case "${mode}" in
   gui)
-    simulator_command="exec \"${container_player_binary}\" -ip 127.0.0.1 -port 4567 -logFile \"${simulator_log_file}\""
+    simulator_command="exec ${simulator_affinity}\"${container_player_binary}\" -ip 127.0.0.1 -port 4567 -logFile \"${simulator_log_file}\""
     tty_args=(-it)
     ;;
   batchmode)
-    simulator_command="Xvfb :123 -screen 0 1920x1080x24 -ac >/dev/null 2>&1 & xvfb_pid=\$!; export DISPLAY=:123; for attempt in \$(seq 1 50); do [[ -S /tmp/.X11-unix/X123 ]] && break; sleep 0.1; done; kill -0 \"\$xvfb_pid\"; exec \"${container_player_binary}\" -batchmode -ip 127.0.0.1 -port 4567 -logFile \"${simulator_log_file}\""
+    simulator_command="Xvfb :123 -screen 0 1920x1080x24 -ac >/dev/null 2>&1 & xvfb_pid=\$!; export DISPLAY=:123; for attempt in \$(seq 1 50); do [[ -S /tmp/.X11-unix/X123 ]] && break; sleep 0.1; done; kill -0 \"\$xvfb_pid\"; exec ${simulator_affinity}\"${container_player_binary}\" -batchmode -ip 127.0.0.1 -port 4567 -logFile \"${simulator_log_file}\""
     tty_args=()
     ;;
   *)

@@ -67,3 +67,182 @@ Rejected and removed from source: single elastic Phase I, one-column source seca
 6. Time the entire source rollout, Jacobians, Hessian, QP, nonlinear line search, strict source and native Unity transfer, and ROS publication. Gate on <=22ms worst case with a practical 15–17ms typical goal; qualify 5+ repeated full 10-lap practice races and full competition races before any default replacement.
 
 **Result:** original source tire switching and several additional physical/geometry switching surfaces are now observable and testable. Accurate *local* derivatives and a faster source plant have improved, but the current QP is NOT yet globally accurate across nonlinear branch changes and cannot guarantee recoverable-corner feasibility at 22ms. Production remains unchanged. The next major solver implementation is a source-derived, feasibility-aware semismooth/multiple-shooting SQP rather than another hard-coded band or branch-specific fallback.
+
+## Exact nonlinear scoring, source/Unity fidelity and 40 Hz qualification update (2026-11-04)
+
+### Implementation correction: never score a projected optimizer decision
+
+`mpc_source_exact_offline_solver.cpp::exact_source_rollout` now advances all
+30 original physical stages with the **unmodified float steering/throttle**
+supplied by the optimizer, not the seed-building helper
+`mpc_rti_build_nominal_same_epoch`. The latter projects actuator-rate
+inequalities when increment-QP is active, which could silently change a
+nonlinear candidate before cost/constraint evaluation. Violated source
+rate inequalities are now visible in the original cost/feasibility filter.
+Identical control prefixes reuse their previously validated source states,
+while changed suffixes are reintegrated. Frozen references are rebuilt from
+the exact resulting source progress; original source cost is authoritative.
+
+The new `OriginalSourceTrialsNeverProjectActuatorRateViolations` C++ test
+proposes invalid raw throttle (0.8 with a 0.01 rate step), proves the
+normal seed builder would project it, checks the nonlinear optimizer retains
+it and the negative original physical rate margin, and compares exact
+source cost against independently propagated original source stages.
+22/22 CTest passed, including this regression.
+
+All three **pre-feasible witness** tests pass the strict independent
+source scorer. All three **original infeasible failed-seed** recovery tests
+also pass with two repeats and oracle parity. With genuine unprojected
+controls, case_15 first restores at nonlinear iteration index 56 and
+requires 60 offline iterations for the regression (previously 55). Final
+case_15 minimum source clearance is only +0.002734m. This is a correctness
+gate, NOT a real-time convergence achievement. The result remains too close
+to a wall to claim reliable racing.
+
+### Unmodified source physics vs recorded Unity
+
+`tools/qualify_source_unity_horizon.py` now retains **all** 30-stage
+source-vs-Unity predictions and separately reports windows containing a
+kinematic impulse-like truth transition (>1m/s forward-speed or >0.25rad
+heading change per 20–30ms interval). This is an observational flag, not
+a contact oracle; it cannot establish no collision without physical data.
+
+- `source_bridge_epoch_validation_20261104_01`: 42/42 ordinary 0.75s
+  windows; RMSE of per-window *maximum* position error **0.012223m**,
+  worst **0.025245m**. No impact-like windows.
+- `source_exact_nlp_live_sim_20261104_03`: 17/21 windows without a
+  flagged discontinuity; maximum-path-error RMSE **0.010038m**, worst
+  **0.021470m**. Four impact-like windows retain a worst error of
+  **2.421548m** in the **unfiltered** report.
+- Recorded physical speed drops ~4.387m/s and yaw moves ~0.74rad in
+  a single epoch at timestamp 1793823406824322729. The first
+  collision-count=1 receipt is timestamp 1793823407343329592, about
+  0.519s later. It would be incorrect to classify every earlier source
+  prediction as collision-free based on collision-count receipt time.
+  Direct stage-by-stage free-motion prediction is within ~1cm before
+  that abrupt transition; missing wall-impact dynamics must not be
+  advertised as ordinary free-flight modeling accuracy.
+
+Audits: `build/source_unity_horizon_clean_split_20261104.json`,
+`build/source_unity_horizon_source_exact_live_split_20261104.json`.
+Three `tools.test_qualify_source_unity_horizon` Python regression tests pass.
+
+### Remaining blocking failures
+
+- Source directional derivative qualification **still fails** in
+  high-slip switching regions; case_15 has a wrong-sign one-sided
+  control prediction. Exact nonlinear acceptance remains mandatory.
+- An eight-thread, one-iteration, at-most-eight-source-trial 40-cycle
+  source-only receding simulation from case_16 stays feasible for only
+  **3/40** cycles; case_15 **39/40** (worst ~26.79ms), case_17
+  **38/40** (worst ~26.32ms). These are *solver timings alone*, not ROS
+  end-to-end cycle certifications.
+- A 12-stage independently controlled source tail at case_16 still
+  needs hundreds of milliseconds on difficult entry cases (recorded
+  first epoch ~533ms in the bounded experiment). It cannot be enabled
+  on a 25ms loop simply by increasing nonlinear iterations.
+- Recorded experimental Unity run 03 crashed and had late/no-publish
+  cycles; the default controller has **not** been replaced. Historical
+  source/Unity fidelity outside impacts does not fix recursive feasibility.
+
+**Required next engineering milestone:** derive a sparse, structurally
+factorized feasibility-first source multiple-shooting RTI step coupling
+terminal decisions to horizon controls; prove full original cost/geometry
+and active-source branch derivatives on physical finite steps; demonstrate
+40 consecutive feasible receding epochs with positive clearance on every
+hard corner and no overrun of the 22ms controller budget. Then perform
+new Unity closed-loop races. Do not mask infeasibility by projecting
+decisions during nonlinear cost evaluation.
+
+### Live 22 ms source-constrained MPC qualification (4 Nov, continuation)
+
+**Preserved mathematical authority:** exact original source stages, original
+nonlinear racing cost, source footprint/command-rate/command-box inequalities,
+independent accepted-plan validation; the QP only proposes a direction. Normal
+feasible cost-optimization step ordering remains unchanged. For an infeasible
+source horizon, try full QP steps before fractional steps, rather than
+prematurely searching only the 1/16 and 1/32 directions. The latter produced
+~4 mm original physical wall penetration in the live captured predecessor.
+
+- The captured *real Unity physical source state*, including all 22 hidden
+  plant-memory values, delayed actuator commands, 30 seed commands, and
+  track geometry, is in
+  `build/source_qp_unity_live_failure_20261104_05/fixture`.
+  Under the exact physical source optimization oracle, two nonlinear SQP
+  iterations with larger feasibility-first trial steps produced **+10.568 mm**
+  minimum original corner slack with the configured **10 mm extra reserve**;
+  the previous small-step trial order gave **-4.032 mm** after two iterations.
+  This matches the original live wall margin and is a targeted physical
+  feasibility regression, NOT a general full-track guarantee.
+- `SDU_APEX_MPC_LTO=true` allows host-native link-time optimization without
+  changing mathematical acceptance. Six source workers use explicit
+  `OMP_PLACES={0},{2},{4},{6},{8},{10}` and `OMP_PROC_BIND=TRUE`.
+  Use `SDU_APEX_MPC_RUNTIME_AFFINITY_CPUS=0-11` for ROS and
+  `SDU_APEX_SIM_RUNTIME_AFFINITY_CPUS=12-15` for the Unity executable.
+  Docker `--cpuset-cpus` was silently discarded on this host, causing
+  catastrophic live PhysX/MPC CPU contention (152 ms–846 ms solve spikes).
+  This explicit Unity process affinity was directly checked within its
+  Docker image using `taskset`/`/proc/self/status`.
+- Successful **actual Unity practice** run:
+  `live_runs/source_qp_affinity_isolated_practice_20261104_07`.
+  One warmup plus **five scored laps**, six official counter transitions;
+  no collisions and no unpublished solver rejections. Scored laps:
+  4.9558, 4.9508, 4.9508, 4.9358, 4.9518 s;
+  scored total 24.7450 s, mean 4.9490 s, population SD 0.00685 s.
+  1,251/1,251 accepted-feasible source controls in health counter;
+  report captured 1,238 diagnostic publishes (excluding startup intervals),
+  max callback-to-gate 15.426 ms, P99 14.270 ms, and no callback period
+  above 25 ms. Maximum **solver** time 15.278 ms in the periodic health log.
+  Note that the post-simulator-shutdown health record includes one transport
+  teardown fault after the watcher had completed; there was no collision
+  or MPC rejection during scoring.
+- Limitations: one completed five-scored-lap Unity session does not establish
+  reproducibility across successive races, target machines, or competition
+  corners. Full ten-scored-lap testing and multiple independent sessions
+  remain necessary. The normal, established production profiles remain
+  unchanged; all runtime settings above are opt-in simulator experiments.
+
+### Ten-scored-lap race and submicron extra-margin correction
+
+- An **11-official-lap** attempt using the same fast exact-source controller
+  `live_runs/source_qp_affinity_isolated_10scored_20261104_08` exposed
+  a spurious rejection at progress 34.373 m: original-source minimum
+  corner margin **+0.00999976508 m**, requested **+0.01000000000 m**;
+  squared extra-reserve violation only **2.75e-14**. No physics-wall
+  penetration and no solve deadline miss (17.22 ms maximum). It correctly
+  reproduced in the captured same-epoch 26-physical-state fixture under
+  `build/source_qp_unity_live_failure_20261104_08/fixture`.
+- Fixed exact-source feasibility certification: *always* require
+  `original_source_corner_margin >= 0`; when the simulator explicitly
+  requests an **additional** clearance, allow only **0.5 micrometre**
+  tolerance to accommodate source float geometry and reference rounding.
+  The original source-valued margin, exact cost and unmodified physical
+  nonlinear constraint violation remain reported. The independent full
+  physical-source candidate plan validator still executes before commands
+  are published. Verified the original failed state via the actual
+  `mpc_rti_solve_cycle` entry: accepted 30-stage source-valid plan with
+  +32.76 mm actual clearance, 9.29 ms full cycle, original-source exact
+  objective, matched memory and command epoch.
+- **Complete 10-scored-lap Unity practice race**, one warm-up + ten scored,
+  `live_runs/source_qp_numerical_clearance_10scored_20261104_09`:
+  `SCREEN_COMPLETE: lap limit`; 11 official lap transitions, zero collisions,
+  zero unpublished MPC rejections, and 2230 independently full-plan checked
+  and published source-exact feasible controls (30 startup localization waits
+  excluded); 2244/2244 accepted feasible in final controller health counter.
+  The startup/post-shutdown timing distinction matters: final health
+  reports one transport teardown control fault **after race completion**.
+  Ten scored official lap times: 4.9378, 4.9828, 4.9708, 5.0208, 4.9918,
+  4.9558, 4.9358, 5.0038, 4.9808, 4.9608 seconds. Total **49.7410 s**;
+  mean 4.9741 s, population SD 0.02608 s. Publication gate median
+  **7.954 ms**, P99 **14.423 ms**, worst **20.130 ms**; no 22 ms gate
+  budget violations, no callback interval above 25 ms. Worst controller
+  solve in health log **19.874 ms**. Real Unity race is no longer merely
+  a source-only offline result; further independent repeat races and the
+  competition map remain outstanding.
+- Runtime process isolation is essential on this host. Docker cpuset was
+  discarded by the kernel. Explicit `taskset` applied inside Unity on CPUs
+  12-15 while ROS/source MPC uses 0-11 with 6 explicit P-core OMP places.
+  The prior `live_runs/source_qp_feasibility_order_practice_20261104_06`
+  collision followed 152ms/846ms no-publish stalls when PhysX 16 workers
+  shared those MPC cores. The fixed affinity is *not* a replacement for
+  profiling on other machines; keep it an opt-in simulator runtime option.

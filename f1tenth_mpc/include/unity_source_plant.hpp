@@ -94,7 +94,7 @@ struct UnitySourcePlantOutputT {
 
 using UnitySourcePlantOutput = UnitySourcePlantOutputT<double>;
 
-inline constexpr std::size_t kUnityPlantSensitivityWidth = 20;
+inline constexpr std::size_t kUnityPlantSensitivityWidth = 28;
 inline constexpr std::size_t kUnityPlantSensitivityStateSize = 26;
 struct UnitySourcePlantSensitivitySeeds {
   std::array<std::array<double, kUnityPlantSensitivityWidth>,
@@ -103,6 +103,15 @@ struct UnitySourcePlantSensitivitySeeds {
   std::array<double, kUnityPlantSensitivityWidth> throttle{};
 };
 
+// Derivative of EVERY physical source tire-slip substep in up to 28
+// source-state/actuator seed directions, not merely the largest slip.
+struct UnitySourceSlipSubstepSensitivity {
+  int fixed_tick{};
+  int vehicle_substep{};
+  int wheel{};
+  double positive_excess_mps{};
+  std::array<double,kUnityPlantSensitivityWidth> derivative{};
+};
 struct UnitySourcePlantSensitivity {
   std::array<std::array<double, kUnityPlantSensitivityWidth>,
              kUnityPlantSensitivityStateSize> state{};
@@ -127,6 +136,29 @@ struct UnitySourcePlantDirectionalCurvature {
   std::array<double,4> first_slip_excess{};
   std::array<double,4> second_slip_excess{};
 };
+// One-sided derivatives of the SAME templated physical source equations.
+// This is the selected directional derivative of the complete 25 ms
+// integrator, including all 1/5 PxVehicle substeps, tire/contact and slip.
+// At an actual discrete source switch (zero throttle / wheel-substep count
+// or contact continuity failure), the directional derivative is REJECTED
+// rather than invented by a smoothed physical model.
+struct UnitySourceDirectionalBranchReport {
+  int exact_physical_switch_ties{};
+  int derivative_selected_switch_ties{};
+  int contact_switch_ties{};
+  int zero_throttle_brake_switches{};
+  int discrete_substep_schedule_switches{};
+  int valid_one_sided_directional{};
+};
+bool unity_source_plant_step_one_sided_directional(
+    const UnitySourcePlantState &state,
+    const UnitySourcePlantInput &input,
+    double duration_s,
+    const std::array<double,kUnityPlantSensitivityStateSize> &direction_state,
+    const std::array<double,2> &direction_control,
+    UnitySourcePlantDirectionalCurvature *output,
+    UnitySourceDirectionalBranchReport *branch_report);
+
 bool unity_source_plant_step_with_directional_curvature(
     const UnitySourcePlantState &state,
     const UnitySourcePlantInput &input,
@@ -154,6 +186,25 @@ unsigned int unity_source_wheel_substep_count(double forward_speed_mps);
 // state Jacobian. WheelHit.sidewaysSlip sign is retained.
 bool unity_source_plant_lateral_slip_at_state(
     const UnitySourcePlantState &state, std::array<double,4> *slip);
+
+// Differentiate the ORIGINAL instantaneous WheelHit lateral-slip contact
+// equation in all 26 source-state coordinates with the same Dual28 AD
+// kernel used by the physical Unity-source plant. One 28-lane pass;
+// no finite-difference step or altered tire/contact formula.
+bool unity_source_plant_lateral_slip_with_sensitivities(
+    const UnitySourcePlantState &state, std::array<double,4> *slip,
+    std::array<std::array<double,kUnityPlantSensitivityStateSize>,4> *jacobian);
+
+// Second directional derivative of original instantaneous front-wheel
+// lateral slip, including first AND second source-state perturbations. Uses
+// SourceJet2 through the SAME contact/attitude/atan formula as the plant.
+bool unity_source_plant_lateral_slip_directional_second(
+    const UnitySourcePlantState &state,
+    const std::array<double,kUnityPlantSensitivityStateSize> &first_state,
+    const std::array<double,kUnityPlantSensitivityStateSize> &second_state,
+    std::array<double,4> *slip,
+    std::array<double,4> *first_slip,
+    std::array<double,4> *second_slip);
 
 // Reconcile the suspension history after an observer corrects body pose or
 // attitude. PhysX damper velocity is a finite difference from the preceding
@@ -199,6 +250,9 @@ struct UnitySourceBranchObservation {
   double unfiltered_tire_load_ratio{};
   double normalized_combined_slip_demand_squared{};
   double longitudinal_slip{};
+  // ORIGINAL instantaneous source penalty feature, already computed by
+  // the tire model. This is before the exact max over substeps/ticks.
+  double positive_longitudinal_slip_excess_mps{};
   double lateral_slip{};
   double combined_slip_utilization{};
   double normal_load_n{};
@@ -243,7 +297,9 @@ bool unity_source_plant_step_with_sensitivities(
     const UnitySourcePlantInput &input,
     double duration_s,
     const UnitySourcePlantSensitivitySeeds &seeds,
-    UnitySourcePlantSensitivity *sensitivity);
+    UnitySourcePlantSensitivity *sensitivity,
+    std::vector<UnitySourceSlipSubstepSensitivity>
+        *all_original_slip_substeps=nullptr);
 
 bool unity_source_plant_slip_excess(
     const UnitySourcePlantState &state,

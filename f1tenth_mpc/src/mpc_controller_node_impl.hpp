@@ -4,16 +4,11 @@
 // then directly publishes steering and normalized throttle.
 
 #include "mpc_diagnostic_worker.hpp"
-#include "mpc_qp_failure_recorder.hpp"
 #include "mpc_rti.h"
 #include "mpc_control_time_predictor.hpp"
 #include "mpc_drive_command.hpp"
 #include "mpc_publication_deadline.hpp"
-#include "mpc_prefix_selection.hpp"
-#include "mpc_fallback_episode.hpp"
-#include "mpc_fallback_seed.hpp"
 #include "mpc_solver_memory_transaction.hpp"
-#include "mpc_viability_recovery.hpp"
 #include "mpc_state_synchronizer.hpp"
 #include "mpc_trajectory_io.hpp"
 #include "mpc_speed_envelope.hpp"
@@ -68,9 +63,6 @@ namespace controller_detail {
 
 constexpr std::uint32_t kUnityPlantStateSchemaVersion = 11;
 constexpr int64_t kBridgeControlPeriodNs = 25'000'000;
-/* Require a conservative three-stage source certificate for short recovery
- * actions. The two logged command samples are not an extra physical FIFO. */
-constexpr int kCommandEffectValidationHorizon = MPC_RECOVERY_PREFIX_HORIZON;
 /* Only a truly stationary, plan-less spawn may wait for the next solve tick
  * when cold Jacobian construction consumes the reserved ADMM budget. */
 constexpr float kStationaryStartupRetrySpeedMps = 0.05f;
@@ -103,29 +95,6 @@ inline bool next_bridge_request_epoch(int64_t source_request_stamp_ns,
     return true;
 }
 
-inline void configure_solver_state_scaling(RiccatiAdmmConfig_t & solver, bool enabled)
-{
-    solver.use_scaling = enabled ? 1 : 0;
-    if (!enabled) return;
-
-    // x = D*x_scaled and u = Du*u_scaled. These are characteristic physical
-    // state/input scales, not vehicle parameters; the transform preserves the
-    // physical cost, bounds, plant equations, and actuator commands.
-    constexpr float state_scale[RICCATI_MAX_NX] = {
-        0.10f, 0.10f, 0.5f, 1.0f, 4.0f,
-        0.5f,
-        400.0f, 400.0f, 400.0f, 400.0f,
-        0.10f, 1.0f, 0.25f, 4.0f, 0.25f, 4.0f,
-        0.05f, 0.05f, 0.05f, 0.05f,
-        1.0f, 0.5f, 1.0f};
-    static_assert(state_scale[MPC_OPT_IDX_PROGRESS_DEVIATION] > 0.0f &&
-        state_scale[MPC_OPT_IDX_PREVIOUS_THROTTLE_COMMAND] > 0.0f,
-        "every optimizer coordinate needs a positive scale");
-    constexpr float input_scale[MPC_MODEL_NU] = {0.5f, 1.0f};
-    std::copy_n(state_scale, RICCATI_MAX_NX, solver.state_scale);
-    std::copy_n(input_scale, MPC_MODEL_NU, solver.input_scale);
-}
-
 }  // namespace controller_detail
 using namespace controller_detail;
 
@@ -144,31 +113,6 @@ public:
             "diagnostics_topic", "/mpc/diagnostics");
         const bool publish_diagnostics = declare_parameter<bool>(
             "publish_diagnostics", false);
-        prefer_full_validated_prior_plan_on_rejection_ =
-            declare_parameter<bool>(
-                "prefer_full_validated_prior_plan_on_rejection", false);
-        // Optional recovery-episode guard. Zero retains existing behavior.
-        // It counts both retained and candidate short prefixes as one episode.
-        // At the limit, a new command needs full 750ms native certification.
-        fallback_retain_validated_seed_enabled_ = declare_parameter<bool>(
-            "fallback_retain_validated_seed_enabled", false);
-        fallback_max_short_prefix_actions_ = std::clamp<int>(
-            declare_parameter<int>("fallback_max_short_prefix_actions", 0),
-            0, 10);
-        rti_config_.enable_feasibility_restoration =
-            declare_parameter<bool>("enable_feasibility_restoration", false);
-        rti_config_.feasibility_restoration_qp_relaxation_m =
-            static_cast<float>(std::clamp(
-                declare_parameter<double>(
-                    "feasibility_restoration_qp_relaxation_m", 0.18),
-                0.0, 0.50));
-        normal_feasibility_first_enabled_ =
-            declare_parameter<bool>("normal_feasibility_first_enabled",false);
-        rti_config_.feasibility_restoration_wall_weight =
-            static_cast<float>(std::clamp(
-                declare_parameter<double>(
-                    "feasibility_restoration_wall_weight", 8000.0),
-                1.0, 30000.0));
         // Optional load-time curvature/braking speed envelope. Zero disables;
         // this does not override any full-horizon physical collision limits.
         curvature_speed_envelope_lateral_accel_mps2_ =
@@ -182,91 +126,6 @@ public:
             curvature_speed_envelope_braking_mps2_ <= 0.0 ||
             curvature_speed_envelope_braking_mps2_ > 30.0)
             throw std::runtime_error("invalid curvature speed envelope limits");
-        viability_recovery_enabled_ = declare_parameter<bool>(
-            "viability_recovery_enabled", false);
-        // Optional: leave successful, fully source-validated racing decisions
-        // untouched; search full-horizon rescue only after solver rejection.
-        viability_recovery_on_rejection_only_ = declare_parameter<bool>(
-            "viability_recovery_on_rejection_only", false);
-        viability_steady_bridge_enabled_ = declare_parameter<bool>(
-            "viability_steady_bridge_enabled", false);
-        viability_minimal_nearwall_recovery_enabled_ = declare_parameter<bool>(
-            "viability_minimal_nearwall_recovery_enabled", false);
-        // Optional stage-aware exact-source candidate search. It does not
-        // loosen the production collision envelope or issue short prefixes.
-        viability_stage_targeted_recovery_enabled_ = declare_parameter<bool>(
-            "viability_stage_targeted_recovery_enabled", false);
-        viability_early_hazard_recovery_enabled_ = declare_parameter<bool>(
-            "viability_early_hazard_recovery_enabled", false);
-        viability_line_search_wall_warning_enabled_ = declare_parameter<bool>(
-            "viability_line_search_wall_warning_enabled", false);
-        viability_terminal_extension_select_enabled_ = declare_parameter<bool>(
-            "viability_terminal_extension_select_enabled", false);
-        viability_geometric_feasibility_seed_enabled_ = declare_parameter<bool>(
-            "viability_geometric_feasibility_seed_enabled", false);
-        viability_braking_aware_geometric_enabled_ = declare_parameter<bool>(
-            "viability_braking_aware_geometric_enabled", false);
-        // Generic controller capability, not an IROS-only mode. The source
-        // witness is optional: the recovery code checks the loaded trajectory
-        // and retains conventional exact-rollout recovery if it is absent.
-        viability_source_witness_recovery_enabled_ = declare_parameter<bool>(
-            "viability_source_witness_recovery_enabled", true);
-        viability_geometric_anticipatory_enabled_ = declare_parameter<bool>(
-            "viability_geometric_anticipatory_enabled", false);
-        viability_blended_geometric_recovery_enabled_ = declare_parameter<bool>(
-            "viability_blended_geometric_recovery_enabled", false);
-        // Opt-in: spend the more expensive proactive 750 ms search only if
-        // a previous bounded short action has revealed a convergence episode.
-        // This preserves the normal racing objective on successful cycles.
-        viability_proactive_after_fallback_only_ = declare_parameter<bool>(
-            "viability_proactive_after_fallback_only", false);
-        viability_recovery_max_trials_ = std::clamp<int>(
-            declare_parameter<int>("viability_recovery_max_trials", 16), 1, 16);
-        viability_lookahead_reserve_m_ = std::clamp(
-            declare_parameter<double>("viability_lookahead_reserve_m", 0.02),
-            0.01, 0.15);
-        quality_aware_prefix_selection_on_rejection_ =
-            declare_parameter<bool>(
-                "quality_aware_prefix_selection_on_rejection", false);
-        quality_prefix_clearance_reserve_m_ = clamp(
-            declare_parameter<double>(
-                "quality_prefix_clearance_reserve_m", 0.05), 0.0, 1.0);
-        quality_prefix_minimum_clearance_gain_m_ = clamp(
-            declare_parameter<double>(
-                "quality_prefix_minimum_clearance_gain_m", 0.02),
-            0.0, 1.0);
-        quality_prefix_iteration_limited_relative_gain_ = clamp(
-            declare_parameter<double>(
-                "quality_prefix_iteration_limited_relative_gain", 0.02),
-            0.0, 1.0);
-        quality_prefix_stale_prior_refresh_after_actions_ = std::clamp<int>(
-            declare_parameter<int>(
-                "quality_prefix_stale_prior_refresh_after_actions", 0),
-            0, static_cast<int>(PREDICTION_HORIZON));
-        quality_prefix_stale_prior_max_clearance_loss_m_ = clamp(
-            declare_parameter<double>(
-                "quality_prefix_stale_prior_max_clearance_loss_m", 0.02),
-            0.0, 1.0);
-        quality_prefix_stale_prior_objective_loss_fraction_ = clamp(
-            declare_parameter<double>(
-                "quality_prefix_stale_prior_objective_loss_fraction", 0.0),
-            0.0, 2.0);
-        quality_prefix_near_boundary_minimum_gain_m_ = clamp(
-            declare_parameter<double>(
-                "quality_prefix_near_boundary_minimum_gain_m", 0.0),
-            0.0, 1.0);
-        quality_prefix_near_boundary_max_objective_ratio_ = clamp(
-            declare_parameter<double>(
-                "quality_prefix_near_boundary_max_objective_ratio", 0.0),
-            0.0, 3.0);
-        quality_prefix_near_boundary_max_steering_delta_rad_ = clamp(
-            declare_parameter<double>(
-                "quality_prefix_near_boundary_max_steering_delta_rad", 0.10),
-            0.0, 1.0);
-        quality_prefix_near_boundary_max_throttle_delta_ = clamp(
-            declare_parameter<double>(
-                "quality_prefix_near_boundary_max_throttle_delta", 0.22),
-            0.0, 1.0);
         path_frame_ = declare_parameter<std::string>("path_frame", "map");
         // Experimental physical map authority. Disabled by default. Unknown
         // cells and a missing/invalid occupancy map never authorize driving.
@@ -338,23 +197,6 @@ public:
         }
         rti_config_.capture_diagnostic_outputs =
             diagnostics_pub_ != nullptr;
-        // Development forensic snapshots are opt-in. They preserve the live
-        // QP, ADMM warm memory and both SQP passes without synchronous disk
-        // activity in the controller's deadline-critical callback.
-        const std::string forensic_capture_dir = declare_parameter<std::string>(
-            "forensic_qp_capture_directory", "");
-        forensic_capture_alpha_zero_enabled_ = declare_parameter<bool>(
-            "forensic_qp_capture_zero_alpha",false);
-        forensic_capture_near_wall_enabled_ = declare_parameter<bool>(
-            "forensic_qp_capture_near_wall",false);
-        forensic_capture_progress_min_m_ = std::max(0.,
-            declare_parameter<double>("forensic_qp_capture_progress_min_m",0.0));
-        if (enabled_ && !forensic_capture_dir.empty()) {
-            qp_capture_r1_ = std::make_unique<MpcRtiQpCapture_t>();
-            qp_capture_r2_ = std::make_unique<MpcRtiQpCapture_t>();
-            qp_failure_recorder_ =
-                std::make_unique<MpcQpFailureRecorder>(forensic_capture_dir);
-        }
         // State is time-sensitive: if executor/DDS scheduling falls behind,
         // drop old samples instead of replaying them as current control input.
         control_callback_group_ = create_callback_group(
@@ -438,121 +280,44 @@ public:
                 "steering_correction_variation_epsilon_rad must be in [0.005,0.10]");
         rti_config_.model.weight_throttle_slew = declare_weight(
             "weight_throttle_slew", 50.0f);
-        rti_config_.model.command_increment_qp_enabled =
-            declare_parameter<bool>("command_increment_qp_enabled",false)?1:0;
-        rti_config_.model.max_steering_command_step_rad =
-            static_cast<float>(declare_parameter<double>(
-                "max_steering_command_step_rad",2.0 * SOURCE_MAX_STEERING_RAD));
-        rti_config_.model.max_throttle_command_step =
-            static_cast<float>(declare_parameter<double>(
-                "max_throttle_command_step",1.0));
-        if (rti_config_.model.command_increment_qp_enabled &&
-            (!std::isfinite(rti_config_.model.max_steering_command_step_rad) ||
-             rti_config_.model.max_steering_command_step_rad <
-                 2.f * SOURCE_MAX_STEERING_RAD - 1.e-6f ||
-             !std::isfinite(rti_config_.model.max_throttle_command_step) ||
-             rti_config_.model.max_throttle_command_step < 1.f - 1.e-6f))
-            throw std::runtime_error(
-                "command-increment coordinates require full physical command ranges; "
-                "artificial command-step restrictions are unsupported");
         rti_config_.model.startup_nominal_throttle_seed = static_cast<float>(
             declare_parameter<double>("startup_nominal_throttle_seed", 0.25));
         rti_config_.model.terminal_multiplier = declare_weight(
             "terminal_multiplier", 3.0f);
-        rti_config_.enable_nonlinear_line_search = declare_parameter<bool>(
-            "enable_nonlinear_line_search", false) ? 1 : 0;
-        rti_config_.feedback_rollout = declare_parameter<bool>(
-            "feedback_rollout", false) ? 1 : 0;
-        rti_config_.feedback_rollout_gain_scale = static_cast<float>(
-            declare_parameter<double>("feedback_rollout_gain_scale", 1.0));
-        if (!std::isfinite(rti_config_.feedback_rollout_gain_scale) ||
-            rti_config_.feedback_rollout_gain_scale < 0.0f ||
-            rti_config_.feedback_rollout_gain_scale > 1.0f)
-            throw std::runtime_error("feedback_rollout_gain_scale must be in [0,1]");
-        rti_config_.line_search_max_backtracks = static_cast<int>(
-            std::clamp<long>(
-                declare_parameter<int>("line_search_max_backtracks", 0),
-                0L, 4L));
-        rti_config_.max_sqp_iterations = static_cast<int>(
-            std::clamp<long>(
-                declare_parameter<int>("max_sqp_iterations", 2),
-                1L, 2L));
-        rti_config_.native_source_reduced_sqp =
-            declare_parameter<bool>("native_source_reduced_sqp",false) ? 1:0;
-        rti_config_.native_source_reduced_sqp_iterations =
-            std::clamp<int>(declare_parameter<int>(
-                "native_source_reduced_sqp_iterations",8),1,8);
-        const int source_control_stages=declare_parameter<int>(
-            "native_source_sqp_control_decision_stages",30);
-        rti_config_.native_source_sqp_control_decision_stages=
-            source_control_stages==20?20:30;
-        if(source_control_stages!=20&&source_control_stages!=30)
-            RCLCPP_WARN(get_logger(),
-                "Native source SQP supports only 20 or 30 decision stages");
-        rti_config_.native_source_sqp_reuse_fd_prefix=
-            declare_parameter<bool>("native_source_sqp_reuse_fd_prefix",false)
-            ?1:0;
-        rti_config_.native_source_sqp_adaptive_stop=
-            declare_parameter<bool>("native_source_sqp_adaptive_stop",false)
-            ?1:0;
-        rti_config_.native_source_sqp_full_source_forward=
-            declare_parameter<bool>(
-                "native_source_sqp_full_source_forward",false)?1:0;
-        rti_config_.native_source_sqp_gauss_newton_hessian=
-            declare_parameter<bool>(
-                "native_source_sqp_gauss_newton_hessian",false)?1:0;
-        rti_config_.native_source_sqp_stage_local_jacobians=
-            declare_parameter<bool>(
-                "native_source_sqp_stage_local_jacobians",false)?1:0;
-        rti_config_.native_source_sqp_passive_timer_sensitivities=
-            declare_parameter<bool>(
-                "native_source_sqp_passive_timer_sensitivities",false)?1:0;
-        rti_config_.native_source_sqp_inexact_phase1_inner_qp=
-            declare_parameter<bool>(
-                "native_source_sqp_inexact_phase1_inner_qp",false)?1:0;
-        const int terminal_source_lookahead=declare_parameter<int>(
-            "native_source_sqp_terminal_lookahead_stages",0);
-        rti_config_.native_source_sqp_terminal_lookahead_stages=
-            terminal_source_lookahead==3?3:0;
-        if(terminal_source_lookahead!=0 && terminal_source_lookahead!=3)
-            RCLCPP_WARN(get_logger(),
-                "Invalid native source terminal lookahead: only 0 or 3 supported");
-
-        if(rti_config_.native_source_reduced_sqp)
-            RCLCPP_WARN(get_logger(),
-                "Native 60-command source SQP is enabled but is NOT "
-                "qualified for the live 25ms control deadline. Its "
-                "strict deadline gate may reject command publication. "
-                "Keep disabled outside source correctness experiments.");
-        rti_config_.source_violation_filter_sqp =
-            declare_parameter<bool>("source_violation_filter_sqp", false);
-        rti_config_.source_elastic_wall_weight=static_cast<float>(
-            declare_parameter<double>("source_elastic_wall_weight",500.));
-        rti_config_.source_nominal_feasibility_repair =
-            declare_parameter<bool>("source_nominal_feasibility_repair",false);
-        rti_config_.source_nominal_feasibility_max_exact_trials =
-            std::clamp<int>(declare_parameter<int>(
-                "source_nominal_feasibility_max_exact_trials",8),1,8);
-        rti_config_.source_progress_aware_reserve =
-            declare_parameter<bool>("source_progress_aware_reserve",false);
-        rti_config_.model.source_reachable_steering_qp =
-            declare_parameter<bool>("source_reachable_steering_qp",false);
-        rti_config_.progress_coupled_hard_corridor =
-            declare_parameter<bool>("progress_coupled_hard_corridor",false);
-        rti_config_.successor_recourse_weight = static_cast<float>(
-            declare_parameter<double>("successor_recourse_weight",0.0));
-        rti_config_.successor_recourse_optimize =
-            declare_parameter<bool>("successor_recourse_optimize",false);
-
-        rti_config_.terminal_viability=declare_parameter<bool>(
-            "terminal_viability",false) ? 1:0;
-        rti_config_.prefer_terminal_continuable_refinement =
-            declare_parameter<bool>(
-                "prefer_terminal_continuable_refinement", false) ? 1:0;
-        rti_config_.minimum_sqp_model_agreement_ratio = static_cast<float>(
-            declare_parameter<double>("minimum_sqp_model_agreement_ratio", 0.0));
-        rti_config_.capture_sqp_prediction_metrics = declare_parameter<bool>(
-            "capture_sqp_prediction_metrics", false) ? 1 : 0;
+        // Source-exact nonlinear SQP is the only controller, not a plugin.
+        rti_config_.source_exact_nlp_live=1;
+        rti_config_.source_exact_nlp_constrained_qp=1;
+        rti_config_.source_exact_nlp_compact_qp=1;
+        rti_config_.source_exact_nlp_full_step_sqp=1;
+        rti_config_.source_exact_nlp_qp_soft_weight=
+            static_cast<float>(declare_parameter<double>(
+                "source_exact_nlp_qp_soft_weight",1000000.));
+        rti_config_.source_exact_nlp_qp_regularization=
+            static_cast<float>(declare_parameter<double>(
+                "source_exact_nlp_qp_regularization",1000.));
+        rti_config_.source_exact_nlp_iterations=std::clamp<int>(
+            declare_parameter<int>("source_exact_nlp_iterations",3),1,8);
+        rti_config_.source_exact_nlp_extra_clearance_m=static_cast<float>(
+            declare_parameter<double>(
+                "source_exact_nlp_extra_clearance_m",0.03));
+        if(!std::isfinite(
+               rti_config_.source_exact_nlp_qp_soft_weight) ||
+           rti_config_.source_exact_nlp_qp_soft_weight<=0.f ||
+           rti_config_.source_exact_nlp_qp_soft_weight>1.e9f)
+            throw std::runtime_error(
+                "source_exact_nlp_qp_soft_weight must be in (0,1e9]");
+        if(!std::isfinite(
+               rti_config_.source_exact_nlp_qp_regularization) ||
+           rti_config_.source_exact_nlp_qp_regularization<=0.f ||
+           rti_config_.source_exact_nlp_qp_regularization>100000.f)
+            throw std::runtime_error(
+                "source_exact_nlp_qp_regularization must be in (0,100000]");
+        if(!std::isfinite(
+               rti_config_.source_exact_nlp_extra_clearance_m) ||
+           rti_config_.source_exact_nlp_extra_clearance_m<0.f ||
+           rti_config_.source_exact_nlp_extra_clearance_m>.1f)
+            throw std::runtime_error(
+                "source_exact_nlp_extra_clearance_m must be in [0,0.1]");
         rti_config_.model.max_speed_mps = static_cast<float>(max_speed_mps_);
         rti_config_.model.active_speed_ceiling_mps =
             static_cast<float>(max_speed_mps_);
@@ -560,6 +325,17 @@ public:
             "max_steering_rad", SOURCE_MAX_STEERING_RAD);
         rti_config_.model.max_steering_rad = static_cast<float>(
             actuator_steering_limit_rad_);
+        // The source NLP evaluates original actuator command-rate
+        // inequalities even though the retired incremental Riccati QP
+        // is gone. These two limits MUST NOT remain zero-initialized:
+        // zero makes every nonzero cold-start control source-infeasible.
+        // Full command-domain differences are nonrestrictive, while
+        // physical actuator rate/lag remains in the exact Unity plant.
+        // These are NOT trust regions around an SQP iterate.
+        rti_config_.model.max_steering_command_step_rad =
+            2.f * rti_config_.model.max_steering_rad;
+        rti_config_.model.max_throttle_command_step =
+            MPC_THROTTLE_MAX - MPC_THROTTLE_MIN_DRIVE;
         rti_config_.model.corridor_margin_m = static_cast<float>(
             declare_parameter<double>("corridor_margin_m",
                                       MPC_DEFAULT_WALL_CLEARANCE_M));
@@ -596,30 +372,15 @@ public:
         rti_config_.model.jacobian_threads = static_cast<int>(std::clamp<long>(
             declare_parameter<int>("jacobian_threads", 8), 0L,
             MPC_RTI_MAX_JACOBIAN_THREADS));
-        const int configured_iterations = declare_parameter<int>(
-            "max_solver_iterations", 150);
-        requested_max_solver_iterations_ = configured_iterations;
-        // Keep the ROS parameter consistent with the solver's compile-time
-        // storage bound. The production node caps the runtime request here.
-        rti_config_.solver.max_iterations = static_cast<uint16_t>(
-            std::clamp(configured_iterations, 1, MAX_ITERATIONS));
-        if (configured_iterations != rti_config_.solver.max_iterations) {
-            RCLCPP_WARN(get_logger(),
-                "max_solver_iterations requested=%d but runtime cap=%u "
-                "(compiled MAX_ITERATIONS=%d); using the clamped value",
-                configured_iterations,
-                static_cast<unsigned>(rti_config_.solver.max_iterations),
-                MAX_ITERATIONS);
-        }
         const double rti_cycle_budget_ms = declare_parameter<double>(
-            "rti_cycle_budget_ms", 20.0);
+            "rti_cycle_budget_ms", 22.0);
         if (!std::isfinite(rti_cycle_budget_ms) || rti_cycle_budget_ms < 0.0) {
             throw std::runtime_error(
                 "rti_cycle_budget_ms must be finite and nonnegative");
         }
         rti_config_.max_cycle_time_us = rti_cycle_budget_ms * 1000.0;
         end_to_end_cycle_budget_ms_ = declare_parameter<double>(
-            "end_to_end_cycle_budget_ms", 20.0);
+            "end_to_end_cycle_budget_ms", 22.0);
         max_command_start_lateness_ms_ = declare_parameter<double>(
             "max_command_start_lateness_ms", 2.0);
         const double initial_command_publication_lead_ms =
@@ -638,85 +399,19 @@ public:
         }
         last_command_publication_lead_ns_ = static_cast<int64_t>(
             std::llround(initial_command_publication_lead_ms * 1.0e6));
-        rti_config_.solver.rho = static_cast<float>(
-            declare_parameter<double>("admm_rho", 7.0));
-        rti_config_.solver.rho_u = static_cast<float>(
-            declare_parameter<double>("admm_rho_input", 7.0));
-        rti_config_.solver.rho_x_by_state[MPC_OPT_IDX_EY] = static_cast<float>(
-            declare_parameter<double>("admm_rho_ey", 0.0));
-        rti_config_.solver.rho_x_by_state[MPC_OPT_IDX_U] = static_cast<float>(
-            declare_parameter<double>("admm_rho_forward_speed", 0.0));
-        rti_config_.solver.rho_x_by_state[
-            MPC_OPT_IDX_ACTUAL_STEERING_ANGLE] = static_cast<float>(
-                declare_parameter<double>("admm_rho_actual_steering", 0.0));
-        for (const float rho_state : rti_config_.solver.rho_x_by_state) {
-            if (!std::isfinite(rho_state) ||
-                (rho_state != 0.0f &&
-                 (rho_state < 1.0f || rho_state > 127.0f))) {
-                throw std::runtime_error(
-                    "ADMM state-rho overrides must be zero or in [1, 127]");
-            }
-        }
-        rti_config_.solver.rho_u_by_input[0] = static_cast<float>(
-            declare_parameter<double>("admm_rho_steering", 0.0));
-        rti_config_.solver.rho_u_by_input[1] = static_cast<float>(
-            declare_parameter<double>("admm_rho_throttle", 0.0));
-        for (const float rho_input : rti_config_.solver.rho_u_by_input) {
-            if (!std::isfinite(rho_input) ||
-                (rho_input != 0.0f &&
-                 (rho_input < 1.0f || rho_input > 127.0f))) {
-                throw std::runtime_error(
-                    "admm_rho_steering/throttle must be zero or in [1, 127]");
-            }
-        }
-        rti_config_.solver.rho_max = static_cast<float>(
-            declare_parameter<double>("admm_rho_max", 32.0));
-        if (!std::isfinite(rti_config_.solver.rho_max) ||
-            rti_config_.solver.rho_max < 1.0f ||
-            rti_config_.solver.rho_max > 127.0f) {
-            throw std::runtime_error(
-                "admm_rho_max must be finite and in [1, 127]");
-        }
-        rti_config_.solver.tolerance = static_cast<float>(
-            declare_parameter<double>("solver_tolerance", 0.02));
-        rti_config_.solver.adaptive_rho = declare_parameter<bool>(
-            "adaptive_rho", true) ? 1 : 0;
-        rti_config_.solver.cold_start_each_solve = declare_parameter<bool>(
-            "solver_cold_start_each_solve", false) ? 1 : 0;
-        const int adaptive_rho_update_period = static_cast<int>(
-            declare_parameter<int>("adaptive_rho_update_period", 10));
-        rti_config_.solver.adaptive_rho_update_period = std::clamp(
-            adaptive_rho_update_period, 1, 100);
-        rti_config_.solver.shared_rho = 0;
-        rti_config_.solver.over_relaxation = static_cast<float>(
-            declare_parameter<double>("admm_over_relaxation", 1.6));
-        configure_solver_state_scaling(rti_config_.solver,
-            declare_parameter<bool>("solver_state_scaling_enabled", true));
         RCLCPP_INFO(get_logger(),
-            "MPC solver config: ADMM per-solve max=%u, rho adaptation=%s/%d, "
-            "rho-x overrides=[ey=%.2f,u=%.2f,steer=%.2f], "
-            "rho-u override=[%.2f,%.2f], cold-start=%s, "
-            "Jacobian workers=%d, RTI budget=%.1f ms, end-to-end="
-            "%.1f ms, max command-start lateness=%.1f ms, "
-            "initial publication lead=%.1f ms, "
-            "decision state=%d, plant state=%d, horizon=%d, "
-            "command increment QP=%s",
-            static_cast<unsigned>(rti_config_.solver.max_iterations),
-            rti_config_.solver.adaptive_rho ? "on" : "off",
-            rti_config_.solver.adaptive_rho_update_period,
-            rti_config_.solver.rho_x_by_state[MPC_OPT_IDX_EY],
-            rti_config_.solver.rho_x_by_state[MPC_OPT_IDX_U],
-            rti_config_.solver.rho_x_by_state[
-                MPC_OPT_IDX_ACTUAL_STEERING_ANGLE],
-            rti_config_.solver.rho_u_by_input[0],
-            rti_config_.solver.rho_u_by_input[1],
-            rti_config_.solver.cold_start_each_solve ? "on" : "off",
-            rti_config_.model.jacobian_threads,
-            rti_config_.max_cycle_time_us / 1000.0,
-            end_to_end_cycle_budget_ms_, max_command_start_lateness_ms_,
-            initial_command_publication_lead_ms,
-            MPC_OPTIMIZER_NX, MPC_OPT_PHYSICAL_NX, PREDICTION_HORIZON,
-            rti_config_.model.command_increment_qp_enabled ? "on" : "off");
+            "Source-exact full-step SQP: max_iterations=%d "
+            "curvature=%.1f soft_physical_weight=%.1f "
+            "clearance=%.3fm budget=%.1f/%.1fms "
+            "full_command_range=[%.5f,%.5f]",
+            rti_config_.source_exact_nlp_iterations,
+            rti_config_.source_exact_nlp_qp_regularization,
+            rti_config_.source_exact_nlp_qp_soft_weight,
+            rti_config_.source_exact_nlp_extra_clearance_m,
+            rti_config_.max_cycle_time_us/1000.,
+            end_to_end_cycle_budget_ms_,
+            rti_config_.model.max_steering_command_step_rad,
+            rti_config_.model.max_throttle_command_step);
         mpc_rti_memory_reset(&rti_memory_);
         if (world_map_authority_enabled_) {
             rti_config_.model.world_sweep_check =
@@ -730,9 +425,6 @@ public:
             RCLCPP_ERROR(get_logger(),
                 "MPC has no valid trajectory; controller remains inhibited");
         }
-        certified_plan_ = {};
-        fallback_episode_.reset();
-        clear_validated_recovery_prefix();
         if (!enabled_) {
             RCLCPP_WARN(get_logger(),
                 "MPC is inactive; no command publisher is created");
@@ -949,31 +641,15 @@ private:
          * logging it on the control owner adds no control/safety decision. */
         command_published_this_cycle_ = true;
         last_published_command_stamp_ns_ = command_time.nanoseconds();
-        consecutive_deadline_misses_ = 0;
-        deadline_recovery_pending_ = false;
         return last_published_command_stamp_ns_;
     }
 
-    void report_control_fault(const char * reason,
-                              bool emit_diagnostic = true,
-                              bool reset_rti_memory = true)
+    void report_control_fault(const char *reason,
+                              bool emit_diagnostic=true)
     {
-        if (control_fault_latched_) return;
-        control_fault_latched_ = true;
         ++control_fault_cycles_;
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-            "%s; MPC fault latched and no replacement drive command published",
-            reason);
-        if (reset_rti_memory) {
-            solver_memory_transaction_.clear();
-            mpc_rti_memory_reset(&rti_memory_);
-            certified_plan_ = {};
-            clear_validated_recovery_prefix();
-        }
-        /* A rejected plan is a latched controller fault, not a recovery
-         * command. The run supervisor owns stopping the simulator; the MPC
-         * never substitutes Unity's q=0 active-brake mode. */
-        if (diagnostics_pub_ && emit_diagnostic)
+        RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),1000,"%s",reason);
+        if(emit_diagnostic && diagnostics_pub_)
             publish_cycle_failure(reason);
     }
 
@@ -995,182 +671,6 @@ private:
             end_to_end_ms, end_to_end_cycle_budget_ms_);
         return false;
     }
-
-    bool try_publish_prior_plan(
-        const MpcRtiState_t &state,
-        double progress,
-        int64_t callback_steady_ns,
-        int64_t control_stamp_ns,
-        MpcRtiCycleResult_t *result,
-        const char **fault_reason,
-        bool validate_full_remaining_suffix = false);
-
-    bool seed_nominal_from_certified_plan()
-    {
-        const MpcRtiNominal_t &previous = certified_plan_;
-        if (!previous.valid) return false;
-        MpcModelControl_t controls[PREDICTION_HORIZON]{};
-        const int retained_index = std::max(0, prior_plan_control_index_);
-        const int count = f1tenth_mpc::copy_retained_plan_warm_start(
-            previous.controls, previous.horizon, retained_index,
-            PREDICTION_HORIZON, controls);
-        return mpc_rti_memory_set_warm_start_controls_at_epoch(
-            &rti_memory_, controls, count,
-            certified_plan_epoch_ns_ + static_cast<int64_t>(retained_index) *
-                kBridgeControlPeriodNs) != 0;
-    }
-
-    bool has_revalidatable_prior_plan_action() const
-    {
-        if (!certified_plan_.valid || certified_plan_.horizon < 2) return false;
-        const int next_control_index = prior_plan_control_index_ + 1;
-        return certified_plan_.horizon - next_control_index >=
-            kCommandEffectValidationHorizon;
-    }
-
-    bool has_validated_recovery_prefix() const
-    {
-        return validated_recovery_prefix_valid_ &&
-            validated_recovery_prefix_count_ ==
-                kCommandEffectValidationHorizon;
-    }
-
-    void clear_validated_recovery_prefix()
-    {
-        validated_recovery_prefix_valid_ = false;
-        validated_recovery_prefix_count_ = 0;
-        validated_recovery_prefix_cursor_ = 0;
-        for (auto &control : validated_recovery_prefix_controls_)
-            control = {};
-    }
-
-    void refresh_retained_plan_epochs()
-    {
-        if (certified_plan_.valid) {
-            const int stage = mpc_rti_command_epoch_shift(
-                certified_plan_epoch_ns_, active_command_epoch_ns_, TIME_STEP_SECONDS);
-            if (stage < 0 || stage >= certified_plan_.horizon) {
-                certified_plan_ = {};
-                prior_plan_control_index_ = 0;
-            } else {
-                // -1 permits revalidation of stage zero at a repeated epoch.
-                prior_plan_control_index_ = stage - 1;
-            }
-        }
-        if (has_validated_recovery_prefix()) {
-            const int stage = mpc_rti_command_epoch_shift(
-                validated_recovery_prefix_epoch_ns_, active_command_epoch_ns_,
-                TIME_STEP_SECONDS);
-            if (stage < 0 || stage >= validated_recovery_prefix_count_)
-                clear_validated_recovery_prefix();
-            else validated_recovery_prefix_cursor_ = stage;
-        }
-    }
-
-    void remember_validated_recovery_prefix(
-        const MpcRtiNominal_t &validated)
-    {
-        if (validated.horizon < kCommandEffectValidationHorizon) return;
-        for (int i = 0; i < kCommandEffectValidationHorizon; ++i)
-            validated_recovery_prefix_controls_[i] = validated.controls[i];
-        validated_recovery_prefix_count_ =
-            kCommandEffectValidationHorizon;
-        validated_recovery_prefix_cursor_ = 0;
-        validated_recovery_prefix_epoch_ns_ = active_command_epoch_ns_;
-        validated_recovery_prefix_valid_ = true;
-    }
-
-    bool defer_single_deadline_miss(
-        MpcRtiCycleResult_t *result, double solve_us,
-        int64_t candidate_command_stamp_ns)
-    {
-        if (!result) return false;
-        result->status = MPC_RTI_CYCLE_DEFERRED_DEADLINE;
-        record_cycle_health(MPC_RTI_CYCLE_DEFERRED_DEADLINE,
-            *result, solve_us);
-        ++consecutive_deadline_misses_;
-        if (consecutive_deadline_misses_ > 1) return false;
-
-        deadline_recovery_pending_ = has_revalidatable_prior_plan_action();
-        // The solver commits a mathematical iterate before publication.
-        // A missed publication must never turn that unissued sequence or its
-        // duals into actuator history, even when a certified plan exists.
-        const bool rolled_back = solver_memory_transaction_.rollback(
-            &rti_memory_, candidate_command_stamp_ns);
-        if (!rolled_back) mpc_rti_memory_reset(&rti_memory_);
-        if (deadline_recovery_pending_ && !seed_nominal_from_certified_plan())
-            deadline_recovery_pending_ = false;
-        result->admm_state_reset_for_recovery = rolled_back ? 0 : 1;
-        result->solver_memory_restored_after_deadline = rolled_back ? 1 : 0;
-        if (!deadline_recovery_pending_) {
-            /* The late candidate was never issued, so it cannot seed the next
-             * solve. Without a remaining certified action, retry cold at the
-             * next legal sensor epoch. */
-            certified_plan_ = {};
-            prior_plan_control_index_ = 0;
-        }
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-            deadline_recovery_pending_
-                ? "MPC missed one publication deadline; next cycle will "
-                  "revalidate the prior certified plan"
-                : "MPC missed one publication deadline without a remaining "
-                  "certified action; retrying from a clean nominal next cycle");
-        return true;
-    }
-
-    // Deterministic feasibility restoration: preserve the optimized reference,
-    // but search a small set of transient steering/throttle repairs whenever
-    // the current full-horizon nominal is infeasible or predicts excessive
-    // terminal yaw/slip. Never certify merely the next 75 ms: every published
-    // repair gets the exact source-model and footprint corridor check for all
-    // 30 prediction stages. No track identity or collision-margin override.
-    // A bounded fallback episode needs a NEW, long-horizon safety certificate,
-    // not another 75ms replay of an aging plan. First try the cold native
-    // source-witness command sequence from the currently measured vehicle and
-    // its *real* actuator queues. If it passes the full 750ms source-plant and
-    // corridor/terminal checks, publish it as a certified reacquisition plan.
-    // This search does not override the ordinary fast racing command, does
-    // not reduce speed caps, and is attempted only after repeated failures.
-    bool try_publish_source_reacquisition(
-        const MpcRtiState_t &state, double progress,
-        int64_t callback_steady_ns, int64_t control_stamp_ns,
-        MpcRtiCycleResult_t *result);
-
-    // Distinguish "safe for today's 750ms horizon" from a trajectory that
-    // can be safely continued once one more controller action becomes due.
-    // The actuator queue embedded in the exact terminal plant state is
-    // retained. Two independent, causal 75ms legal extensions are tested,
-    // without source truth from any future measured state. An unsuccessful
-    // probe is only an early warning, NEVER proof all alternatives are
-    // infeasible or permission to relax the body/corridor boundary.
-    bool source_terminal_extension_safe(const MpcRtiNominal_t &plan) const
-    {
-        return mpc_rti_terminal_extension_probe(
-            &plan,trajectory_.data(),trajectory_.size(),track_length_m_,
-            TIME_STEP_SECONDS,&rti_config_)!=0;
-    }
-
-    bool try_publish_viability_recovery(
-        const MpcRtiState_t &state, double progress,
-        int64_t callback_steady_ns, int64_t control_stamp_ns,
-        MpcRtiCycleResult_t *result);
-
-    bool try_publish_quality_aware_prefix(
-        const MpcRtiState_t &state,
-        double progress,
-        int64_t callback_steady_ns,
-        int64_t control_stamp_ns,
-        MpcRtiCycleResult_t *result,
-        bool *attempted,
-        const char **fault_reason);
-
-    bool try_publish_candidate_prefix(
-        const MpcRtiState_t &state,
-        double progress,
-        int64_t callback_steady_ns,
-        int64_t control_stamp_ns,
-        MpcRtiCycleResult_t *result,
-        const char **fault_reason);
 
     void publish_cycle_failure(const char * reason)
     {
@@ -1229,61 +729,31 @@ private:
     }
 
     void record_cycle_health(MpcRtiCycleStatus_t status,
-                             const MpcRtiCycleResult_t & result,
+                             const MpcRtiCycleResult_t &result,
                              double solve_us)
     {
         ++control_cycles_;
-        if (fallback_max_short_prefix_actions_ > 0) {
-            if (status == MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN ||
-                status == MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX)
-                fallback_episode_.record_short_action();
-            else if (status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
-                     status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE ||
-                     status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH)
-                fallback_episode_.record_full_action();
-            else if (status == MPC_RTI_CYCLE_ACCEPTED_VIABILITY_RECOVERY)
-                fallback_episode_.reset();
-        }
-        if (status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL) ++accepted_optimal_;
-        else if (status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE)
+        if(status==MPC_RTI_CYCLE_ACCEPTED_FEASIBLE)
             ++accepted_feasible_;
-        else if (status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH)
-            ++accepted_line_search_;
-        else if (status == MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX)
-            ++accepted_candidate_prefix_;
-        else if (status == MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN)
-            ++accepted_prior_plan_;
-        else if (status == MPC_RTI_CYCLE_ACCEPTED_VIABILITY_RECOVERY)
-            ++accepted_viability_recovery_;
-        else if (status == MPC_RTI_CYCLE_DEFERRED_DEADLINE)
-            ++deadline_miss_cycles_;
-        max_solver_iterations_seen_ = std::max(
-            max_solver_iterations_seen_, result.solver_iterations);
-        max_solve_us_ = std::max(max_solve_us_, solve_us);
-        if (control_cycles_ % 400 == 0) report_health("periodic");
+        max_solver_iterations_seen_=std::max(
+            max_solver_iterations_seen_,
+            result.source_exact_nlp_source_trial_evaluations);
+        max_solve_us_=std::max(max_solve_us_,solve_us);
+        if(control_cycles_%400==0)report_health("periodic");
     }
 
-    void report_health(const char * phase)
+    void report_health(const char *phase)
     {
         RCLCPP_INFO(get_logger(),
-            "MPC health (%s): control_cycles=%llu accepted_optimal=%llu "
-            "accepted_feasible=%llu accepted_line_search=%llu "
-            "accepted_candidate_prefix=%llu "
-            "accepted_prior_plan=%llu accepted_viability_recovery=%llu "
-            "deadline_miss_cycles=%llu "
-            "control_fault_cycles=%llu max_solver_iterations_seen=%d "
-            "max_solve_us=%.1f",
+            "Source SQP health (%s): cycles=%llu feasible=%llu "
+            "publication_misses=%llu input_faults=%llu "
+            "max_sqp_iterations=%d max_solve_us=%.1f",
             phase,
             static_cast<unsigned long long>(control_cycles_),
-            static_cast<unsigned long long>(accepted_optimal_),
             static_cast<unsigned long long>(accepted_feasible_),
-            static_cast<unsigned long long>(accepted_line_search_),
-            static_cast<unsigned long long>(accepted_candidate_prefix_),
-            static_cast<unsigned long long>(accepted_prior_plan_),
-            static_cast<unsigned long long>(accepted_viability_recovery_),
             static_cast<unsigned long long>(deadline_miss_cycles_),
             static_cast<unsigned long long>(control_fault_cycles_),
-            max_solver_iterations_seen_, max_solve_us_);
+            max_solver_iterations_seen_,max_solve_us_);
     }
 
     static const char * cycle_status_name(MpcRtiCycleStatus_t status)
@@ -1547,7 +1017,7 @@ private:
         }
         if (odom_stamp.nanoseconds() <= 0) odom_stamp = now();
 
-        if (!enabled_ || control_fault_latched_) return;
+        if (!enabled_) return;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             latest_odom_ingest_status_ = state_synchronizer_.push_odometry({
@@ -1581,54 +1051,7 @@ private:
         last_command_history_us_ = NAN;
         last_middleware_publish_end_ns_ = 0;
         command_published_this_cycle_ = false;
-        prior_plan_revalidation_attempted_ = false;
-        prior_plan_exact_valid_ = false;
-        prior_plan_timing_rejected_ = false;
-        prior_plan_validation_us_ = 0.0;
-        quality_prefix_attempted_ = false;
-        quality_prefix_choice_ = "none";
-        quality_prefix_clearance_override_ = false;
-        quality_prefix_near_boundary_controls_bounded_ = false;
-        quality_prefix_near_boundary_override_ = false;
-        quality_prefix_stale_prior_refresh_ = false;
-        quality_prefix_yaw_direction_guard_ = false;
-        quality_prefix_prior_is_recovery_ = false;
-        quality_candidate_prefix_valid_ = false;
-        quality_prior_prefix_valid_ = false;
-        quality_candidate_prefix_objective_ =
-            std::numeric_limits<double>::quiet_NaN();
-        quality_prior_prefix_objective_ =
-            std::numeric_limits<double>::quiet_NaN();
-        quality_candidate_prefix_slack_m_ =
-            std::numeric_limits<double>::quiet_NaN();
-        quality_prior_prefix_slack_m_ =
-            std::numeric_limits<double>::quiet_NaN();
-        quality_prefix_validation_us_ = 0.0;
-        quality_candidate_control_count_ = 0;
-        quality_prior_control_count_ = 0;
-        full_prior_suffix_revalidation_attempted_ = false;
-        full_prior_suffix_exact_valid_ = false;
-        full_prior_suffix_timing_rejected_ = false;
-        full_prior_suffix_validation_horizon_ = 0;
-        full_prior_suffix_validation_status_ = -1;
-        full_prior_suffix_failure_stage_ = -1;
-        full_prior_suffix_validation_us_ = 0.0;
-        prior_plan_validated_horizon_ = 0;
-        prior_plan_validated_control_index_ = -1;
-        prior_plan_actions_remaining_ = 0;
-        candidate_prefix_revalidation_attempted_ = false;
-        candidate_prefix_exact_valid_ = false;
-        candidate_prefix_timing_rejected_ = false;
-        candidate_prefix_validation_us_ = 0.0;
-        candidate_prefix_validation_horizon_ = 0;
-        candidate_prefix_iteration_limited_ = false;
-        candidate_prefix_residual_quality_ = false;
-        prior_plan_validation_status_ = -1;
-        prior_plan_validation_failure_stage_ = -1;
-        candidate_prefix_solver_converged_ = false;
-        candidate_prefix_validation_status_ = -1;
-        candidate_prefix_validation_failure_stage_ = -1;
-        if (!enabled_ || control_fault_latched_) return;
+        if (!enabled_) return;
         // Only this control thread writes the snapshot. The map subscription
         // atomically publishes a new immutable grid, which will become
         // authoritative on the NEXT control cycle. This pins every sweep
@@ -1838,7 +1261,6 @@ private:
         }
 
         active_command_epoch_ns_ = candidate_command_stamp_ns;
-        refresh_retained_plan_epochs();
 
         const rclcpp::Time state_stamp(
             coherent_state.source_stamp_ns, get_clock()->get_clock_type());
@@ -2084,272 +1506,51 @@ private:
         state.plant.r = static_cast<float>(command_time_state.yaw_rate);
 
 
-        MpcRtiCycleResult_t result{};
-        if (!rti_config_.native_source_reduced_sqp &&
-            deadline_recovery_pending_) {
-            deadline_recovery_pending_ = false;
-            const bool seeded = seed_nominal_from_certified_plan();
-            const char * recovery_reason = nullptr;
-            if (try_publish_prior_plan(state, last_projected_s_,
-                    callback_steady_ns, control_stamp_ns,
-                    &result,
-                    &recovery_reason)) {
-                record_cycle_health(MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN,
-                    result, 0.0);
-                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                    "Recovered from an isolated deadline miss by publishing "
-                    "the next action from the prior certified plan");
-                if (diagnostics_pub_)
-                    publish_cycle_diagnostics(state, coherent_state,
-                        control_time_prediction, control_prediction_us,
-                        last_projected_s_, source_dt, result, 0.0,
-                        control_ros_time.nanoseconds(),
-                        candidate_command_stamp_ns, callback_steady_ns,
-                        synchronize_steady_ns);
-                return;
-            }
-            if (prior_plan_timing_rejected_) {
-                const bool may_retry = defer_single_deadline_miss(
-                    &result, 0.0, candidate_command_stamp_ns);
-                if (diagnostics_pub_)
-                    publish_cycle_diagnostics(state, coherent_state,
-                        control_time_prediction, control_prediction_us,
-                        last_projected_s_, source_dt, result, 0.0,
-                        control_ros_time.nanoseconds(),
-                        candidate_command_stamp_ns, callback_steady_ns,
-                        synchronize_steady_ns);
-                if (!may_retry) {
-                    report_control_fault(recovery_reason ? recovery_reason :
-                        "consecutive publication deadlines missed during "
-                        "prior-plan recovery", false);
-                    publish_cycle_failure(recovery_reason ? recovery_reason :
-                        "consecutive publication deadlines missed during "
-                        "prior-plan recovery");
-                }
-                return;
-            }
-            if (!seeded) {
-                mpc_rti_memory_reset(&rti_memory_);
-                certified_plan_ = {};
-                prior_plan_control_index_ = 0;
-            }
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                "Prior plan failed current-state revalidation after deadline "
-                "miss; resolving a new MPC plan this cycle (%s)",
-                recovery_reason ? recovery_reason : "unknown validation failure");
-        }
-        // A short prefix updates ADMM but also seeds the next full nominal
-        // with a stale, unverified tail. After an isolated fallback, discard
-        // that TAIL before solving. The new source-witness seed is rolled out
-        // from the current plant/queued actuator state, with no map-specific
-        // speed reduction or relaxation of physical corridor constraints.
-        if (!rti_config_.native_source_reduced_sqp &&
-            fallback_max_short_prefix_actions_ > 0 &&
-            fallback_episode_.last_published_action_was_short_prefix()) {
-            if (fallback_retain_validated_seed_enabled_) {
-                f1tenth_mpc::reseed_after_bounded_fallback(
-                    &rti_memory_,fallback_episode_,
-                    kCommandEffectValidationHorizon);
-            } else {
-                rti_memory_.nominal.valid = 0;
-                rti_memory_.warm_start_controls_valid = 0;
-                rti_memory_.warm_start_control_count = 0;
-                mpc_rti_memory_reset_solver_state(&rti_memory_);
-            }
-        }
-        if (!rti_config_.native_source_reduced_sqp &&
-            try_publish_source_reacquisition(state,last_projected_s_,
-                callback_steady_ns,control_stamp_ns,&result)) {
-            record_cycle_health(MPC_RTI_CYCLE_ACCEPTED_VIABILITY_RECOVERY,
-                result,0.0);
-            if (diagnostics_pub_)
-                publish_cycle_diagnostics(state,coherent_state,
-                    control_time_prediction,control_prediction_us,
-                    last_projected_s_,source_dt,result,0.0,
-                    control_ros_time.nanoseconds(),candidate_command_stamp_ns,
-                    callback_steady_ns,synchronize_steady_ns);
-            return;
-        }
-        // The source MPC must never replan an earlier target command epoch
-        // after a later one has ALREADY been accepted and issued. Live 40Hz
-        // sensor/ROS timing can produce a ~0.3ms backwards epoch when a
-        // bridge callback arrives late. Treat that input as superseded,
-        // instead of invalidating the certified warm start and constructing
-        // a new reference seed in the middle of a fast corner. No new
-        // control is published for a superseded epoch; the next coherent
-        // epoch runs the SAME source MPC from fresh state observations.
-        if(rti_config_.native_source_reduced_sqp &&
-           rti_memory_.warm_start_controls_valid &&
-           rti_memory_.command_epoch_ns>0 &&
-           candidate_command_stamp_ns<rti_memory_.command_epoch_ns) {
+        // One source-exact nonlinear SQP, one validated full-horizon
+        // solution, one actuator publication. No prior-plan publication,
+        // short prefix, alternate QP, recovery trajectory or brake fallback.
+        if (rti_memory_.command_epoch_ns>0 &&
+            rti_memory_.warm_start_controls_valid &&
+            candidate_command_stamp_ns<rti_memory_.command_epoch_ns) {
             RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),1000,
-                "Native source MPC suppressed regressing command epoch "
-                "(candidate=%lld, last_issued_plan=%lld, delta=%.3fms); "
-                "no competing or stale command published",
+                "Ignoring older MPC command epoch (%lld < %lld)",
                 static_cast<long long>(candidate_command_stamp_ns),
-                static_cast<long long>(rti_memory_.command_epoch_ns),
-                (candidate_command_stamp_ns-rti_memory_.command_epoch_ns)*1.e-6);
+                static_cast<long long>(rti_memory_.command_epoch_ns));
             return;
         }
-        const auto solve_start = std::chrono::steady_clock::now();
-        MpcRtiCycleConfiguration_t cycle_configuration = rti_config_;
-        cycle_configuration.command_epoch_ns = candidate_command_stamp_ns;
-        if (qp_failure_recorder_) {
-            qp_capture_r1_->valid = 0;
-            qp_capture_r2_->valid = 0;
-            cycle_configuration.qp_capture = qp_capture_r1_.get();
-            cycle_configuration.qp_capture_second_pass = qp_capture_r2_.get();
-        }
-        cycle_configuration.prefer_feasibility_first =
-            cycle_configuration.enable_feasibility_restoration &&
-            (normal_feasibility_first_enabled_ ||
-             (fallback_max_short_prefix_actions_ > 0 &&
-              fallback_episode_.last_published_action_was_short_prefix()));
-        cycle_configuration.absolute_deadline_monotonic_us =
+        const auto solve_begin=std::chrono::steady_clock::now();
+        MpcRtiCycleConfiguration_t cycle_configuration=rti_config_;
+        cycle_configuration.command_epoch_ns=candidate_command_stamp_ns;
+        cycle_configuration.absolute_deadline_monotonic_us=
             callback_deadline_us;
-        cycle_configuration.line_search_command_epoch_valid =
-            control_stamp_ns > 0 && candidate_command_stamp_ns >=
-                control_stamp_ns ? 1 : 0;
-        /* Solves are provisional until their first action is issued.
-         * A missed publication restores the last issued full-horizon
-         * optimizer state, not the unissued candidate or an empty ADMM. */
+        MpcRtiCycleResult_t result{};
         solver_memory_transaction_.begin(rti_memory_,
             candidate_command_stamp_ns,
-            certified_plan_.valid && last_published_command_stamp_ns_>0 &&
-            !fallback_episode_.last_published_action_was_short_prefix());
-        MpcRtiCycleStatus_t status = mpc_rti_solve_cycle(
-            &state, last_projected_s_, trajectory_.data(), trajectory_.size(),
-            track_length_m_, TIME_STEP_SECONDS, PREDICTION_HORIZON,
-            &cycle_configuration, &rti_memory_, &result);
-        const auto solve_finish = std::chrono::steady_clock::now();
-        const double solve_us = std::chrono::duration<double, std::micro>(
-            solve_finish - solve_start).count();
-        if (status == MPC_RTI_CYCLE_WAITING_FOR_SOLVER_BUDGET &&
-            !rti_memory_.nominal.valid &&
-            std::abs(state.plant.u) <= kStationaryStartupRetrySpeedMps &&
-            std::abs(state.plant.v) <= kStationaryStartupRetrySpeedMps &&
-            std::abs(state.plant.r) <=
-                kStationaryStartupRetryYawRateRadps) {
-            /* No command has been accepted, so there is no safe prior action
-             * to reuse. At spawn the vehicle can remain stationary for one
-             * 25 ms tick and retry the cold solve; never turn this into a
-             * moving-state or late-command fallback. */
-            record_cycle_health(status, result, solve_us);
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                "Startup solve deferred: Jacobian build consumed the reserved "
-                "ADMM budget; retrying next control tick while stationary");
-            if (diagnostics_pub_)
-                publish_cycle_diagnostics(state, coherent_state,
-                    control_time_prediction, control_prediction_us,
-                    last_projected_s_, source_dt, result, solve_us,
-                    control_ros_time.nanoseconds(), candidate_command_stamp_ns,
-                    callback_steady_ns, synchronize_steady_ns);
-            return;
-        }
-        if (status == MPC_RTI_CYCLE_WAITING_FOR_SOLVER_BUDGET) {
-            if (rti_config_.native_source_reduced_sqp) {
-                // A missed optimizer deadline is NOT a source infeasibility
-                // certificate and not a simulator collision. The normal
-                // isolated source MPC runs next cycle from a newly
-                // synchronized state. Never publish the overdue solution,
-                // a fabricated full brake or any legacy recovery controller.
-                // The actuator may retain its last issued command for this
-                // single publication gap; diagnostics expose the exact miss.
-                record_cycle_health(status,result,solve_us);
-                RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),1000,
-                    "Native source SQP publication deadline missed "
-                    "(%.3fms solver); no stale or unchecked command published",
-                    solve_us/1000.);
-                if(diagnostics_pub_)
-                    publish_cycle_diagnostics(state,coherent_state,
-                        control_time_prediction,control_prediction_us,
-                        last_projected_s_,source_dt,result,solve_us,
-                        control_ros_time.nanoseconds(),
-                        candidate_command_stamp_ns,callback_steady_ns,
-                        synchronize_steady_ns);
-                return;
-            }
-            // The established non-source controller retains its existing
-            // deadline recovery/validation behavior unchanged.
-            status = MPC_RTI_CYCLE_REJECTED_SOLVER;
-            result.status = status;
-        }
-        /* Record the first exact-valid alpha=0 stagnation cycle (then one
-         * every eight such cycles), up to 12 total, as an optional forensic
-         * fixture. These cycles look "accepted" but make no new SQP progress
-         * and frequently precede the inevitable stage-0 wall rejection.
-         * All binary snapshots are persisted by the existing async recorder;
-         * never serialize on the control thread. Disabled in normal races. */
-        const bool zero_alpha_stagnation =
-            status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH &&
-            result.line_search_selected_alpha == 0.f;
-        if (zero_alpha_stagnation)
-            ++forensic_alpha_zero_streak_;
-        else
-            forensic_alpha_zero_streak_=0;
-        const bool capture_stagnation =
-            qp_failure_recorder_ && forensic_capture_alpha_zero_enabled_ &&
-            zero_alpha_stagnation &&
-            last_projected_s_>=forensic_capture_progress_min_m_ &&
-            forensic_alpha_zero_captures_<12 &&
-            (forensic_alpha_zero_streak_ == 1 ||
-             forensic_alpha_zero_streak_ % 8 == 0);
-        /* Capture the EARLY RECOVERABLE predecessor of a wall-frontier
-         * failure, not just the final stage-0 rejected cycle. Stratify the
-         * strict source-plan slack into four physical reserve bands so a
-         * long stream of ordinary near-wall solutions cannot fill the
-         * 12-slot asynchronous forensic budget before the critical event. */
-        const bool successful_sqp_cycle =
-            status == MPC_RTI_CYCLE_ACCEPTED_OPTIMAL ||
-            status == MPC_RTI_CYCLE_ACCEPTED_FEASIBLE ||
-            status == MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH;
-        const double slack=result.minimum_predicted_corridor_slack_m;
-        int near_wall_bucket=-1;
-        if (successful_sqp_cycle && std::isfinite(slack) && slack>=0.) {
-            if (slack<.0005) near_wall_bucket=3;
-            else if (slack<.002) near_wall_bucket=2;
-            else if (slack<.005) near_wall_bucket=1;
-            else if (slack<.01) near_wall_bucket=0;
-        }
-        const bool capture_near_wall = qp_failure_recorder_ &&
-            forensic_capture_near_wall_enabled_ && near_wall_bucket>=0 &&
-            last_projected_s_>=forensic_capture_progress_min_m_ &&
-            forensic_near_wall_bucket_counts_[near_wall_bucket]<3 &&
-            ++forensic_near_wall_bucket_seen_[near_wall_bucket]%4 == 1;
-        if (qp_failure_recorder_ && (
-            (status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
-             status != MPC_RTI_CYCLE_ACCEPTED_FEASIBLE &&
-             status != MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH) ||
-            capture_stagnation || capture_near_wall)) {
-            if (capture_stagnation) ++forensic_alpha_zero_captures_;
-            if (capture_near_wall)
-                ++forensic_near_wall_bucket_counts_[near_wall_bucket];
-            qp_failure_recorder_->submit(candidate_command_stamp_ns,
-                last_projected_s_, rti_config_.model.active_speed_ceiling_mps,
-                state, status, result, cycle_configuration,
-                trajectory_.data(), trajectory_.size(), track_length_m_,
-                TIME_STEP_SECONDS, qp_capture_r1_.get(),
-                qp_capture_r2_.get());
-        }
-        // The experimental native source SQP is the ONLY control owner
-        // when selected. A rejected/incomplete source horizon cannot silently
-        // fall through into the legacy viability, short-prefix, or retained-
-        // plan publishers; those would contaminate real convergence tests
-        // and carry different objective/safety policies. The source solver
-        // alone must produce a 30-stage source-certified command, and failure
-        // remains visible in cycle diagnostics without a fabricated brake
-        // command or simulator shutdown. Simulator collision protection
-        // remains independent and unchanged.
-        if (rti_config_.native_source_reduced_sqp &&
-            status != MPC_RTI_CYCLE_ACCEPTED_FEASIBLE) {
-            record_cycle_health(status,result,solve_us);
+            rti_memory_.nominal.valid &&
+            last_published_command_stamp_ns_>0);
+        const auto status=mpc_rti_solve_cycle(
+            &state,last_projected_s_,trajectory_.data(),trajectory_.size(),
+            track_length_m_,TIME_STEP_SECONDS,PREDICTION_HORIZON,
+            &cycle_configuration,&rti_memory_,&result);
+        const double solve_us=std::chrono::duration<double,std::micro>(
+            std::chrono::steady_clock::now()-solve_begin).count();
+        record_cycle_health(status,result,solve_us);
+        if(status!=MPC_RTI_CYCLE_ACCEPTED_FEASIBLE) {
+            // An unsuccessful solve never issues an unchecked or stale
+            // command. It also never latches a permanent fault, so the
+            // SAME NLP can run again at the next synchronized epoch.
+            solver_memory_transaction_.rollback(
+                &rti_memory_,candidate_command_stamp_ns);
             RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),1000,
-                "Native source SQP did not certify a publishable 30-stage "
-                "solution (status=%s, source wall V=%.6g, "
-                "QP status=%d, elapsed=%.2fms); no legacy command issued",
+                "Source SQP could not publish: status=%s, "
+                "feasible=%d, SQP_steps=%d, source_evals=%d, "
+                "clearance=%.4f m, wall=%.3f ms",
                 cycle_status_name(status),
-                result.native_source_sqp_final_wall_violation_m2,
-                result.native_source_sqp_last_qp_status,solve_us/1000.);
+                result.source_exact_nlp_final_source_feasible,
+                result.source_exact_nlp_accepted_iterations,
+                result.source_exact_nlp_source_trial_evaluations,
+                result.source_exact_nlp_final_original_margin_m,
+                solve_us/1000.);
             if(diagnostics_pub_)
                 publish_cycle_diagnostics(state,coherent_state,
                     control_time_prediction,control_prediction_us,
@@ -2359,323 +1560,55 @@ private:
                     synchronize_steady_ns);
             return;
         }
-        if (try_publish_viability_recovery(
-                state, last_projected_s_, callback_steady_ns,
-                control_stamp_ns, &result)) {
-            record_cycle_health(MPC_RTI_CYCLE_ACCEPTED_VIABILITY_RECOVERY,
-                result, solve_us);
-            if (diagnostics_pub_)
-                publish_cycle_diagnostics(state, coherent_state,
-                    control_time_prediction, control_prediction_us,
-                    last_projected_s_, source_dt, result, solve_us,
-                    control_ros_time.nanoseconds(), candidate_command_stamp_ns,
-                    callback_steady_ns, synchronize_steady_ns);
-            return;
-        }
-        if (status != MPC_RTI_CYCLE_ACCEPTED_OPTIMAL &&
-            status != MPC_RTI_CYCLE_ACCEPTED_FEASIBLE &&
-            status != MPC_RTI_CYCLE_ACCEPTED_LINE_SEARCH) {
-            if (prefer_full_validated_prior_plan_on_rejection_) {
-                const char *full_prior_failure_reason = nullptr;
-                if (try_publish_prior_plan(state, last_projected_s_,
-                        callback_steady_ns, control_stamp_ns,
-                        &result,
-                        &full_prior_failure_reason, true)) {
-                    record_cycle_health(MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN,
-                        result, solve_us);
-                    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                        "MPC candidate rejected; reused retained plan only "
-                        "after exact validation of its full remaining suffix");
-                    if (diagnostics_pub_)
-                        publish_cycle_diagnostics(state, coherent_state,
-                            control_time_prediction, control_prediction_us,
-                            last_projected_s_, source_dt, result, solve_us,
-                            control_ros_time.nanoseconds(),
-                            candidate_command_stamp_ns, callback_steady_ns,
-                            synchronize_steady_ns);
-                    return;
-                }
-                if (prior_plan_timing_rejected_) {
-                    const bool may_retry = defer_single_deadline_miss(
-                    &result, solve_us, candidate_command_stamp_ns);
-                    if (diagnostics_pub_)
-                        publish_cycle_diagnostics(state, coherent_state,
-                            control_time_prediction, control_prediction_us,
-                            last_projected_s_, source_dt, result, solve_us,
-                            control_ros_time.nanoseconds(),
-                            candidate_command_stamp_ns, callback_steady_ns,
-                            synchronize_steady_ns);
-                    if (!may_retry) {
-                        report_control_fault(full_prior_failure_reason, false);
-                        publish_cycle_failure(full_prior_failure_reason);
-                    }
-                    return;
-                }
-            }
-            bool quality_attempted = false;
-            const char *quality_failure_reason = nullptr;
-            if (try_publish_quality_aware_prefix(state, last_projected_s_,
-                    callback_steady_ns, control_stamp_ns,
-                    &result,
-                    &quality_attempted, &quality_failure_reason)) {
-                record_cycle_health(result.status, result, solve_us);
-                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                    "Rejected full MPC horizon; selected %s after exact "
-                    "75 ms candidate/prior source-plant validation "
-                    "(objectives %.6g / %.6g)",
-                    quality_prefix_choice_.c_str(),
-                    quality_candidate_prefix_objective_,
-                    quality_prior_prefix_objective_);
-                if (diagnostics_pub_)
-                    publish_cycle_diagnostics(state, coherent_state,
-                        control_time_prediction, control_prediction_us,
-                        last_projected_s_, source_dt, result, solve_us,
-                        control_ros_time.nanoseconds(),
-                        candidate_command_stamp_ns, callback_steady_ns,
-                        synchronize_steady_ns);
-                return;
-            }
-            if (quality_attempted) {
-                const bool quality_deadline_miss =
-                    candidate_prefix_timing_rejected_ ||
-                    prior_plan_timing_rejected_;
-                const bool may_retry = quality_deadline_miss &&
-                    defer_single_deadline_miss(
-                    &result, solve_us, candidate_command_stamp_ns);
-                if (diagnostics_pub_)
-                    publish_cycle_diagnostics(state, coherent_state,
-                        control_time_prediction, control_prediction_us,
-                        last_projected_s_, source_dt, result, solve_us,
-                        control_ros_time.nanoseconds(),
-                        candidate_command_stamp_ns, callback_steady_ns,
-                        synchronize_steady_ns);
-                if (quality_deadline_miss) {
-                    if (!may_retry) {
-                        report_control_fault(quality_failure_reason, false);
-                        publish_cycle_failure(quality_failure_reason);
-                    }
-                    return;
-                }
-                record_cycle_health(status, result, solve_us);
-                report_control_fault(quality_failure_reason, false);
-                publish_cycle_failure(quality_failure_reason);
-                return;
-            }
-            const char *candidate_prefix_failure_reason = nullptr;
-            if (try_publish_candidate_prefix(state, last_projected_s_,
-                    callback_steady_ns, control_stamp_ns,
-                    &result,
-                    &candidate_prefix_failure_reason)) {
-                record_cycle_health(
-                    MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX,
-                    result, solve_us);
-                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                    "Full MPC horizon rejected; published its exact-validated "
-                    "next 25 ms candidate action; no full retained-plan "
-                    "suffix was certified for this state");
-                if (diagnostics_pub_)
-                    publish_cycle_diagnostics(state, coherent_state,
-                        control_time_prediction, control_prediction_us,
-                        last_projected_s_, source_dt, result, solve_us,
-                        control_ros_time.nanoseconds(),
-                        candidate_command_stamp_ns, callback_steady_ns,
-                        synchronize_steady_ns);
-                return;
-            }
-            if (candidate_prefix_timing_rejected_) {
-                const bool may_retry = defer_single_deadline_miss(
-                    &result, solve_us, candidate_command_stamp_ns);
-                if (diagnostics_pub_)
-                    publish_cycle_diagnostics(state, coherent_state,
-                        control_time_prediction, control_prediction_us,
-                        last_projected_s_, source_dt, result, solve_us,
-                        control_ros_time.nanoseconds(),
-                        candidate_command_stamp_ns, callback_steady_ns,
-                        synchronize_steady_ns);
-                if (!may_retry) {
-                    report_control_fault(candidate_prefix_failure_reason, false);
-                    publish_cycle_failure(candidate_prefix_failure_reason);
-                }
-                return;
-            }
-            const char * reuse_failure_reason = nullptr;
-            if (try_publish_prior_plan(state, last_projected_s_,
-                    callback_steady_ns, control_stamp_ns,
-                    &result, &reuse_failure_reason)) {
-                record_cycle_health(MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN,
-                    result, solve_us);
-                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                    "MPC solve status=%s; published next action from the "
-                    "last accepted plan after exact current-state validation",
-                    cycle_status_name(status));
-                if (diagnostics_pub_)
-                    publish_cycle_diagnostics(state, coherent_state,
-                        control_time_prediction, control_prediction_us,
-                        last_projected_s_, source_dt, result, solve_us,
-                        control_ros_time.nanoseconds(),
-                        candidate_command_stamp_ns, callback_steady_ns,
-                        synchronize_steady_ns);
-                return;
-            }
-            if (prior_plan_timing_rejected_) {
-                const bool may_retry = defer_single_deadline_miss(
-                    &result, solve_us, candidate_command_stamp_ns);
-                if (diagnostics_pub_)
-                    publish_cycle_diagnostics(state, coherent_state,
-                        control_time_prediction, control_prediction_us,
-                        last_projected_s_, source_dt, result, solve_us,
-                        control_ros_time.nanoseconds(),
-                        candidate_command_stamp_ns, callback_steady_ns,
-                        synchronize_steady_ns);
-                if (!may_retry) {
-                    report_control_fault(reuse_failure_reason, false);
-                    publish_cycle_failure(reuse_failure_reason);
-                }
-                return;
-            }
-            record_cycle_health(status, result, solve_us);
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
-                "MPC cycle rejected: %s ADMM=%d iterations=%d "
-                "residual=(%.6g,%.6g) "
-                "regularization=(%.6g,%d) nonsmooth_columns=%d "
-                "rho=(%.4g->%.4g,%.4g->%.4g) rho_changes=%d "
-                "nonlinear_failure=(reason=%d,stage=%d) "
-                "state=(ey=%.3f,epsi=%.3f,u=%.3f,r=%.3f)",
-                cycle_status_name(status), result.admm_status,
-                result.solver_iterations,
-                result.primal_residual, result.dual_residual,
-                result.maximum_regularization, result.regularization_count,
-                result.nonsmooth_jacobian_columns,
-                result.rho_start, result.rho_final,
-                result.rho_u_start, result.rho_u_final,
-                result.rho_change_count,
-                result.nonlinear_failure_reason,
-                result.nonlinear_failure_stage,
-                state.plant.e_y, state.plant.e_psi, state.plant.u,
-                state.plant.r);
-            if (diagnostics_pub_)
-                publish_cycle_diagnostics(state, coherent_state,
-                    control_time_prediction, control_prediction_us,
-                    last_projected_s_, source_dt, result, solve_us,
-                    control_ros_time.nanoseconds(), candidate_command_stamp_ns,
-                    callback_steady_ns,
+        const char *failure_reason=nullptr;
+        if(!cycle_time_is_valid(callback_steady_ns,&failure_reason)) {
+            // Optimization is not complete until a command is published.
+            // Roll back the non-issued warm-start transaction.
+            if(!solver_memory_transaction_.rollback(
+                   &rti_memory_,candidate_command_stamp_ns))
+                mpc_rti_memory_reset(&rti_memory_);
+            ++deadline_miss_cycles_;
+            if(diagnostics_pub_)
+                publish_cycle_diagnostics(state,coherent_state,
+                    control_time_prediction,control_prediction_us,
+                    last_projected_s_,source_dt,result,solve_us,
+                    control_ros_time.nanoseconds(),
+                    candidate_command_stamp_ns,callback_steady_ns,
                     synchronize_steady_ns);
-            /* The detailed cycle snapshot above is the authoritative fault
-             * record. The bounded diagnostic publisher may coalesce pending
-             * frames; enqueueing a second generic `status=rejected` message
-             * here can replace the state, nonlinear reason and failing stage
-             * that are needed to diagnose this fault. */
-            report_control_fault(
-                reuse_failure_reason ? reuse_failure_reason :
-                    (candidate_prefix_failure_reason
-                        ? candidate_prefix_failure_reason
-                        : "MPC RTI cycle had no exact-feasible candidate"),
-                false);
             return;
         }
-
-        /* A numerically accepted plan is not publishable if its command-time
-         * state is already stale or if state acquisition through validation
-         * crossed the configured publication budget. Command-start prediction
-         * age is reported separately and does not invalidate an exact-feasible plan.
-         * Full diagnostics are serialized after command publication so a
-         * debug recording cannot consume the control deadline. */
-        const char * timing_fault_reason = nullptr;
-        if (enabled_ && !cycle_time_is_valid(callback_steady_ns,
-                &timing_fault_reason)) {
-            const bool may_retry = defer_single_deadline_miss(
-                    &result, solve_us, candidate_command_stamp_ns);
-            if (diagnostics_pub_)
-                publish_cycle_diagnostics(state, coherent_state,
-                    control_time_prediction, control_prediction_us,
-                    last_projected_s_, source_dt, result, solve_us,
-                    control_ros_time.nanoseconds(), candidate_command_stamp_ns,
-                    callback_steady_ns, synchronize_steady_ns);
-            if (!may_retry) {
-                report_control_fault(timing_fault_reason, false);
-                publish_cycle_failure(timing_fault_reason);
-            }
-            return;
-        }
-        if (enabled_) {
-            const char *publication_fault_reason = nullptr;
-            const int64_t command_stamp_ns = publish_command(
-                result.published_steering_command,
-                result.published_throttle, callback_steady_ns,
-                &publication_fault_reason);
-            if (command_stamp_ns == 0) {
-                if (last_publication_gate_elapsed_ms_ >=
-                        end_to_end_cycle_budget_ms_) {
-                    const bool may_retry = defer_single_deadline_miss(
-                    &result, solve_us, candidate_command_stamp_ns);
-                    if (diagnostics_pub_)
-                        publish_cycle_diagnostics(state, coherent_state,
-                            control_time_prediction, control_prediction_us,
-                            last_projected_s_, source_dt, result, solve_us,
-                            control_ros_time.nanoseconds(),
-                            candidate_command_stamp_ns, callback_steady_ns,
-                            synchronize_steady_ns);
-                    if (!may_retry) {
-                        report_control_fault(publication_fault_reason ?
-                            publication_fault_reason :
-                            "consecutive publication deadlines missed", false);
-                        publish_cycle_failure(publication_fault_reason ?
-                            publication_fault_reason :
-                            "consecutive publication deadlines missed");
-                    }
-                    return;
-                }
-                if (diagnostics_pub_)
-                    publish_cycle_diagnostics(state, coherent_state,
-                        control_time_prediction, control_prediction_us,
-                        last_projected_s_, source_dt, result, solve_us,
+        if(enabled_) {
+            const int64_t issued_stamp=publish_command(
+                result.published_steering_command,result.published_throttle,
+                callback_steady_ns,&failure_reason);
+            if(!issued_stamp) {
+                if(!solver_memory_transaction_.rollback(
+                       &rti_memory_,candidate_command_stamp_ns))
+                    mpc_rti_memory_reset(&rti_memory_);
+                ++deadline_miss_cycles_;
+                RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),1000,
+                    "Source SQP publication rejected: %s",
+                    failure_reason?failure_reason:"invalid command or deadline");
+                if(diagnostics_pub_)
+                    publish_cycle_diagnostics(state,coherent_state,
+                        control_time_prediction,control_prediction_us,
+                        last_projected_s_,source_dt,result,solve_us,
                         control_ros_time.nanoseconds(),
-                        candidate_command_stamp_ns, callback_steady_ns,
+                        candidate_command_stamp_ns,callback_steady_ns,
                         synchronize_steady_ns);
-                report_control_fault(
-                    publication_fault_reason ? publication_fault_reason :
-                    "accepted MPC action violates the positive-throttle command envelope");
                 return;
             }
-            last_command_publication_lead_ns_ = command_stamp_ns >=
-                control_stamp_ns ? command_stamp_ns - control_stamp_ns : 0;
-            /* Keep the recovery plan tied to an actually converged solve.
-             * An iteration-capped but nonlinear-feasible candidate may be
-             * issued for this tick, but must not erase the last converged
-             * sequence that can bridge a later difficult solve. Advance that
-             * retained sequence past the command just issued so recovery is
-             * aligned to the current actuator epoch. */
-            if (result.admm_status == RICCATI_STATUS_OPTIMAL) {
-                certified_plan_ = rti_memory_.nominal;
-                certified_plan_epoch_ns_ = active_command_epoch_ns_;
-                clear_validated_recovery_prefix();
-                if (certified_plan_.valid && certified_plan_.horizon > 0) {
-                    certified_plan_.controls[0].steering_target_rad =
-                        result.published_steering_command;
-                    certified_plan_.controls[0].throttle_command =
-                        result.published_throttle;
-                    MpcModelControl_t issued_plan[PREDICTION_HORIZON]{};
-                    for (int k = 0; k < certified_plan_.horizon; ++k)
-                        issued_plan[k] = certified_plan_.controls[k];
-                    issued_plan[0] = {result.published_steering_command,
-                        result.published_throttle};
-                    mpc_rti_memory_set_warm_start_controls_at_epoch(&rti_memory_,
-                        issued_plan, certified_plan_.horizon, active_command_epoch_ns_);
-                }
-                prior_plan_control_index_ = 0;
-            }
-            consecutive_prior_plan_actions_ = 0;
-            consecutive_candidate_prefix_actions_ = 0;
-            record_cycle_health(status, result, solve_us);
-        } else {
-            record_cycle_health(status, result, solve_us);
+            last_command_publication_lead_ns_=
+                issued_stamp>=control_stamp_ns?
+                    issued_stamp-control_stamp_ns:0;
         }
-        if (diagnostics_pub_)
-            publish_cycle_diagnostics(state, coherent_state,
-                control_time_prediction, control_prediction_us,
-                last_projected_s_, source_dt, result, solve_us,
-                control_ros_time.nanoseconds(), candidate_command_stamp_ns,
-                callback_steady_ns, synchronize_steady_ns);
+        solver_memory_transaction_.clear();
+        if(diagnostics_pub_)
+            publish_cycle_diagnostics(state,coherent_state,
+                control_time_prediction,control_prediction_us,
+                last_projected_s_,source_dt,result,solve_us,
+                control_ros_time.nanoseconds(),candidate_command_stamp_ns,
+                callback_steady_ns,synchronize_steady_ns);
     }
 
     bool enabled_{};
@@ -2683,9 +1616,7 @@ private:
     bool startup_path_validated_{};
     bool progress_initialized_{};
     bool state_initialized_{};
-    bool control_fault_latched_{};
     bool waiting_for_actuator_{};
-    bool deadline_recovery_pending_{};
     std::string odom_topic_;
     std::string pose_topic_;
     std::string diagnostics_topic_;
@@ -2716,112 +1647,19 @@ private:
     int64_t last_published_command_stamp_ns_{};
     double control_callback_interval_ms_{-1.0};
     bool command_published_this_cycle_{};
-    bool prior_plan_revalidation_attempted_{};
-    bool prior_plan_exact_valid_{};
-    bool prior_plan_timing_rejected_{};
-    double prior_plan_validation_us_{};
-    bool full_prior_suffix_revalidation_attempted_{};
-    bool full_prior_suffix_exact_valid_{};
-    bool full_prior_suffix_timing_rejected_{};
-    int full_prior_suffix_validation_horizon_{};
-    int full_prior_suffix_validation_status_{-1};
-    int full_prior_suffix_failure_stage_{-1};
-    double full_prior_suffix_validation_us_{};
-    int prior_plan_control_index_{};
-    int consecutive_prior_plan_actions_{};
-    int consecutive_candidate_prefix_actions_{};
-    f1tenth_mpc::FallbackEpisode fallback_episode_{};
-    bool fallback_retain_validated_seed_enabled_{};
-    int fallback_max_short_prefix_actions_{};
-    MpcRtiNominal_t recovered_action_revalidated_nominal_{};
-    MpcModelControl_t validated_recovery_prefix_controls_[
-        kCommandEffectValidationHorizon]{};
-    bool validated_recovery_prefix_valid_{};
-    int validated_recovery_prefix_count_{};
-    int validated_recovery_prefix_cursor_{};
-    int64_t validated_recovery_prefix_epoch_ns_{};
-    int prior_plan_validated_horizon_{};
-    int prior_plan_validated_control_index_{-1};
-    int prior_plan_actions_remaining_{};
-    int prior_plan_validation_status_{-1};
-    int prior_plan_validation_failure_stage_{-1};
-    bool candidate_prefix_revalidation_attempted_{};
-    bool candidate_prefix_exact_valid_{};
-    bool candidate_prefix_timing_rejected_{};
-    bool candidate_prefix_solver_converged_{};
-    bool candidate_prefix_iteration_limited_{};
-    bool candidate_prefix_residual_quality_{};
-    double candidate_prefix_validation_us_{};
-    int candidate_prefix_validation_horizon_{};
-    int candidate_prefix_validation_status_{-1};
-    int candidate_prefix_validation_failure_stage_{-1};
     double max_command_start_lateness_ms_{2.0};
     double track_length_m_{};
     double startup_progress_m_{};
     double last_projected_s_{};
     std::string unity_plant_state_topic_;
-    bool prefer_full_validated_prior_plan_on_rejection_{};
-    bool quality_aware_prefix_selection_on_rejection_{};
-    bool viability_recovery_enabled_{};
-    bool normal_feasibility_first_enabled_{};
-    bool viability_recovery_on_rejection_only_{};
-    bool viability_steady_bridge_enabled_{};
-    bool viability_minimal_nearwall_recovery_enabled_{};
-    bool viability_stage_targeted_recovery_enabled_{};
-    bool viability_early_hazard_recovery_enabled_{};
-    bool viability_line_search_wall_warning_enabled_{};
-    bool viability_terminal_extension_select_enabled_{};
-    bool viability_geometric_feasibility_seed_enabled_{};
-    bool viability_braking_aware_geometric_enabled_{};
-    bool viability_source_witness_recovery_enabled_{};
     bool geometry_only_raceline_reference_{};
 
-    bool viability_geometric_anticipatory_enabled_{};
-    bool viability_blended_geometric_recovery_enabled_{};
-    bool viability_proactive_after_fallback_only_{};
-    int viability_recovery_max_trials_{16};
-    double viability_lookahead_reserve_m_{0.02};
     double curvature_speed_envelope_lateral_accel_mps2_{0.0};
     double curvature_speed_envelope_braking_mps2_{5.0};
-    std::uint64_t accepted_viability_recovery_{};
-    bool quality_prefix_attempted_{};
-    bool quality_prefix_clearance_override_{};
-    bool quality_prefix_near_boundary_override_{};
-    bool quality_prefix_stale_prior_refresh_{};
-    bool quality_prefix_yaw_direction_guard_{};
-    bool quality_prefix_prior_is_recovery_{};
-    double quality_prefix_clearance_reserve_m_{0.05};
     double robust_contour_extra_clearance_m_{};
     double robust_contour_max_offset_m_{0.10};
     double robust_contour_smoothing_sigma_m_{0.70};
     double robust_contour_forward_preview_m_{0.45};
-    double quality_prefix_minimum_clearance_gain_m_{0.02};
-    double quality_prefix_iteration_limited_relative_gain_{0.02};
-    int quality_prefix_stale_prior_refresh_after_actions_{};
-    double quality_prefix_stale_prior_max_clearance_loss_m_{0.02};
-    double quality_prefix_stale_prior_objective_loss_fraction_{};
-    double quality_prefix_near_boundary_minimum_gain_m_{};
-    double quality_prefix_near_boundary_max_objective_ratio_{};
-    double quality_prefix_near_boundary_max_steering_delta_rad_{0.10};
-    double quality_prefix_near_boundary_max_throttle_delta_{0.20};
-    bool quality_prefix_near_boundary_controls_bounded_{};
-    std::string quality_prefix_choice_{"none"};
-    bool quality_candidate_prefix_valid_{};
-    bool quality_prior_prefix_valid_{};
-    double quality_candidate_prefix_objective_{
-        std::numeric_limits<double>::quiet_NaN()};
-    double quality_prior_prefix_objective_{
-        std::numeric_limits<double>::quiet_NaN()};
-    double quality_candidate_prefix_slack_m_{
-        std::numeric_limits<double>::quiet_NaN()};
-    double quality_prior_prefix_slack_m_{
-        std::numeric_limits<double>::quiet_NaN()};
-    double quality_prefix_validation_us_{};
-    int quality_candidate_control_count_{};
-    MpcModelControl_t quality_candidate_controls_[PREDICTION_HORIZON]{};
-    int quality_prior_control_count_{};
-    MpcModelControl_t quality_prior_controls_[
-        kCommandEffectValidationHorizon]{};
     bool source_plant_handoff_valid_{};
     bool unity_plant_state_used_{};
     int64_t source_plant_handoff_stamp_ns_{};
@@ -2833,20 +1671,8 @@ private:
     std::size_t last_closest_index_{};
     rclcpp::Time last_source_stamp_{0, 0, RCL_ROS_TIME};
     MpcRtiCycleConfiguration_t rti_config_{};
-    std::unique_ptr<MpcRtiQpCapture_t> qp_capture_r1_;
-    std::unique_ptr<MpcRtiQpCapture_t> qp_capture_r2_;
-    std::unique_ptr<MpcQpFailureRecorder> qp_failure_recorder_;
-    bool forensic_capture_alpha_zero_enabled_{};
-    bool forensic_capture_near_wall_enabled_{};
-    double forensic_capture_progress_min_m_{};
-    std::uint32_t forensic_near_wall_bucket_seen_[4]{};
-    std::uint32_t forensic_near_wall_bucket_counts_[4]{};
-    std::uint32_t forensic_alpha_zero_streak_{};
-    std::uint32_t forensic_alpha_zero_captures_{};
     MpcRtiMemory_t rti_memory_{};
     f1tenth_mpc::SolverMemoryTransaction solver_memory_transaction_{};
-    MpcRtiNominal_t certified_plan_{};
-    int64_t certified_plan_epoch_ns_{};
     int64_t active_command_epoch_ns_{};
     std::vector<Waypoint> trajectory_;
     MpcStateSynchronizer state_synchronizer_;
@@ -2885,16 +1711,10 @@ private:
     std::thread control_thread_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     std::uint64_t control_cycles_{};
-    std::uint64_t accepted_optimal_{};
     std::uint64_t accepted_feasible_{};
-    std::uint64_t accepted_line_search_{};
-    std::uint64_t accepted_candidate_prefix_{};
-    std::uint64_t accepted_prior_plan_{};
     std::uint64_t deadline_miss_cycles_{};
     std::uint64_t control_fault_cycles_{};
-    int consecutive_deadline_misses_{};
     int max_solver_iterations_seen_{};
-    int requested_max_solver_iterations_{150};
     double max_solve_us_{};
 };
 

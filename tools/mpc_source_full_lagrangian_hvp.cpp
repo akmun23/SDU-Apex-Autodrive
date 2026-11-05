@@ -132,10 +132,11 @@ double lagrangian(const Eval &a,const std::array<double,D> &lambda) {
 } // namespace
 
 int main(int argc,char **argv) {
-    if(argc<3||argc>5) {
+    if(argc<3||argc>6) {
         std::cerr<<"usage: mpc_source_full_lagrangian_hvp CASE_DIR "
             "DIRECTION.txt [RHO=10000] "
-            "[--qp-wall-duals=QP_DUALS.txt]\n";
+            "[--qp-wall-duals=QP_DUALS.txt] "
+            "[--controls=SOURCE_SEED.controls]\n";
         return 2;
     }
     auto ctx=std::make_unique<
@@ -146,12 +147,15 @@ int main(int argc,char **argv) {
     std::array<double,D> v{};
     if(!load_direction(argv[2],v))return 4;
     double rho=10000.;
-    std::string multiplier_file;
+    std::string multiplier_file,control_file;
     for(int i=3;i<argc;++i) {
         const std::string option(argv[i]);
         constexpr std::string_view prefix="--qp-wall-duals=";
+        constexpr std::string_view controls_prefix="--controls=";
         if(option.rfind(prefix,0)==0)
             multiplier_file=option.substr(prefix.size());
+        else if(option.rfind(controls_prefix,0)==0)
+            control_file=option.substr(controls_prefix.size());
         else rho=std::stod(option);
     }
     if(!std::isfinite(rho)||rho<0.||rho>1.e9)return 5;
@@ -159,6 +163,16 @@ int main(int argc,char **argv) {
     for(int k=0;k<N;++k) {
         original[2*k]=ctx->r1_nominal[k].steering_target_rad/.15;
         original[2*k+1]=ctx->r1_nominal[k].throttle_command/.25;
+    }
+    if(!control_file.empty()) {
+        std::ifstream stream(control_file);
+        if(!stream)return 11;
+        for(int k=0;k<N;++k) {
+            double steer=NAN,throttle=NAN;
+            if(!(stream>>steer>>throttle))return 12;
+            original[2*k]=steer/.15;
+            original[2*k+1]=throttle/.25;
+        }
     }
     MpcRtiCycleConfiguration_t cfg{};
     cfg.model=ctx->model;
@@ -199,7 +213,8 @@ int main(int argc,char **argv) {
         for(int j=0;j<D;++j)
             gn_direction+=v[i]*base.hessian_gn[i*D+j]*v[j];
     json result;
-    result["schema"]="source-lagrangian-directional-hvp/v1";
+    result["schema"]="source-lagrangian-directional-hvp/v2";
+    result["controls_source"]=control_file.empty()?"captured_r1_nominal":control_file;
     result["lambda_source"]=multiplier_file.empty()
         ?"frozen_wall_merit_proxy_not_KKT_dual"
         :"recorded_first_QP_wall_duals_not_nonlinear_KKT";
