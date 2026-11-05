@@ -77,6 +77,15 @@ class SourceOnlyArchitecture(unittest.TestCase):
         self.assertNotIn("declare_parameter<bool>(\"native_source_reduced_sqp\"", code)
         self.assertNotIn("declare_parameter<bool>(\"source_exact_nlp_live\"", code)
 
+    def test_extra_clearance_is_soft_but_physical_wall_is_hard(self):
+        solver=(MPC / "src/mpc_source_exact_offline_solver.cpp").read_text()
+        self.assertIn("out.corridor>=0.",solver)
+        self.assertNotIn(
+            "out.corridor>=options.minimum_source_clearance_m",solver)
+        self.assertIn("options.source_qp_soft_physical_weight*",solver)
+        self.assertIn("current.total_violation+",solver)
+        self.assertIn("next.total_violation+",solver)
+
     def test_source_input_envelope_initialized_after_legacy_cleanup(self):
         node=(MPC / "src/mpc_controller_node_impl.hpp").read_text()
         validation=(MPC / "src/mpc_rti.cpp").read_text()

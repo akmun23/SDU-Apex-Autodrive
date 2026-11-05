@@ -9,6 +9,23 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 
+TEST(MpcControlTimePredictor, UnchangedHostCommandAgeSurvivesHistoryOverflow)
+{
+  f1tenth_mpc::MpcCommandHistory history;
+  constexpr int64_t start=1000000000;
+  for(int i=0;i<40;++i)
+    ASSERT_TRUE(history.push({start+i*25000000,0.2,0.3,true}));
+  f1tenth_mpc::MpcCommandHistoryEntry latest;
+  ASSERT_TRUE(history.at(history.size()-1,&latest));
+  EXPECT_EQ(latest.unchanged_since_ns,start);
+  ASSERT_TRUE(history.push({start+40*25000000,0.2,0.4,true}));
+  ASSERT_TRUE(history.at(history.size()-1,&latest));
+  EXPECT_EQ(latest.unchanged_since_ns,latest.stamp_ns);
+  ASSERT_TRUE(history.push({start-1,0.2,0.4,true}));
+  ASSERT_TRUE(history.at(history.size()-1,&latest));
+  EXPECT_EQ(latest.unchanged_since_ns,start-1);
+}
+
 std::array<MpcTrajectorySample_t, 4> square_trajectory(double *lap_length)
 {
   std::array<MpcTrajectorySample_t, 4> points{{

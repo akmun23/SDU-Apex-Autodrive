@@ -1684,12 +1684,15 @@ int mpc_rti_memory_set_warm_start_controls_at_epoch(
 int mpc_rti_command_epoch_shift(int64_t previous_ns,int64_t current_ns,
     float prediction_dt)
 {
-    if(previous_ns<=0 || current_ns<previous_ns ||
+    if(previous_ns<=0 || current_ns<=0 ||
        !isfinite(prediction_dt) || prediction_dt<=0.f) return -1;
     const double stages=(double)(current_ns-previous_ns)/
         ((double)prediction_dt*1.e9);
-    if(stages>=PREDICTION_HORIZON-.5) return -1;
-    return (int)llround(stages);
+    // Forecasts of the same future Bridge request can move backward by
+    // sub-ms host jitter. Quantize the signed difference to a control stage;
+    // a revision inside the same stage must not suppress a fresh-state solve.
+    if(stages<=-.5 || stages>=PREDICTION_HORIZON-.5) return -1;
+    return std::max(0,(int)llround(stages));
 }
 
 static int valid_cycle_configuration(
@@ -2143,6 +2146,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     if (result) {
         memset(result, 0, sizeof(*result));
         result->status = MPC_RTI_CYCLE_REJECTED_INPUT;
+        result->source_solver_status = MPC_SOURCE_INVALID_MODEL;
         result->admm_status = -1;
         result->nonlinear_failure_reason = -1;
         result->nonlinear_failure_stage = -1;
@@ -2265,6 +2269,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         // identical 30-stage nominal in this command epoch; the exact
         // optimizer can reuse its verified original physical prefix.
         opts.initial_same_epoch_source_nominal=&nominal;
+        opts.record_primal_trace=configuration->capture_source_benchmark!=0;
         opts.maximum_iterations=
             configuration->source_exact_nlp_iterations;
         opts.use_source_compact_qp_linearization=
@@ -2303,6 +2308,10 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         result->total_solve_us=monotonic_microseconds()-solve_begin;
         result->source_exact_nlp_deadline_exhausted=
             optimized->deadline_exhausted;
+        result->source_solver_status=optimized->solver_status;
+        result->source_linearization_failed=optimized->linearization_failed;
+        result->source_qp_failed=optimized->qp_failed;
+        result->source_iteration_admission_stopped=optimized->iteration_admission_stopped;
         result->source_exact_nlp_source_trial_evaluations=
             optimized->source_trial_evaluations;
         result->source_exact_nlp_accepted_iterations=
@@ -2323,6 +2332,26 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             optimized->final_minimum_corridor_slack;
         result->source_exact_nlp_final_original_violation=
             optimized->final_exact_constraint_violation;
+        if(completed) {
+            result->source_optimized_control_count=horizon;
+            std::copy_n(optimized->optimized.controls,horizon,
+                        result->source_optimized_controls);
+        }
+        result->source_primal_trace_count=static_cast<int>(std::min(
+            optimized->primal_trace.size(),size_t(MPC_RTI_SOURCE_TRACE_CAPACITY)));
+        result->source_primal_trace_truncated=optimized->primal_trace.size()>
+            MPC_RTI_SOURCE_TRACE_CAPACITY;
+        for(int i=0;i<result->source_primal_trace_count;++i) {
+            const auto &in=optimized->primal_trace[i];
+            auto &out=result->source_primal_trace[i];
+            out.iteration=in.iteration;out.accepted=in.accepted;
+            out.trial_evaluated=in.trial_evaluated;
+            out.correction_evaluated=in.correction_evaluated;
+            out.correction_accepted=in.correction_accepted;
+            std::copy_n(in.warm_start.controls,horizon,out.warm_start);
+            std::copy_n(in.trial.controls,horizon,out.trial);
+            std::copy_n(in.correction.controls,horizon,out.correction);
+        }
         result->first_pass_objective=optimized->initial_source_cost;
         result->second_pass_objective=optimized->final_source_cost;
         result->nonlinear_objective=optimized->final_source_cost;
@@ -2366,6 +2395,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             // applied in the corresponding original source epoch.
             *memory=memory_before;
             result->source_exact_nlp_deadline_exhausted=1;
+            result->source_solver_status=MPC_SOURCE_DEADLINE_EXCEEDED;
             result->status=MPC_RTI_CYCLE_WAITING_FOR_SOLVER_BUDGET;
             return result->status;
         }

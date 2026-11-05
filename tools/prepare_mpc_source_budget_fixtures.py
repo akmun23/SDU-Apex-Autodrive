@@ -3,8 +3,8 @@
 
 Requires --diagnostics exported by tools/export_mpc_run_report.py. The
 fixture generator retains all 22 hidden source state channels, command FIFO,
-exact practice raceline and ROS tuning. It uses an existing same-build captured
-source fixture only as a source-model baseline and solver-config baseline.
+exact practice raceline and ROS tuning, with explicit plant initialization
+flags. No hidden state or tuning is inherited from another source fixture.
 """
 import argparse, json, pathlib, subprocess
 import yaml
@@ -18,8 +18,8 @@ def main():
                    help="exact mpc_parameters.yaml captured with failed Unity run")
     p.add_argument("--trajectory",required=True,type=pathlib.Path,
                    help="the exact practice/competition raceline CSV from run manifest")
-    p.add_argument("--base-case",required=True,type=pathlib.Path,
-                   help="same-build native source_context.mctx + r1.fqp fixture")
+    p.add_argument("--base-case",type=pathlib.Path,
+                   help="deprecated compatibility argument; no longer read")
     p.add_argument("--out",required=True,type=pathlib.Path)
     p.add_argument("--indices",nargs=2,type=int,default=[20,1000])
     p.add_argument("--builder",type=pathlib.Path,default=
@@ -54,14 +54,14 @@ def main():
         sample_path=destination/"live_diagnostic.json"
         sample_path.write_text(json.dumps(sample,indent=2))
         cmd=[str(args.builder),str(sample_path),str(model),
-             str(args.trajectory),str(args.base_case),str(destination)]
+             str(args.trajectory),str(destination)]
         subprocess.run(cmd,check=True,cwd=ROOT)
         summary.append({"name":name,"index":index,"source_stamp_ns":
                         sample.get("source_stamp_ns"),"speed_mps":sample["state"][2],
                         "progress_m":sample["progress_m"],"fixture":str(destination)})
     (args.out/"manifest.json").write_text(json.dumps({
         "experiment_regime":"simulator_free_reconstructed_live_cold_start",
-        "limits":["Source model/track/tuning from user-provided run; base QP solver config from captured source case",
+        "limits":["Source model/track/tuning from user-provided run; explicit initialized state required",
                   "Source-only replay cannot prove Unity prediction fidelity or ROS command publication"],
         "cases":summary},indent=2))
     print(json.dumps(summary,indent=2))

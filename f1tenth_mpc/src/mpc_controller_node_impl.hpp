@@ -289,6 +289,8 @@ public:
         rti_config_.source_exact_nlp_constrained_qp=1;
         rti_config_.source_exact_nlp_compact_qp=1;
         rti_config_.source_exact_nlp_full_step_sqp=1;
+        rti_config_.capture_source_benchmark=
+            declare_parameter<bool>("capture_source_benchmark",false)?1:0;
         rti_config_.source_exact_nlp_qp_soft_weight=
             static_cast<float>(declare_parameter<double>(
                 "source_exact_nlp_qp_soft_weight",1000000.));
@@ -640,6 +642,7 @@ private:
         /* Lateness is already in the recorded diagnostics. Formatting and
          * logging it on the control owner adds no control/safety decision. */
         command_published_this_cycle_ = true;
+        consecutive_no_publication_cycles_=0;
         last_published_command_stamp_ns_ = command_time.nanoseconds();
         return last_published_command_stamp_ns_;
     }
@@ -740,6 +743,13 @@ private:
             result.source_exact_nlp_source_trial_evaluations);
         max_solve_us_=std::max(max_solve_us_,solve_us);
         if(control_cycles_%400==0)report_health("periodic");
+    }
+
+    void record_no_publication()
+    {
+        ++consecutive_no_publication_cycles_;
+        maximum_no_publication_cycles_=std::max(maximum_no_publication_cycles_,
+            consecutive_no_publication_cycles_);
     }
 
     void report_health(const char *phase)
@@ -1039,7 +1049,8 @@ private:
             ? static_cast<double>(callback_steady_ns -
                 last_control_callback_start_ns_) * 1.0e-6 : -1.0;
         last_control_callback_start_ns_ = callback_steady_ns;
-        last_published_command_stamp_ns_ = 0;
+        // Retain the last ISSUED header across callbacks. Clearing it here
+        // disabled SolverMemoryTransaction::begin on every later callback.
         double cycle_budget_us = end_to_end_cycle_budget_ms_ * 1000.0;
         if (rti_config_.max_cycle_time_us > 0.0)
             cycle_budget_us = std::min(
@@ -1299,6 +1310,8 @@ private:
             handle_epoch_wait(MpcSyncStatus::kNoOdomBracket);
             return;
         }
+        bridge_request_unchanged_command_age_ms_=double(source_request_command.stamp_ns-
+            source_request_command.unchanged_since_ns)*1.e-6;
         state_freshness_guard_.observe(MpcSyncStatus::kOk, steady_time_ns());
         sdu_apex_msgs::msg::UnityPlantState unity_plant_snapshot;
         int64_t unity_plant_snapshot_stamp_ns = 0;
@@ -1511,13 +1524,18 @@ private:
         // short prefix, alternate QP, recovery trajectory or brake fallback.
         if (rti_memory_.command_epoch_ns>0 &&
             rti_memory_.warm_start_controls_valid &&
+            mpc_rti_command_epoch_shift(rti_memory_.command_epoch_ns,
+                candidate_command_stamp_ns,TIME_STEP_SECONDS)<0 &&
             candidate_command_stamp_ns<rti_memory_.command_epoch_ns) {
+            ++older_command_epoch_rejections_;
             RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),1000,
                 "Ignoring older MPC command epoch (%lld < %lld)",
                 static_cast<long long>(candidate_command_stamp_ns),
                 static_cast<long long>(rti_memory_.command_epoch_ns));
             return;
         }
+        if(rti_memory_.command_epoch_ns>candidate_command_stamp_ns)
+            ++same_stage_epoch_revisions_;
         const auto solve_begin=std::chrono::steady_clock::now();
         MpcRtiCycleConfiguration_t cycle_configuration=rti_config_;
         cycle_configuration.command_epoch_ns=candidate_command_stamp_ns;
@@ -1536,6 +1554,7 @@ private:
             std::chrono::steady_clock::now()-solve_begin).count();
         record_cycle_health(status,result,solve_us);
         if(status!=MPC_RTI_CYCLE_ACCEPTED_FEASIBLE) {
+            record_no_publication();
             // An unsuccessful solve never issues an unchecked or stale
             // command. It also never latches a permanent fault, so the
             // SAME NLP can run again at the next synchronized epoch.
@@ -1568,6 +1587,9 @@ private:
                    &rti_memory_,candidate_command_stamp_ns))
                 mpc_rti_memory_reset(&rti_memory_);
             ++deadline_miss_cycles_;
+            record_no_publication();
+            result.status=MPC_RTI_CYCLE_WAITING_FOR_SOLVER_BUDGET;
+            result.source_solver_status=MPC_SOURCE_DEADLINE_EXCEEDED;
             if(diagnostics_pub_)
                 publish_cycle_diagnostics(state,coherent_state,
                     control_time_prediction,control_prediction_us,
@@ -1585,7 +1607,14 @@ private:
                 if(!solver_memory_transaction_.rollback(
                        &rti_memory_,candidate_command_stamp_ns))
                     mpc_rti_memory_reset(&rti_memory_);
-                ++deadline_miss_cycles_;
+                const bool publication_deadline_missed=last_publication_gate_elapsed_ms_>=end_to_end_cycle_budget_ms_;
+                if(publication_deadline_missed)++deadline_miss_cycles_;
+                else ++control_fault_cycles_;
+                record_no_publication();
+                result.status=publication_deadline_missed?MPC_RTI_CYCLE_WAITING_FOR_SOLVER_BUDGET:
+                    MPC_RTI_CYCLE_REJECTED_SOLVER;
+                result.source_solver_status=publication_deadline_missed?MPC_SOURCE_DEADLINE_EXCEEDED:
+                    MPC_SOURCE_INVALID_MODEL;
                 RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),1000,
                     "Source SQP publication rejected: %s",
                     failure_reason?failure_reason:"invalid command or deadline");
@@ -1645,6 +1674,11 @@ private:
     int64_t last_control_callback_start_ns_{};
     int64_t last_stale_wait_diagnostic_steady_ns_{};
     int64_t last_published_command_stamp_ns_{};
+    uint64_t older_command_epoch_rejections_{};
+    uint64_t same_stage_epoch_revisions_{};
+    uint64_t consecutive_no_publication_cycles_{};
+    uint64_t maximum_no_publication_cycles_{};
+    double bridge_request_unchanged_command_age_ms_{NAN};
     double control_callback_interval_ms_{-1.0};
     bool command_published_this_cycle_{};
     double max_command_start_lateness_ms_{2.0};

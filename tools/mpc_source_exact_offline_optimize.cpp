@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 #include <memory>
 #include <string>
 
@@ -50,6 +51,12 @@ int main(int argc,char **argv)
         options.minimum_source_clearance_m=std::stod(p);
     if(const char *p=std::getenv("MPC_SOURCE_NLP_COMPACT_QP"))
         options.use_source_compact_qp_linearization=std::string(p)!="0";
+    options.record_primal_trace=std::getenv("MPC_SOURCE_NLP_RECORD_PRIMAL_TRACE")!=nullptr;
+    options.source_slip_epigraph=std::getenv("MPC_SOURCE_NLP_SLIP_EPIGRAPH")!=nullptr;
+    options.elastic_sqp_globalization=std::getenv("MPC_SOURCE_NLP_ELASTIC_GLOBALIZATION")!=nullptr;
+    options.safeguarded_merit_globalization=std::getenv("MPC_SOURCE_NLP_MERIT_GLOBALIZATION")!=nullptr;
+    options.finite_difference_lagrangian_hessian=std::getenv("MPC_SOURCE_NLP_FULL_HESSIAN")!=nullptr;
+    options.absolute_lagrangian_curvature=std::getenv("MPC_SOURCE_NLP_ABSOLUTE_CURVATURE")!=nullptr;
     auto result=std::make_unique<sdu_apex::source_nlp::OfflineResult>();
     if(!sdu_apex::source_nlp::optimize_offline_exact_source(
         ctx->initial_state,ctx->progress_m,ctx->trajectory.data(),
@@ -59,17 +66,25 @@ int main(int argc,char **argv)
     json report={
         {"schema","source-exact-single-nlp-sqp/v1"},
         {"case",argv[1]},
-        {"single_full_step_per_sqp",true},
-        {"alpha_search",false},
+        {"single_full_step_per_sqp",!options.safeguarded_merit_globalization},
+        {"second_order_correction_globalization",true},
+        {"alpha_search",options.safeguarded_merit_globalization},
+        {"fixed_alpha_grid",false},
         {"multiple_shooting",false},
         {"fallback_controller",false},
         {"source_feasible_initial",result->initial_source_feasible},
+        {"solver_status",static_cast<int>(result->solver_status)},
+        {"linearization_failed",result->linearization_failed},
+        {"qp_failed",result->qp_failed},
+        {"deadline_exhausted",result->deadline_exhausted},
+        {"iteration_admission_stopped",result->iteration_admission_stopped},
         {"source_feasible_final",result->final_source_feasible},
         {"full_step_stalled",result->full_step_sqp_stalled},
         {"original_nlp_kkt_converged",result->source_nlp_kkt_converged},
         {"clearance_requirement_m",options.minimum_source_clearance_m},
         {"final_corridor_margin_m",result->final_minimum_corridor_slack},
         {"initial_cost",result->initial_source_cost},
+        {"initial_corridor_margin_m",result->initial_minimum_corridor_slack},
         {"final_cost",result->final_source_cost},
         {"initial_constraint_violation",result->initial_exact_constraint_violation},
         {"final_constraint_violation",result->final_exact_constraint_violation},
@@ -82,16 +97,28 @@ int main(int argc,char **argv)
             {"accepted",it.accepted},
             {"full_step_rejected",it.full_step_rejected},
             {"source_eval_failed",it.nonlinear_evaluation_failed},
+            {"second_order_correction_attempted",it.second_order_correction_attempted},
+            {"second_order_correction_accepted",it.second_order_correction_accepted},
+            {"safeguarded_step_length",it.safeguarded_step_length},
+            {"safeguarded_evaluations",it.safeguarded_evaluations},
+            {"lagrangian_hessian_wall_ms",it.lagrangian_hessian_wall_ms},
+            {"lagrangian_hessian_min_eigenvalue",it.lagrangian_hessian_min_eigenvalue},
+            {"second_order_correction_cost",it.second_order_correction_cost},
+            {"second_order_correction_clearance",it.second_order_correction_clearance},
             {"qp_iterations",it.qp_iterations},
             {"qp_converged",it.qp_converged},
             {"qp_primal",it.qp_primal_residual},
             {"qp_dual",it.qp_dual_residual},
+            {"qp_tolerance_used",it.qp_tolerance_used},
+            {"lagrangian_bfgs_updated",it.lagrangian_bfgs_updated},
+            {"lagrangian_bfgs_damping",it.lagrangian_bfgs_damping},
             {"original_nlp_stationarity_inf",
              it.source_nlp_stationarity_inf},
             {"original_nlp_inequality_residual_inf",
              it.source_nlp_inequality_residual_inf},
             {"original_nlp_complementarity_inf",
              it.source_nlp_complementarity_inf},
+            {"original_nlp_dual_feasibility_inf",it.source_nlp_dual_feasibility_inf},
             {"predicted_cost_change",it.predicted_cost_change},
             {"actual_cost_change",it.actual_cost_change},
             {"cost_before",it.cost_before},
@@ -110,9 +137,36 @@ int main(int argc,char **argv)
              it.reused_exact_source_linearization},
             {"source_rollout_ms",it.source_rollout_wall_ms},
             {"iteration_ms",it.iteration_wall_ms}});
+    if(options.record_primal_trace) {
+        report["primal_trace_origin"]="deterministic_offline_reconstruction";
+        report["primal_trace"]=json::array();
+        const auto primal=[](const sdu_apex::source_nlp::Decision &d) {
+            json j={{"controls",json::array()},{"nodes",json::array()}};
+            for(int k=0;k<PREDICTION_HORIZON;++k) {
+                j["controls"].push_back({d.controls[k].steering_target_rad,
+                                        d.controls[k].throttle_command});
+                j["nodes"].push_back(d.nodes[k].z);
+            }
+            return j;
+        };
+        for(const auto &t:result->primal_trace) {
+            json safeguarded=json::array();
+            for(size_t i=0;i<t.safeguarded_trials.size();++i)
+                safeguarded.push_back({{"alpha",t.safeguarded_step_lengths[i]},
+                    {"source_valid",t.safeguarded_valid[i]},{"primal",primal(t.safeguarded_trials[i])}});
+            report["primal_trace"].push_back({{"iteration",t.iteration},
+                {"accepted",t.accepted},{"trial_evaluated",t.trial_evaluated},
+                {"warm_start",primal(t.warm_start)},{"trial",primal(t.trial)},
+                {"correction_evaluated",t.correction_evaluated},
+                {"correction_accepted",t.correction_accepted},
+                {"correction",primal(t.correction)},
+                {"safeguarded_trials",safeguarded},{"safeguarded_accepted",t.safeguarded_accepted}});
+        }
+    }
     if(argc>=5) {
         std::ofstream out(argv[4]);
         if(!out)return 7;
+        out<<std::setprecision(10);
         for(const auto &u:result->optimized.controls)
             out<<u.steering_target_rad<<' '<<u.throttle_command<<'\n';
     }

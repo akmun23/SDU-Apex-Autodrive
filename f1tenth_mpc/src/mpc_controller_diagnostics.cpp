@@ -18,10 +18,24 @@ void MpcControllerNode::publish_cycle_diagnostics(
     };
     const auto &plant=state.plant;
     std::ostringstream json;
-    json<<std::setprecision(12)
+    json<<std::setprecision(17)
         <<"{\"status\":\""<<cycle_status_name(result.status)
         <<"\",\"solver\":{"
-        <<"\"backend\":\"source_exact_full_step_sqp\""
+        <<"\"backend\":\"source_exact_full_step_sqp\"";
+    const char *termination="invalid_model";
+    switch(result.source_solver_status) {
+    case MPC_SOURCE_DEADLINE_EXCEEDED:termination="deadline_exceeded";break;
+    case MPC_SOURCE_PRIMAL_INFEASIBLE:termination="primal_infeasible";break;
+    case MPC_SOURCE_NONLINEAR_STEP_REJECTED:termination="nonlinear_step_rejected";break;
+    case MPC_SOURCE_KKT_NOT_CONVERGED:termination="KKT_not_converged";break;
+    case MPC_SOURCE_INVALID_MODEL:break;
+    case MPC_SOURCE_FEASIBLE_SOLUTION_AVAILABLE:termination="feasible_solution_available";break;
+    }
+    json<<",\"termination\":\""<<termination<<'"'
+        <<",\"feasible_solution_available\":"<<(result.source_exact_nlp_final_source_feasible?"true":"false")
+        <<",\"linearization_failed\":"<<(result.source_linearization_failed?"true":"false")
+        <<",\"qp_failed\":"<<(result.source_qp_failed?"true":"false")
+        <<",\"iteration_admission_stopped\":"<<(result.source_iteration_admission_stopped?"true":"false")
         <<",\"sqp_iterations_attempted\":"
         <<result.sqp_iterations_attempted
         <<",\"sqp_iterations_accepted\":"
@@ -58,6 +72,16 @@ void MpcControllerNode::publish_cycle_diagnostics(
                last_published_command_stamp_ns_:0)
         <<",\"command_published\":"
         <<(command_published_this_cycle_?"true":"false")
+        <<",\"consecutive_no_publication_cycles\":"<<consecutive_no_publication_cycles_
+        <<",\"maximum_no_publication_cycles\":"<<maximum_no_publication_cycles_
+        <<",\"older_command_epoch_rejections\":"<<older_command_epoch_rejections_
+        <<",\"same_stage_epoch_revisions\":"<<same_stage_epoch_revisions_
+        <<",\"last_issued_command_age_ms\":";
+    finite_json(json,last_published_command_stamp_ns_>0?
+        std::max(0.,double(control_ros_stamp_ns-last_published_command_stamp_ns_)*1.e-6):NAN);
+    json<<",\"bridge_request_unchanged_command_age_ms\":";
+    finite_json(json,bridge_request_unchanged_command_age_ms_);
+    json
         <<",\"source_dt_s\":";
     finite_json(json,source_dt_s);
     json<<",\"progress_m\":";
@@ -72,7 +96,9 @@ void MpcControllerNode::publish_cycle_diagnostics(
         if(k)json<<',';
         finite_json(json,state_values[k]);
     }
-    json<<"],\"plant_internal_state\":[";
+    json<<"],\"plant_state_flags\":["<<plant.source_plant_initialized<<','
+        <<plant.source_suspension_history_initialized<<','<<plant.source_imu_state_initialized
+        <<"],\"plant_internal_state\":[";
     for(int k=0;k<MPC_PLANT_INTERNAL_STATE_COUNT;++k){
         if(k)json<<',';
         finite_json(json,plant.source_plant_internal_state[k]);
@@ -103,7 +129,61 @@ void MpcControllerNode::publish_cycle_diagnostics(
         finite_json(json,result.candidate_controls[k].throttle_command);
         json<<']';
     }
-    json<<"],\"control_time_prediction\":{"
+    json<<"],\"source_optimized_controls\":[";
+    for(int k=0;k<result.source_optimized_control_count;++k) {
+        if(k)json<<',';
+        json<<'[';finite_json(json,result.source_optimized_controls[k].steering_target_rad);
+        json<<',';finite_json(json,result.source_optimized_controls[k].throttle_command);json<<']';
+    }
+    json<<"],\"source_primal_trace_truncated\":"
+        <<(result.source_primal_trace_truncated?"true":"false")
+        <<",\"source_primal_trace\":[";
+    for(int i=0;i<result.source_primal_trace_count;++i) {
+        if(i)json<<',';
+        const auto &trace=result.source_primal_trace[i];
+        json<<"{\"iteration\":"<<trace.iteration
+            <<",\"accepted\":"<<(trace.accepted?"true":"false")
+            <<",\"trial_evaluated\":"<<(trace.trial_evaluated?"true":"false");
+        const auto commands=[&](const char *name,const MpcModelControl_t *u) {
+            json<<",\""<<name<<"\":[";
+            for(int k=0;k<PREDICTION_HORIZON;++k) {
+                if(k)json<<',';
+                json<<'[';finite_json(json,u[k].steering_target_rad);
+                json<<',';finite_json(json,u[k].throttle_command);json<<']';
+            }
+            json<<']';
+        };
+        commands("warm_start_controls",trace.warm_start);
+        if(trace.trial_evaluated)commands("trial_controls",trace.trial);
+        json<<",\"correction_evaluated\":"<<(trace.correction_evaluated?"true":"false")
+            <<",\"correction_accepted\":"<<(trace.correction_accepted?"true":"false");
+        if(trace.correction_evaluated)commands("correction_controls",trace.correction);
+        json<<'}';
+    }
+    json<<']';
+    if(rti_config_.capture_source_benchmark) {
+        // Same-build POD capture retains every frozen reference/weight and
+        // constraint setting bit exactly. Pointer callbacks cannot be replayed.
+        auto model=rti_config_.model;
+        const bool world=model.world_sweep_check!=nullptr;
+        model.world_sweep_check=nullptr;model.world_sweep_context=nullptr;
+        const auto hex=[&](const void *object,size_t size) {
+            constexpr char digits[]="0123456789abcdef";
+            const auto *bytes=static_cast<const unsigned char *>(object);
+            json<<'"';
+            for(size_t i=0;i<size;++i)json<<digits[bytes[i]>>4]<<digits[bytes[i]&15];
+            json<<'"';
+        };
+        json<<",\"frozen_source_problem\":{\"schema\":\"source-pod/v1\",\"world_sweep_was_configured\":"
+            <<(world?"true":"false")<<",\"model_size\":"<<sizeof(model)
+            <<",\"objective_size\":"<<sizeof(result.comparison_objective)
+            <<",\"model_pod_hex\":";
+        hex(&model,sizeof(model));
+        json<<",\"objective_pod_hex\":";
+        hex(&result.comparison_objective,sizeof(result.comparison_objective));
+        json<<'}';
+    }
+    json<<",\"control_time_prediction\":{"
         <<"\"mode\":\"unity_plant\",\"age_s\":";
     finite_json(json,control_prediction.age_s);
     json<<",\"elapsed_us\":";

@@ -19,6 +19,9 @@ struct MpcCommandHistoryEntry {
     double steering_command_rad{};
     double throttle_normalized{};
     bool throttle_valid{};
+    // Start of the unchanged HOST request payload, carried across overflow.
+    // This is not a Unity FixedUpdate application timestamp.
+    int64_t unchanged_since_ns{};
 };
 
 /* Fixed-capacity causal command history. Runtime entries come from exact

@@ -113,21 +113,28 @@ bool MpcCommandHistory::push(const MpcCommandHistoryEntry &entry)
         (entry.throttle_valid && (!std::isfinite(entry.throttle_normalized) ||
             entry.throttle_normalized < 0.0 || entry.throttle_normalized > 1.0)))
         return false;
+    MpcCommandHistoryEntry accepted=entry;
+    accepted.unchanged_since_ns=entry.stamp_ns;
     if (size_ > 0) {
         MpcCommandHistoryEntry newest{};
         if (!at(size_ - 1, &newest)) return false;
+        if(entry.stamp_ns>=newest.stamp_ns &&
+           entry.steering_command_rad==newest.steering_command_rad &&
+           entry.throttle_valid==newest.throttle_valid &&
+           (!entry.throttle_valid || entry.throttle_normalized==newest.throttle_normalized))
+            accepted.unchanged_since_ns=newest.unchanged_since_ns;
         if (entry.stamp_ns == newest.stamp_ns) {
-            entries_[(oldest_index_ + size_ - 1) % entries_.size()] = entry;
+            entries_[(oldest_index_ + size_ - 1) % entries_.size()] = accepted;
             return true;
         }
         if (entry.stamp_ns < newest.stamp_ns) clear();
     }
 
     if (size_ < entries_.size()) {
-        entries_[(oldest_index_ + size_) % entries_.size()] = entry;
+        entries_[(oldest_index_ + size_) % entries_.size()] = accepted;
         ++size_;
     } else {
-        entries_[oldest_index_] = entry;
+        entries_[oldest_index_] = accepted;
         oldest_index_ = (oldest_index_ + 1) % entries_.size();
     }
     return true;

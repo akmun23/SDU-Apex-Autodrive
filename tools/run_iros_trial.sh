@@ -86,10 +86,22 @@ controller_cpuset_args=()
 if [[ -n "$iros_controller_cpus" ]]; then
   controller_cpuset_args=(--cpuset-cpus "$iros_controller_cpus")
 fi
+# Docker cpuset has been observed to be ignored on this workstation.
+# Optional Linux process affinity keeps the controller's actual ROS and
+# source-AD threads on the selected physical cores.
+iros_runtime_affinity="${SDU_APEX_IROS_RUNTIME_AFFINITY_CPUS:-}"
+if [[ -n "$iros_runtime_affinity" &&
+      ! "$iros_runtime_affinity" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then
+  echo 'Invalid SDU_APEX_IROS_RUNTIME_AFFINITY_CPUS' >&2
+  exit 2
+fi
 printf 'competition controller cpuset=%s simulator cpuset=%s\n' \
   "$iros_controller_cpus" "$iros_sim_cpus" >"$run_dir/runtime_affinity.txt"
 docker run --rm --name "$controller" "${controller_cpuset_args[@]}" --network=host --ipc=host --privileged --gpus all \
   -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display \
+  -e "SDU_APEX_IROS_RUNTIME_AFFINITY_CPUS=$iros_runtime_affinity" \
+  -e "OMP_NUM_THREADS=${OMP_NUM_THREADS:-6}" -e "OMP_PROC_BIND=TRUE" \
+  -e "OMP_PLACES=${OMP_PLACES:-cores}" \
   -v "$repo_root:/workspace/src:rw" -e "SDU_APEX_TRAJECTORY_FILE=$trajectory_container" \
   -e "SDU_APEX_MPC_PARAMETER_FILE=$mpc_profile_container" -e "SDU_APEX_AMCL_PARAMETER_FILE=$amcl_profile_container" --entrypoint /bin/bash "$image" -lc '
     source /opt/ros/humble/setup.bash &&
@@ -104,6 +116,11 @@ docker run --rm --name "$controller" "${controller_cpuset_args[@]}" --network=ho
     # means load the canonical installed MPC profile, not an empty YAML.
     if [[ -n "$SDU_APEX_MPC_PARAMETER_FILE" ]]; then
       set -- "$@" "mpc_parameter_overlay:=$SDU_APEX_MPC_PARAMETER_FILE"
+    fi
+    if [[ -n "$SDU_APEX_IROS_RUNTIME_AFFINITY_CPUS" ]]; then
+      echo "Pinning IROS source MPC/ROS process to CPU ${SDU_APEX_IROS_RUNTIME_AFFINITY_CPUS}"
+      exec taskset --cpu-list "$SDU_APEX_IROS_RUNTIME_AFFINITY_CPUS" \
+        ros2 launch sdu_apex_autodrive controller.launch.py "$@"
     fi
     exec ros2 launch sdu_apex_autodrive controller.launch.py "$@"
   ' >"$run_dir/controller.log" 2>&1 &

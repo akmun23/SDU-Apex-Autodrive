@@ -6,8 +6,8 @@
 namespace f1tenth_mpc {
 
 /* Transaction around a 40Hz solve. A computed-but-unissued solution does
- * NOT own the previously published command, source nominal, or ADMM duals.
- * Taking a 22KB POD snapshot before the solve permits exact rollback after a
+ * NOT own the previously published command or source nominal.
+ * Taking a POD snapshot before the solve permits exact rollback after a
  * deadline miss, instead of discarding the last issued plan's warm state.
  * Always revalidate the certified action from the CURRENT source plant
  * before publication; this class only restores an optimization seed. */

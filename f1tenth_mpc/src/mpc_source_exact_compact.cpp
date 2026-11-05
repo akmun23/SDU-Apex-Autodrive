@@ -1,4 +1,5 @@
 #include "mpc_source_exact_compact.hpp"
+#include "mpc_source_terminal_speed_viability.hpp"
 #include "vehicle_model.h"
 
 #include <algorithm>
@@ -34,12 +35,15 @@ bool source_exact_compact_qp_linearization(
     program->num_variables=nvar;
     program->original_source_objective=original_score.objective;
     auto dynamics=std::make_unique<DynamicsJacobian>();
+    auto slip_rows=std::make_unique<SlipEpigraphJacobian>();
     if(!linearize_dynamics_and_slip_epigraph(
         initial,progress,track,count,lap,dt,decision,
-        dynamics.get(),nullptr,&original_nominal) || !dynamics->valid)
+        dynamics.get(),penalties.include_original_slip_epigraph?slip_rows.get():nullptr,&original_nominal,
+        configuration.model.jacobian_threads) || !dynamics->valid)
         return false;
     program->original_source_stage_derivatives.assign(
         dynamics->stages,dynamics->stages+kStages);
+    program->original_source_slip_substeps=std::move(slip_rows->rows);
 
     auto epigraph=std::make_unique<SlipEpigraphDecision>();
     epigraph->shooting=decision;
@@ -148,6 +152,34 @@ bool source_exact_compact_qp_linearization(
                             {col+kPhysical+2,path}}))
                     return false;
             }
+    }
+    if(penalties.terminal_speed_viability_weight>0.) {
+        if(!std::isfinite(penalties.terminal_speed_allowance_mps) ||
+           penalties.terminal_speed_allowance_mps<0.)return false;
+        TerminalSpeedViability terminal{};
+        if(!terminal_source_speed_viability(
+             track,count,lap,original_nominal,
+             penalties.terminal_speed_allowance_mps,&terminal))
+            return false;
+        // At a real speed knot the periodic piecewise-linear reference
+        // has two distinct one-sided progress derivatives. Both cuts are
+        // included in the SAME constrained SQP model; no invented spline,
+        // tangent averaging or additional nonlinear candidate search.
+        const int stage=kStages-1;
+        const int col=stage*kState;
+        const bool kink=terminal.at_reference_knot &&
+            std::abs(terminal.slope_forward-
+                     terminal.slope_backward)>1.e-9;
+        const int cuts=kink?2:1;
+        for(int side=0;side<cuts;++side) {
+            const double slope=side==0?
+                terminal.slope_forward:terminal.slope_backward;
+            if(!add(NonlinearRowType::TerminalSpeedViability,
+                stage,side,terminal.margin_mps,
+                {{col+UNITY_SOURCE_U,-1.},
+                 {col+kPhysical+2,slope}}))
+                return false;
+        }
     }
     for(int k=0;k<kStages;++k) {
         const int u=state_count+2*k;

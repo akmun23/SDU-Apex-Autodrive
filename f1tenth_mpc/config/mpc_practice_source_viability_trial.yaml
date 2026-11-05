@@ -1,0 +1,7 @@
+# Isolated experiment: finite deceleration/curvature viability preview on
+# the same geometric raceline; original-source SQP, constraints and exact
+# validation are unchanged. Not a replacement vehicle model or controller.
+/**:
+  ros__parameters:
+    curvature_speed_envelope_lateral_accel_mps2: 8.0
+    curvature_speed_envelope_braking_mps2: 5.0

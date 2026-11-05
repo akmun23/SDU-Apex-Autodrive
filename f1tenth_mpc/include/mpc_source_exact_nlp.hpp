@@ -181,7 +181,8 @@ bool linearize_dynamics_and_slip_epigraph(
     const MpcTrajectorySample_t *trajectory,size_t trajectory_count,
     double lap_length,float dt,const Decision &decision,
     DynamicsJacobian *dynamics,SlipEpigraphJacobian *slip,
-    const MpcRtiNominal_t *known_original_source_trace=nullptr);
+    const MpcRtiNominal_t *known_original_source_trace=nullptr,
+    int requested_threads=0);
 /* Derivative of the ORIGINAL nonlinear stage racing objective in sparse
  * shooting coordinates with slip represented by exact epigraph variables.
  * Uses the scorer's frozen objective schedule, actual source lateral-slip
@@ -235,7 +236,8 @@ bool original_source_objective_gradient(
  */
 enum class NonlinearRowType : unsigned char {
     DynamicsEquality, BodyCorner, PhysicalCommandRate,
-    PhysicalCommandBox, PeakNonnegative, OriginalSlipSubstep
+    PhysicalCommandBox, PeakNonnegative, OriginalSlipSubstep,
+    TerminalSpeedViability
 };
 struct SparseNonlinearRow {
     NonlinearRowType type{};
@@ -258,6 +260,7 @@ struct SparseNonlinearProgram {
     // nonlinear dynamics equalities. Retain them for a consistent,
     // source-derived reduced constraint-search metric (no refitting).
     std::vector<StageJacobian> original_source_stage_derivatives;
+    std::vector<SlipEpigraphJacobianRow> original_source_slip_substeps;
     // Exact first derivatives of the same original nonlinear stage scorer.
     // Two-sided progress slopes remain separate at a reference-bound knot.
     std::vector<double> objective_gradient;
@@ -294,6 +297,9 @@ struct ConstraintMeritWeights {
     double footprint{};
     double command_rate{};
     double minimum_corner_clearance_m{};
+    double terminal_speed_viability_weight{};
+    double terminal_speed_allowance_mps{};
+    bool include_original_slip_epigraph{};
 };
 struct ReducedSourceGradient {
     double control[kStages][2]{};

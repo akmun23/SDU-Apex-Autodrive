@@ -141,7 +141,7 @@ bool linearize_dynamics_and_slip_epigraph(
     const MpcTrajectorySample_t *trajectory,size_t trajectory_count,
     double lap_length,float dt,const Decision &decision,
     DynamicsJacobian *dynamics,SlipEpigraphJacobian *slip_rows,
-    const MpcRtiNominal_t *known_original_source_trace)
+    const MpcRtiNominal_t *known_original_source_trace,int requested_threads)
 {
     if((!dynamics&&!slip_rows)||!trajectory||trajectory_count<3 ||
        !std::isfinite(initial_progress)||!std::isfinite(lap_length)||
@@ -311,11 +311,12 @@ bool linearize_dynamics_and_slip_epigraph(
         const auto &trace=*known_original_source_trace;
         std::atomic<bool> all_valid{true};
 #ifdef _OPENMP
+        const int workers=std::min({8,omp_get_max_threads(),std::max(1,requested_threads)});
         const bool parallel=
-            omp_get_max_threads()>1 &&
+            workers>1 &&
             std::getenv("MPC_SOURCE_NLP_FORCE_SERIAL_STAGE_AD")==nullptr;
         if(parallel) {
-#pragma omp parallel num_threads(std::min(8,omp_get_max_threads()))
+#pragma omp parallel num_threads(workers)
             {
                 auto scratch=slip_rows?
                     std::make_unique<UnitySourceSlipSubstepSensitivityC[]>(

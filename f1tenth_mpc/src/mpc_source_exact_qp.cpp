@@ -1,4 +1,6 @@
 #include "mpc_source_exact_qp.hpp"
+#include "mpc_source_convex_qp.hpp"
+#include "mpc_rti_internal.hpp"
 #include "unity_source_plant_c.h"
 
 #include <Eigen/Cholesky>
@@ -23,6 +25,7 @@ struct PhysicalRow {
     explicit PhysicalRow(int n):slope(Vector::Zero(n)) {}
     Vector slope;
     double margin{};
+    double original_margin{};
     double weight{};
     double multiplier{};
     size_t row_index{};
@@ -43,15 +46,20 @@ bool source_exact_constrained_qp_direction(
        !nominal_controls ||
        program.original_source_stage_derivatives.size()!=kStages ||
        program.equality_rows!=E ||
-       !(options.curvature_regularization>0.) ||
-       !(options.inequality_penalty_weight>0.) ||
+       !(options.curvature_regularization>0.) || !std::isfinite(options.curvature_regularization) ||
+       !(options.inequality_penalty_weight>0.) || !std::isfinite(options.inequality_penalty_weight) ||
+       !std::isfinite(options.infeasible_linearization_l1_weight) || options.infeasible_linearization_l1_weight<0. ||
        options.maximum_qp_iterations<1 ||
        options.maximum_qp_iterations>5000 ||
        !(options.kkt_tolerance>0.) ||
        !std::isfinite(options.requested_corner_clearance_m) ||
        options.requested_corner_clearance_m<0. ||
+       !std::isfinite(options.terminal_speed_viability_weight) ||
+       options.terminal_speed_viability_weight<0. ||
        (options.inequality_multipliers &&
-        options.inequality_multipliers->size()!=program.rows.size()))
+        options.inequality_multipliers->size()!=program.rows.size()) ||
+       (options.constraint_margin_corrections &&
+        options.constraint_margin_corrections->size()!=program.rows.size()))
         return false;
     *output={};
     const auto begin=std::chrono::steady_clock::now();
@@ -94,6 +102,7 @@ bool source_exact_constrained_qp_direction(
     std::vector<PhysicalRow> rows;
     rows.reserve(16*kStages);
     output->inequality_multipliers.assign(program.rows.size(),0.);
+    output->predicted_constraint_margins.assign(program.rows.size(),0.);
     const auto append=[&](PhysicalRow &&row) {
         if(!finite(row.slope) || !std::isfinite(row.margin))
             return false;
@@ -104,15 +113,21 @@ bool source_exact_constrained_qp_direction(
         const auto &src=program.rows[r];
         if(src.type!=NonlinearRowType::BodyCorner &&
            src.type!=NonlinearRowType::PhysicalCommandRate &&
-           src.type!=NonlinearRowType::PhysicalCommandBox)
+           src.type!=NonlinearRowType::PhysicalCommandBox &&
+           src.type!=NonlinearRowType::TerminalSpeedViability)
             continue;
         PhysicalRow row(n);
         row.type=src.type;
-        row.margin=src.value-
-            (src.type==NonlinearRowType::BodyCorner?
-             options.requested_corner_clearance_m:0.);
-        row.hard=src.type==NonlinearRowType::PhysicalCommandBox;
-        row.weight=options.inequality_penalty_weight;
+        row.margin=src.value;
+        row.original_margin=src.value;
+        if(options.constraint_margin_corrections)
+            row.margin+=(*options.constraint_margin_corrections)[r];
+        row.hard=src.type!=NonlinearRowType::TerminalSpeedViability;
+        row.weight=
+            src.type==NonlinearRowType::TerminalSpeedViability?
+            options.terminal_speed_viability_weight:
+            options.inequality_penalty_weight;
+        if(!(row.weight>0.))return false;
         row.row_index=r;
         row.multiplier=options.inequality_multipliers?
             (*options.inequality_multipliers)[r]:0.;
@@ -136,12 +151,15 @@ bool source_exact_constrained_qp_direction(
             ++output->original_footprint_rows;
         else if(src.type==NonlinearRowType::PhysicalCommandRate)
             ++output->original_rate_rows;
-        else
+        else if(src.type==NonlinearRowType::PhysicalCommandBox)
             ++output->original_box_rows;
         if(!append(std::move(row)))return false;
     }
     if(rows.empty())return false;
     Vector g=Vector::Zero(n);
+    Vector peak_gradient=Vector::Zero(n);
+    Matrix peak_gauss_newton=Matrix::Zero(n,n);
+    const bool peak_epigraph=!program.original_source_slip_substeps.empty();
     // Always optimize the ORIGINAL racing cost, including at an infeasible
     // iterate. Constraints enter the same QP via augmented-Lagrangian
     // multipliers; no alternate objective or Phase-I controller.
@@ -155,45 +173,9 @@ bool source_exact_constrained_qp_direction(
            !std::isfinite(nominal_controls[k].throttle_command))
             return false;
 
-    // The physically enforced input-box inequalities each select one
-    // ORIGINAL control coordinate. Their feasible set is a box in the
-    // scaled correction; no additional previous-iterate trust box exists.
-    Vector lower=Vector::Constant(n,-1.e30);
-    Vector upper=Vector::Constant(n,1.e30);
-    for(const auto &row:rows) {
-        if(!row.hard) {
-            if(row.margin<0.)
-                output->predicted_linearized_violation_before+=
-                    .5*row.margin*row.margin;
-            continue;
-        }
-        int nonzero=-1;
-        for(int j=0;j<n;++j)
-            if(std::abs(row.slope(j))>1.e-12) {
-                if(nonzero>=0)return false;
-                nonzero=j;
-            }
-        if(nonzero<0) {
-            if(row.margin<0.)return false;
-            continue;
-        }
-        const double limit=-row.margin/row.slope(nonzero);
-        if(row.slope(nonzero)>0.)
-            lower(nonzero)=std::max(lower(nonzero),limit);
-        else
-            upper(nonzero)=std::min(upper(nonzero),limit);
-    }
-    for(int j=0;j<n;++j)
-        if(lower(j)>upper(j)+1.e-10)return false;
-
-    // Equivalent convex QP:
-    // min 0.5*h*||x||^2 + g'x + 0.5*w*||s||^2
-    // s.t. source_margin + source_J*x + s >= 0, s >= 0,
-    //      physical_input_lower <= nominal+scaled*x <= upper.
-    // Eliminate s analytically: s=max(0,-source_margin-source_J*x).
-    // Semismooth primal active-set Newton solves the resulting exact
-    // piecewise-quadratic QP with one 60x60 SPD system per iteration.
-    // This replaces unconverged ADMM sweeps, not the source dynamics.
+    // Hard source geometry, command-rate and command-box rows are distinct
+    // from the preferred clearance epigraph. Preferred clearance contributes
+    // a finite quadratic cost, never a persistent constraint multiplier.
     const double h=options.curvature_regularization;
     // Source-derived PSD racing-cost curvature. All feature gradients use
     // the SAME stage source A/B used in the feasibility QP and the exact
@@ -250,6 +232,26 @@ bool source_exact_constrained_qp_direction(
                !add(feature_for_state(k,UNITY_SOURCE_PHYSICAL_STEERING),
                     terminal*cfg.weight_steering_command))return false;
 
+            // The exact objective penalizes each wheel's source-selected
+            // peak slip. Omitting these GN features discarded the dominant
+            // steering/throttle/body coupling on the failing corner.
+            const auto &stage=program.original_source_stage_derivatives[k];
+            const double slip_weight=terminal*longitudinal_slip_weight_for_reference(
+                &cfg,&schedule.references[k+1]);
+            for(int wheel=0;wheel<4;++wheel) {
+                Vector feature=Vector::Zero(n);
+                for(int j=0;j<N;++j) {
+                    double slope=j/2==k?stage.peak_slip_control[wheel][j%2]:0.;
+                    if(k>0)
+                        for(int state=0;state<kState;++state)
+                            slope+=stage.peak_slip_state[wheel][state]*sensitivity[k-1](state,j);
+                    feature(j)=slope*input_scale[j%2];
+                }
+                if(!add(feature,slip_weight))return false;
+                peak_gauss_newton.noalias()+=2.*slip_weight*feature*feature.transpose();
+                peak_gradient.noalias()+=2.*slip_weight*stage.source_peak_slip[wheel]*feature;
+            }
+
             // Direct command and source-delayed command queues, with
             // original stage reference/slew effects. Unlike diagonal
             // curvature, these features couple consecutive controls.
@@ -271,6 +273,96 @@ bool source_exact_constrained_qp_direction(
         }
         if(!source_cost_hessian.allFinite())return false;
     }
+    const Matrix racing_hessian=source_cost_hessian-Matrix::Identity(n,n)*h;
+    const Matrix base_gauss_newton=racing_hessian-(peak_epigraph?peak_gauss_newton:Matrix::Zero(n,n));
+    const Vector base_gradient=g-(peak_epigraph?peak_gradient:Vector::Zero(n));
+    if(peak_epigraph)source_cost_hessian-=peak_gauss_newton;
+    const auto slip_slope=[&](const SlipEpigraphJacobianRow &row) {
+        Vector slope(n);
+        for(int j=0;j<n;++j) {
+            double a=j/2==row.stage?row.control[j%2]:0.;
+            if(row.stage>0)
+                for(int state=0;state<kPhysical;++state)
+                    a+=row.previous_physical_state[state]*sensitivity[row.stage-1](state,j);
+            slope(j)=-a*input_scale[j%2];
+        }
+        return slope;
+    };
+    if(auto *memory=options.lagrangian_memory) {
+        std::array<double,N> coordinates{};
+        for(int j=0;j<N;++j)coordinates[j]=(j%2?
+            double(nominal_controls[j/2].throttle_command):
+            double(nominal_controls[j/2].steering_target_rad))/input_scale[j%2];
+        if(!memory->valid) {
+            for(int i=0;i<N;++i)
+                for(int j=0;j<N;++j) {
+                    memory->hessian[i*N+j]=base_gauss_newton(i,j);
+                    memory->racing_gauss_newton[i*N+j]=base_gauss_newton(i,j);
+                }
+            memory->valid=true;
+        } else if(memory->anchor_valid &&
+                  (!memory->linearized_controls_valid || coordinates!=memory->linearized_controls)) {
+            Vector s(n),y(n),lagrangian=base_gradient;
+            if(memory->frozen_curvature_multipliers.size()!=program.rows.size())return false;
+            for(const auto &row:rows)
+                lagrangian.noalias()-=memory->frozen_curvature_multipliers[row.row_index]*row.slope;
+            bool same_slip_structure=true;
+            for(const auto &multiplier:memory->frozen_slip_multipliers) {
+                if(multiplier.source_row_index>=program.original_source_slip_substeps.size()) {
+                    same_slip_structure=false;break;
+                }
+                const auto &row=program.original_source_slip_substeps[multiplier.source_row_index];
+                if(row.stage!=multiplier.stage || row.wheel!=multiplier.wheel ||
+                   row.fixed_tick!=multiplier.fixed_tick || row.vehicle_substep!=multiplier.vehicle_substep) {
+                    same_slip_structure=false;break;
+                }
+                lagrangian.noalias()-=multiplier.multiplier*slip_slope(row);
+            }
+            for(int j=0;j<N;++j) {
+                s(j)=coordinates[j]-memory->anchor_controls[j];
+                y(j)=lagrangian(j)-memory->anchor_gradient[j];
+            }
+            Matrix B(n,n);
+            for(int i=0;i<N;++i)
+                for(int j=0;j<N;++j)B(i,j)=memory->hessian[i*N+j]+
+                    (options.refresh_known_gauss_newton?
+                     base_gauss_newton(i,j)-memory->racing_gauss_newton[i*N+j]:0.);
+            // Refresh known source GN curvature at every accepted primal;
+            // retain only the learned residual curvature. A stale initial
+            // tire-slip metric can otherwise dominate after slip disappears.
+            Eigen::LLT<Matrix> positive(B+Matrix::Identity(n,n)*1.e-6);
+            if(positive.info()!=Eigen::Success || !same_slip_structure)B=base_gauss_newton;
+            const Vector Bs=B*s;
+            const double sBs=s.dot(Bs),sy=s.dot(y);
+            if(same_slip_structure && s.squaredNorm()>1.e-18 && sBs>1.e-12 && std::isfinite(sy)) {
+                const double damping=sy>=.2*sBs?1.:.8*sBs/(sBs-sy);
+                const Vector r=damping*y+(1.-damping)*Bs;
+                const double sr=s.dot(r);
+                if(sr>1.e-12) {
+                    B.noalias()-=Bs*Bs.transpose()/sBs;
+                    B.noalias()+=r*r.transpose()/sr;
+                    if(!B.allFinite())return false;
+                    output->lagrangian_bfgs_updated=true;
+                    output->lagrangian_bfgs_damping=damping;
+                }
+            }
+            for(int i=0;i<N;++i)
+                for(int j=0;j<N;++j) {
+                    memory->hessian[i*N+j]=.5*(B(i,j)+B(j,i));
+                    memory->racing_gauss_newton[i*N+j]=base_gauss_newton(i,j);
+                }
+        }
+        memory->linearized_controls=coordinates;
+        memory->linearized_controls_valid=true;
+        for(int i=0;i<N;++i)
+            for(int j=0;j<N;++j)source_cost_hessian(i,j)=memory->hessian[i*N+j]+(i==j?h:0.);
+    }
+    if(options.lagrangian_hessian_scaled) {
+        for(int i=0;i<n;++i)
+            for(int j=0;j<n;++j)source_cost_hessian(i,j)=
+                (*options.lagrangian_hessian_scaled)[i*n+j]+(i==j?h:0.);
+        if(!source_cost_hessian.allFinite())return false;
+    }
     // Full-step source curvature calibration: the physical plant's
     // actual nonlinear response is authoritative. A rejected full-step
     // contributes one nonnegative rank-one secant in the original control
@@ -289,150 +381,283 @@ bool source_exact_constrained_qp_direction(
             source_cost_hessian.noalias()+=
                 secant.curvature*unit*unit.transpose();
         }
-    // Original source-NLP KKT residual at the current physical iterate.
-    // Multipliers apply to unmodified original source constraints.  Box
-    // normal-cone projection is computed at a zero control correction.
-    Vector stationarity=g;
-    for(const auto &row:rows) {
-        const double infeasibility=std::max(0.,-row.margin);
-        output->original_nlp_inequality_residual_inf=std::max(
-            output->original_nlp_inequality_residual_inf,infeasibility);
-        if(row.hard)continue;
-        stationarity.noalias()-=row.multiplier*row.slope;
-        output->original_nlp_complementarity_inf=std::max(
-            output->original_nlp_complementarity_inf,
-            std::abs(row.multiplier*row.margin));
-    }
-    for(int j=0;j<n;++j) {
-        if((lower(j)>=-1.e-10 && stationarity(j)>0.) ||
-           (upper(j)<=1.e-10 && stationarity(j)<0.))
-            stationarity(j)=0.;
-    }
-    output->original_nlp_stationarity_inf=
-        stationarity.lpNorm<Eigen::Infinity>();
-    if(!std::isfinite(output->original_nlp_stationarity_inf) ||
-       !std::isfinite(output->original_nlp_complementarity_inf))
-        return false;
-    const auto clamp=[&](const Vector &v) {
-        return v.cwiseMax(lower).cwiseMin(upper);
-    };
-    const auto model=[&](const Vector &v,Vector *gradient,
-                         Matrix *hessian) {
-        double cost=.5*v.dot(source_cost_hessian*v)+g.dot(v);
-        if(gradient)*gradient=source_cost_hessian*v+g;
-        if(hessian)*hessian=source_cost_hessian;
+    if(options.capture_curvature_model) {
+        output->racing_hessian_scaled.resize(n*n);
+        output->stabilized_hessian_scaled.resize(n*n);
+        for(int i=0;i<n;++i)
+            for(int j=0;j<n;++j) {
+                output->racing_hessian_scaled[i*n+j]=racing_hessian(i,j);
+                output->stabilized_hessian_scaled[i*n+j]=source_cost_hessian(i,j);
+            }
         for(const auto &row:rows) {
-            if(row.hard)continue;
-            // Powell-Hestenes-Rockafellar inequality AL model:
-            // λ >= 0, c(U)>=0.  The shifted elastic residual carries
-            // active physical constraint multipliers across SQP passes.
-            // It is a single NLP, not a separate feasibility optimizer.
-            const double shifted_margin=
-                row.margin+row.slope.dot(v)-
-                row.multiplier/row.weight;
-            if(shifted_margin>=0.)continue;
-            cost+=.5*row.weight*shifted_margin*shifted_margin;
-            if(gradient)
-                gradient->noalias()+=
-                    row.weight*shifted_margin*row.slope;
-            if(hessian)
-                hessian->noalias()+=
-                    row.weight*row.slope*row.slope.transpose();
-        }
-        return cost;
-    };
-    Vector x=clamp(Vector::Zero(n));
-    Vector gradient=Vector::Zero(n);
-    Matrix H=Matrix::Zero(n,n);
-    double value=model(x,&gradient,&H);
-    for(int it=0;it<options.maximum_qp_iterations;++it) {
-        Vector projected=gradient;
-        std::vector<bool> active(n,false);
-        for(int j=0;j<n;++j) {
-            active[j]=(x(j)<=lower(j)+1.e-10 && gradient(j)>0.) ||
-                      (x(j)>=upper(j)-1.e-10 && gradient(j)<0.);
-            if(active[j])projected(j)=0.;
-        }
-        output->iterations=it+1;
-        output->dual_residual=
-            projected.lpNorm<Eigen::Infinity>();
-        if(output->dual_residual<=options.kkt_tolerance) {
-            output->converged=1;
-            break;
-        }
-        for(int j=0;j<n;++j)
-            if(active[j]) {
-                H.row(j).setZero();
-                H.col(j).setZero();
-                H(j,j)=1.;
-            }
-        Eigen::LLT<Matrix> factor(H);
-        if(factor.info()!=Eigen::Success)return false;
-        Vector step=factor.solve(-projected);
-        if(!finite(step))return false;
-        bool accepted=false;
-        // QP-model globalization only; after this solve the accepted MPC
-        // trajectory is STILL separately checked by the exact nonlinear
-        // source rollout and exact racing cost.
-        for(int t=0;t<22;++t) {
-            const Vector next=clamp(x+std::ldexp(1.,-t)*step);
-            if((next-x).squaredNorm()<1.e-24)continue;
-            const double next_cost=model(next,nullptr,nullptr);
-            if(std::isfinite(next_cost) &&
-               next_cost<value-1.e-13*
-                   std::max(1.,std::abs(value))) {
-                x=next;
-                value=model(x,&gradient,&H);
-                accepted=true;
-                break;
-            }
-        }
-        if(!accepted) {
-            // Globally valid projected-gradient direction for this
-            // convex quadratic model; no new vehicle-model approximation.
-            const double lipschitz=std::max(h,H.trace());
-            const Vector next=clamp(x-gradient/lipschitz);
-            const double next_cost=model(next,nullptr,nullptr);
-            if(!std::isfinite(next_cost) || !(next_cost<value))
-                break;
-            x=next;
-            value=model(x,&gradient,&H);
+            output->constraint_row_indices.push_back(static_cast<int>(row.row_index));
+            output->constraint_margins.push_back(row.margin);
+            for(int j=0;j<n;++j)output->constraint_jacobian_scaled.push_back(row.slope(j));
         }
     }
-    Vector projected=gradient;
-    for(int j=0;j<n;++j)
-        if((x(j)<=lower(j)+1.e-10 && gradient(j)>0.) ||
-           (x(j)>=upper(j)-1.e-10 && gradient(j)<0.))
-            projected(j)=0.;
-    output->dual_residual=projected.lpNorm<Eigen::Infinity>();
-    output->converged|=
-        output->dual_residual<=options.kkt_tolerance;
+    if(options.linearization_audit_only) {
+        if(!options.capture_curvature_model)return false;
+        output->valid=true;
+        output->wall_ms=std::chrono::duration<double,std::milli>(
+            std::chrono::steady_clock::now()-begin).count();
+        return true;
+    }
+    SourceConvexQp problem;
+    problem.hessian=source_cost_hessian;
+    problem.gradient=base_gradient;
+    int hard_count=0,elastic_count=0;
+    const bool elastic_globalization=options.infeasible_linearization_l1_weight>0.;
     for(const auto &row:rows) {
-        const double margin=row.margin+row.slope.dot(x);
-        if(row.hard)
-            output->primal_residual=std::max(
-                output->primal_residual,std::max(0.,-margin));
-        else {
-            const double violation=std::min(0.,margin);
-            output->predicted_linearized_violation_after+=
-                .5*violation*violation;
-            output->inequality_multipliers[row.row_index]=
-                std::max(0.,row.multiplier-row.weight*margin);
+        const bool recovery=elastic_globalization && row.type==NonlinearRowType::BodyCorner;
+        hard_count+=row.hard && !recovery;
+        elastic_count+=row.type==NonlinearRowType::BodyCorner || !row.hard;
+        elastic_count+=recovery;
+    }
+    problem.hard_jacobian.resize(hard_count,n);
+    problem.hard_margin.resize(hard_count);
+    problem.initial_hard_multipliers.resize(hard_count);
+    std::vector<const SlipEpigraphJacobianRow *> peak_rows;
+    if(peak_epigraph) {
+        std::array<const SlipEpigraphJacobianRow *,4*kStages> largest{};
+        for(const auto &row:program.original_source_slip_substeps) {
+            const int group=4*row.stage+row.wheel;
+            if(row.original_source_excess>0. && (!largest[group] ||
+               row.original_source_excess>largest[group]->original_source_excess))largest[group]=&row;
+        }
+        for(const auto *row:largest)if(row)peak_rows.push_back(row);
+    }
+    const int base_elastic=elastic_count;
+    problem.elastic_jacobian.resize(elastic_count+peak_rows.size(),n);
+    problem.elastic_margin.resize(elastic_count+peak_rows.size());
+    problem.elastic_groups.resize(elastic_count+peak_rows.size());
+    problem.elastic_weight=Vector::Ones(elastic_count+(peak_epigraph?4*kStages:0));
+    problem.elastic_linear_cost=Vector::Zero(problem.elastic_weight.size());
+    std::vector<int> recovery_elastic_row(program.rows.size(),-1);
+    int hi=0,ei=0;
+    for(const auto &row:rows) {
+        const bool recovery=elastic_globalization && row.type==NonlinearRowType::BodyCorner;
+        if(row.hard && !recovery) {
+            problem.hard_jacobian.row(hi)=row.slope.transpose();
+            problem.initial_hard_multipliers(hi)=row.multiplier;
+            problem.hard_margin(hi++)=row.margin;
+        }
+        if(recovery) {
+            recovery_elastic_row[row.row_index]=ei;
+            problem.elastic_jacobian.row(ei)=row.slope.transpose();
+            problem.elastic_margin(ei)=row.margin;
+            problem.elastic_weight(ei)=0.;
+            problem.elastic_linear_cost(ei++)=options.infeasible_linearization_l1_weight;
+        }
+        if(row.type==NonlinearRowType::BodyCorner || !row.hard) {
+            const double reserve=row.type==NonlinearRowType::BodyCorner?
+                options.requested_corner_clearance_m:0.;
+            problem.elastic_jacobian.row(ei)=row.slope.transpose();
+            problem.elastic_margin(ei)=row.margin-reserve;
+            problem.elastic_weight(ei++)=row.weight;
         }
     }
-    // The QP may solve only for feasibility (zero racing gradient), but
-    // its cost predictor must ALWAYS use the ORIGINAL source objective
-    // gradient and never include artificial numerical regularization.
+    for(int i=0;i<base_elastic;++i)problem.elastic_groups(i)=i;
+    if(peak_epigraph) {
+        if(!options.source_configuration || !options.source_configuration->objective_schedule)return false;
+        for(int k=0;k<kStages;++k) {
+            const auto &cfg=options.source_configuration->model;
+            const auto &ref=options.source_configuration->objective_schedule->references[k+1];
+            const double weight=2.*longitudinal_slip_weight_for_reference(&cfg,&ref)*
+                (k==kStages-1?cfg.terminal_multiplier:1.);
+            for(int wheel=0;wheel<4;++wheel)problem.elastic_weight(base_elastic+4*k+wheel)=weight;
+        }
+    }
+    const auto append_peak_rows=[&](int first_row) {
+        problem.elastic_jacobian.conservativeResize(base_elastic+peak_rows.size(),n);
+        problem.elastic_margin.conservativeResize(base_elastic+peak_rows.size());
+        problem.elastic_groups.conservativeResize(base_elastic+peak_rows.size());
+        for(int index=first_row;index<static_cast<int>(peak_rows.size());++index) {
+            const auto *row=peak_rows[index];
+            const int target=base_elastic+index,k=row->stage;
+            problem.elastic_groups(target)=base_elastic+4*k+row->wheel;
+            problem.elastic_margin(target)=-row->original_source_excess;
+            for(int j=0;j<n;++j) {
+                double a=j/2==k?row->control[j%2]:0.;
+                if(k>0)
+                    for(int state=0;state<kPhysical;++state)
+                        a+=row->previous_physical_state[state]*sensitivity[k-1](state,j);
+                problem.elastic_jacobian(target,j)=-a*input_scale[j%2];
+            }
+        }
+    };
+    append_peak_rows(0);
+    SourceConvexQpResult solved;
+
+    // Inexact SQP forcing: do not solve a local QP to 1e-4 stationarity
+    // when its original nonlinear KKT residual is millions. Tighten as
+    // the nonlinear primal/dual iterate converges; hard primal tolerance
+    // remains unchanged. Always expose the actual requested accuracy.
+    Vector current_lagrangian=g;
+    for(const auto &row:rows) {
+        if(row.hard)current_lagrangian.noalias()-=row.multiplier*row.slope;
+        if(row.type==NonlinearRowType::BodyCorner || !row.hard) {
+            const double reserve=row.type==NonlinearRowType::BodyCorner?
+                options.requested_corner_clearance_m:0.;
+            current_lagrangian.noalias()+=row.weight*
+                std::min(0.,row.original_margin-reserve)*row.slope;
+        }
+    }
+    output->tolerance_used=std::max(options.kkt_tolerance,
+        std::min(100.,.001*current_lagrangian.lpNorm<Eigen::Infinity>()));
+    int total_qp_iterations=0;
+    bool all_peak_rows_satisfied=!peak_epigraph;
+    // Constraint generation solves ONE convex epigraph subproblem. Check every
+    // original source-substep affine row after each solve; never certify a QP
+    // from a selected maximum alone. No extra nonlinear trial or alpha grid.
+    for(int round=0;round<8;++round) {
+        if(!solve_source_convex_qp(problem,options.maximum_qp_iterations,
+                                  output->tolerance_used,&solved,
+                                  options.absolute_deadline_monotonic_us))return false;
+        total_qp_iterations+=solved.iterations;
+        if(!peak_epigraph || solved.deadline_exceeded)break;
+        std::array<Eigen::Matrix<double,kState,1>,kStages> state_delta;
+        for(int k=0;k<kStages;++k) {
+            Vector physical=solved.step;
+            for(int j=0;j<n;++j)physical(j)*=input_scale[j%2];
+            state_delta[k]=sensitivity[k]*physical;
+        }
+        std::array<const SlipEpigraphJacobianRow *,4*kStages> worst{};
+        std::array<double,4*kStages> defect{};
+        for(const auto &row:program.original_source_slip_substeps) {
+            const int k=row.stage,group=4*k+row.wheel;
+            double value=row.original_source_excess;
+            for(int j=0;j<2;++j)value+=row.control[j]*solved.step(2*k+j)*input_scale[j];
+            if(k>0)
+                for(int j=0;j<kPhysical;++j)value+=row.previous_physical_state[j]*state_delta[k-1](j);
+            const double violation=value-solved.elastic_values(base_elastic+group);
+            if(violation>std::max(1.e-7,defect[group])) {
+                defect[group]=violation;worst[group]=&row;
+            }
+        }
+        const int first_added=peak_rows.size();
+        for(const auto *row:worst)
+            if(row && std::find(peak_rows.begin(),peak_rows.end(),row)==peak_rows.end())peak_rows.push_back(row);
+        all_peak_rows_satisfied=std::none_of(worst.begin(),worst.end(),[](const auto *p){return p!=nullptr;});
+        if(all_peak_rows_satisfied || first_added==static_cast<int>(peak_rows.size()) || round==7) {
+            peak_rows.resize(first_added);break;
+        }
+        append_peak_rows(first_added);
+    }
+    const Vector &x=solved.step;
+    output->iterations=total_qp_iterations;
+    output->converged=solved.converged && all_peak_rows_satisfied;
+    output->deadline_exceeded=solved.deadline_exceeded;
+    output->primal_residual=solved.primal_inf;
+    output->dual_residual=solved.dual_inf;
+    output->complementarity_residual=solved.complementarity_inf;
+    Vector stationarity=problem.gradient;
+    Vector curvature_gradient=base_gradient;
+    output->curvature_multipliers.assign(program.rows.size(),0.);
+    hi=0;
+    for(const auto &row:rows) {
+        output->predicted_constraint_margins[row.row_index]=row.margin+row.slope.dot(x);
+        if(row.hard) {
+            const int recovery_index=recovery_elastic_row[row.row_index];
+            const double lambda=recovery_index>=0?solved.elastic_multipliers(recovery_index):
+                solved.hard_multipliers(hi++);
+            output->inequality_multipliers[row.row_index]=lambda;
+            output->curvature_multipliers[row.row_index]=lambda;
+            stationarity.noalias()-=lambda*row.slope;
+            output->original_nlp_dual_feasibility_inf=std::max(
+                output->original_nlp_dual_feasibility_inf,std::max(0.,-lambda));
+            output->original_nlp_inequality_residual_inf=std::max(
+                output->original_nlp_inequality_residual_inf,std::max(0.,-row.original_margin));
+            output->original_nlp_complementarity_inf=std::max(
+                output->original_nlp_complementarity_inf,std::abs(lambda*row.original_margin));
+        }
+        if(row.type==NonlinearRowType::BodyCorner || !row.hard) {
+            const double reserve=row.type==NonlinearRowType::BodyCorner?
+                options.requested_corner_clearance_m:0.;
+            const double before=std::min(0.,row.original_margin-reserve);
+            const double after=std::min(0.,row.margin+row.slope.dot(x)-reserve);
+            output->curvature_multipliers[row.row_index]-=row.weight*after;
+            stationarity.noalias()+=row.weight*before*row.slope;
+            if(row.type==NonlinearRowType::TerminalSpeedViability) {
+                output->predicted_terminal_speed_violation_before=std::max(
+                    output->predicted_terminal_speed_violation_before,.5*before*before);
+                output->predicted_terminal_speed_violation_after=std::max(
+                    output->predicted_terminal_speed_violation_after,.5*after*after);
+            } else {
+                output->predicted_linearized_violation_before+=.5*before*before;
+                output->predicted_linearized_violation_after+=.5*after*after;
+            }
+        } else if(row.type==NonlinearRowType::PhysicalCommandRate) {
+            const double before=std::min(0.,row.margin);
+            const double after=std::min(0.,row.margin+row.slope.dot(x));
+            output->predicted_linearized_violation_before+=.5*before*before;
+            output->predicted_linearized_violation_after+=.5*after*after;
+        }
+        curvature_gradient.noalias()-=output->curvature_multipliers[row.row_index]*row.slope;
+    }
+    if(peak_epigraph) {
+        Vector peak_dual=Vector::Zero(4*kStages);
+        for(int i=0;i<static_cast<int>(peak_rows.size());++i) {
+            const auto &row=*peak_rows[i];
+            const double lambda=solved.elastic_multipliers(base_elastic+i);
+            stationarity.noalias()-=lambda*problem.elastic_jacobian.row(base_elastic+i).transpose();
+            curvature_gradient.noalias()-=lambda*problem.elastic_jacobian.row(base_elastic+i).transpose();
+            if(lambda>1.e-8)output->slip_curvature_multipliers.push_back({
+                row.stage,row.wheel,row.fixed_tick,row.vehicle_substep,
+                static_cast<size_t>(peak_rows[i]-program.original_source_slip_substeps.data()),lambda});
+            peak_dual(4*row.stage+row.wheel)+=lambda;
+            const double nominal_peak=program.original_source_stage_derivatives[row.stage].source_peak_slip[row.wheel];
+            output->original_nlp_complementarity_inf=std::max(output->original_nlp_complementarity_inf,
+                std::abs(lambda*(nominal_peak-row.original_source_excess)));
+        }
+        for(int k=0;k<kStages;++k)
+            for(int wheel=0;wheel<4;++wheel) {
+                const int index=4*k+wheel;
+                const double value=program.original_source_stage_derivatives[k].source_peak_slip[wheel];
+                const double residual=problem.elastic_weight(base_elastic+index)*value-peak_dual(index);
+                // t>=0 is a genuine epigraph bound. At t=0, its dual can
+                // absorb a nonnegative derivative, never a negative one.
+                output->original_nlp_stationarity_inf=std::max(output->original_nlp_stationarity_inf,
+                    value>0.?std::abs(residual):std::max(0.,-residual));
+            }
+    }
+    // Return stationarity in physical command coordinates, not hidden scaled
+    // variables. QP multipliers are estimates at this ORIGINAL nonlinear
+    // iterate; residuals are never relabeled as the QP's own convergence.
+    for(int j=0;j<n;++j)stationarity(j)/=input_scale[j%2];
+    for(int j=0;j<n;++j)output->lagrangian_gradient_at_qp_duals[j]=curvature_gradient(j);
+    output->original_nlp_stationarity_inf=std::max(output->original_nlp_stationarity_inf,
+        stationarity.lpNorm<Eigen::Infinity>());
+    if(!std::isfinite(output->original_nlp_stationarity_inf) ||
+       !std::isfinite(output->original_nlp_complementarity_inf))return false;
+    // Predict original racing cost only. Stabilization and calibrated
+    // constraint-merit curvature do not belong to the racing Hessian.
     for(int k=0;k<kStages;++k)
         for(int axis=0;axis<2;++axis)
             output->source_cost_linear_slope+=
                 original_objective_control_gradient[k][axis]*
                 x(2*k+axis)*input_scale[axis];
     output->source_cost_psd_quadratic=std::max(0.,
-        x.dot(source_cost_hessian*x)-h*x.squaredNorm());
+        x.dot(racing_hessian*x));
     output->predicted_original_objective_change=
         output->source_cost_linear_slope+
         .5*output->source_cost_psd_quadratic;
+    if(peak_epigraph) {
+        Vector peaks=Vector::Zero(4*kStages);
+        for(int i=base_elastic;i<problem.elastic_margin.size();++i) {
+            const int group=problem.elastic_groups(i)-base_elastic;
+            peaks(group)=std::max(peaks(group),-problem.elastic_margin(i)-
+                problem.elastic_jacobian.row(i).dot(x));
+        }
+        output->predicted_original_objective_change=problem.gradient.dot(x)+
+            .5*x.dot((racing_hessian-peak_gauss_newton)*x);
+        for(int k=0;k<kStages;++k)
+            for(int wheel=0;wheel<4;++wheel) {
+                const int group=4*k+wheel;
+                const double previous=program.original_source_stage_derivatives[k].source_peak_slip[wheel];
+                output->predicted_original_objective_change+=.5*problem.elastic_weight(base_elastic+group)*
+                    (peaks(group)*peaks(group)-previous*previous);
+            }
+    }
     output->valid=true;
     for(int k=0;k<kStages;++k)
         for(int axis=0;axis<2;++axis)

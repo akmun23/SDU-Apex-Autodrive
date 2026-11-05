@@ -373,7 +373,20 @@ typedef struct
     float source_exact_nlp_extra_clearance_m;
     int capture_diagnostic_outputs;
     const MpcRtiObjectiveSchedule_t *objective_schedule;
+    int capture_source_benchmark;
 } MpcRtiCycleConfiguration_t;
+
+enum { MPC_RTI_SOURCE_TRACE_CAPACITY = 8 };
+typedef struct {
+    int iteration;
+    int trial_evaluated;
+    int accepted;
+    MpcModelControl_t warm_start[PREDICTION_HORIZON];
+    MpcModelControl_t trial[PREDICTION_HORIZON];
+    int correction_evaluated;
+    int correction_accepted;
+    MpcModelControl_t correction[PREDICTION_HORIZON];
+} MpcRtiSourcePrimalTrace_t;
 
 typedef struct
 {
@@ -469,9 +482,22 @@ typedef enum
     MPC_RTI_INPUT_FAILURE_NOMINAL_BUILD
 } MpcRtiInputFailureReason_t;
 
+typedef enum {
+    MPC_SOURCE_DEADLINE_EXCEEDED = 0,
+    MPC_SOURCE_PRIMAL_INFEASIBLE,
+    MPC_SOURCE_NONLINEAR_STEP_REJECTED,
+    MPC_SOURCE_KKT_NOT_CONVERGED,
+    MPC_SOURCE_INVALID_MODEL,
+    MPC_SOURCE_FEASIBLE_SOLUTION_AVAILABLE
+} MpcSourceSolverStatus_t;
+
 typedef struct
 {
     MpcRtiCycleStatus_t status;
+    MpcSourceSolverStatus_t source_solver_status;
+    int source_linearization_failed;
+    int source_qp_failed;
+    int source_iteration_admission_stopped;
     MpcRtiInputFailureReason_t input_failure_reason;
     MpcRtiNominalBuildFailureStage_t nominal_build_failure_stage;
     MpcRtiCommandEnvelopeFailure_t nominal_build_failure_constraint;
@@ -697,6 +723,13 @@ typedef struct
     double nonlinear_objective;
     /* Common cycle objective for cross-pass and candidate/prior comparisons. */
     MpcRtiObjectiveSchedule_t comparison_objective;
+    /* Benchmark capture, independent of publication. Rejected cycles must
+     * retain their final primal too. Trace copies are explicitly opt-in. */
+    int source_optimized_control_count;
+    MpcModelControl_t source_optimized_controls[PREDICTION_HORIZON];
+    int source_primal_trace_count;
+    int source_primal_trace_truncated;
+    MpcRtiSourcePrimalTrace_t source_primal_trace[MPC_RTI_SOURCE_TRACE_CAPACITY];
 } MpcRtiCycleResult_t;
 
 int mpc_rti_build_objective_schedule(
