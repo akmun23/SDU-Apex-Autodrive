@@ -95,8 +95,8 @@ typedef struct {
   double body_lateral_displacement
       [UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
   double yaw_delta[UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
-  double maximum_longitudinal_slip_excess_mps[4];
-  double maximum_longitudinal_slip_excess_derivative[4]
+  double maximum_longitudinal_slip_residual_mps[4];
+  double maximum_longitudinal_slip_residual_derivative[4]
       [UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
 } UnitySourcePlantSensitivityC;
 

@@ -414,6 +414,12 @@ typedef struct {
     double stationarity_inf;
     double complementarity_inf;
     double maximum_footprint_prediction_error_m;
+    double model_actual_over_predicted_reduction;
+    double source_peak_slip_cost_before;
+    double source_peak_slip_cost_full_step;
+    int newly_activated_peak_slip_wheels;
+    double qp_regularization_used;
+    int invalid_qp_duals_discarded;
 } MpcRtiSourceIterationMetrics_t;
 
 typedef struct

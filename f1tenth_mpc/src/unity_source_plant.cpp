@@ -1285,6 +1285,9 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
   std::array<bool, 4> sticky_forward_output{}, sticky_side_output{};
   std::array<Scalar, 4> maximum_positive_slip{};
   std::array<Scalar, 4> maximum_slip_excess_mps{};
+  std::array<Scalar, 4> maximum_slip_residual_mps{
+      Scalar(kNoSlipResidual), Scalar(kNoSlipResidual),
+      Scalar(kNoSlipResidual), Scalar(kNoSlipResidual)};
   std::array<StickyTireConstraint<Scalar>, 8> sticky_tire_rows{};
   // EXACT zero throttle chooses the entirely different brake mode.
   // At u=0 and du>0, its one-sided value is discontinuous: no finite
@@ -1483,11 +1486,13 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
       if (collect_slip_diagnostics) {
         maximum_positive_slip[i] =
             scalar_max(maximum_positive_slip[i], slip_x[i]);
-        original_substep_slip_excess = scalar_max(0.0,
-            scalar_abs(wheel_surface - wheel_forward) -
-                kForwardCurve[0] * denominator);
+        const Scalar slip_residual = scalar_abs(wheel_surface - wheel_forward) -
+            kForwardCurve[0] * denominator;
+        original_substep_slip_excess = scalar_max(0.0, slip_residual);
         maximum_slip_excess_mps[i] = scalar_max(
             maximum_slip_excess_mps[i], original_substep_slip_excess);
+        maximum_slip_residual_mps[i] = scalar_max(
+            maximum_slip_residual_mps[i], slip_residual);
       }
       if(all_slip_substeps) {
         UnitySourceSlipSubstepSensitivity feature{};
@@ -1725,6 +1730,7 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
   if (collect_slip_diagnostics) {
     out->maximum_positive_longitudinal_slip = maximum_positive_slip;
     out->maximum_longitudinal_slip_excess_mps = maximum_slip_excess_mps;
+    out->maximum_longitudinal_slip_residual_mps = maximum_slip_residual_mps;
   }
   if constexpr (!CompleteOutput) return true;
 
@@ -1806,6 +1812,9 @@ bool step_interval(const UnitySourcePlantStateT<Scalar> &state,
   Scalar integrated_yaw_rad = 0.0;
   std::array<Scalar, 4> maximum_positive_slip{};
   std::array<Scalar, 4> maximum_slip_excess_mps{};
+  std::array<Scalar, 4> maximum_slip_residual_mps{
+      Scalar(kNoSlipResidual), Scalar(kNoSlipResidual),
+      Scalar(kNoSlipResidual), Scalar(kNoSlipResidual)};
   for (unsigned int i = 0; i < exact_steps; ++i) {
     const bool final_step = i + 1 == exact_steps;
     const bool stage_ok=final_step && !sensitivity_only
@@ -1844,11 +1853,15 @@ bool step_interval(const UnitySourcePlantStateT<Scalar> &state,
       maximum_slip_excess_mps[wheel] = scalar_max(
           maximum_slip_excess_mps[wheel],
           result.maximum_longitudinal_slip_excess_mps[wheel]);
+      maximum_slip_residual_mps[wheel] = scalar_max(
+          maximum_slip_residual_mps[wheel],
+          result.maximum_longitudinal_slip_residual_mps[wheel]);
     }
     current = result.state;
   }
   result.maximum_positive_longitudinal_slip = maximum_positive_slip;
   result.maximum_longitudinal_slip_excess_mps = maximum_slip_excess_mps;
+  result.maximum_longitudinal_slip_residual_mps = maximum_slip_residual_mps;
   result.integrated_body_forward_displacement_m = integrated_forward_m;
   result.integrated_body_lateral_displacement_m = integrated_lateral_m;
   result.integrated_yaw_delta_rad = integrated_yaw_rad;
@@ -2173,11 +2186,11 @@ bool unity_source_plant_step_with_sensitivities(
                      true,nullptr,all_slip_substeps))
     return false;
   for (std::size_t wheel = 0; wheel < 4; ++wheel) {
-    const auto &excess = dual_output.maximum_longitudinal_slip_excess_mps[wheel];
-    sensitivity->maximum_longitudinal_slip_excess_mps[wheel] = primal(excess);
+    const auto &residual = dual_output.maximum_longitudinal_slip_residual_mps[wheel];
+    sensitivity->maximum_longitudinal_slip_residual_mps[wheel] = primal(residual);
     for (std::size_t lane = 0; lane < kUnityPlantSensitivityWidth; ++lane)
-      sensitivity->maximum_longitudinal_slip_excess_derivative[wheel][lane] =
-          excess.derivative[lane];
+      sensitivity->maximum_longitudinal_slip_residual_derivative[wheel][lane] =
+          residual.derivative[lane];
   }
   for (std::size_t state_index = 0;
        state_index < kUnityPlantSensitivityStateSize; ++state_index) {

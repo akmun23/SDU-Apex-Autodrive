@@ -70,6 +70,7 @@ void MpcControllerNode::publish_cycle_diagnostics(
             <<",\"full_step_accepted\":"<<(in.full_step_accepted?"true":"false")
             <<",\"qp_converged\":"<<(in.qp_converged?"true":"false")
             <<",\"original_duals_trustworthy\":"<<(in.original_duals_trustworthy?"true":"false")
+            <<",\"invalid_qp_duals_discarded\":"<<(in.invalid_qp_duals_discarded?"true":"false")
             <<",\"qp_iterations\":"<<in.qp_iterations;
         const auto field=[&](const char *name,double value) {
             json<<",\""<<name<<"\":";finite_json(json,value);
@@ -91,6 +92,13 @@ void MpcControllerNode::publish_cycle_diagnostics(
             in.full_step_cost-in.cost_before-in.predicted_cost_change:NAN);
         field("maximum_footprint_prediction_error_m",in.full_step_evaluated?
             in.maximum_footprint_prediction_error_m:NAN);
+        field("qp_regularization_used",in.qp_regularization_used);
+        field("model_actual_over_predicted_reduction",in.full_step_evaluated?
+            in.model_actual_over_predicted_reduction:NAN);
+        field("source_peak_slip_cost_before",in.source_peak_slip_cost_before);
+        field("source_peak_slip_cost_full_step",in.full_step_evaluated?
+            in.source_peak_slip_cost_full_step:NAN);
+        json<<",\"newly_activated_peak_slip_wheels\":"<<in.newly_activated_peak_slip_wheels;
         json<<'}';
     }
     json<<']';

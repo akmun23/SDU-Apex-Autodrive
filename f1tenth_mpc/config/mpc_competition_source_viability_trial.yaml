@@ -1,7 +1,0 @@
-# Isolated IROS competition track trial. Keeps canonical competition SQP
-# weights and original source physics, enabling only a conservative
-# raceline-speed preview consistent with the 3-lap practice qualification.
-/**:
-  ros__parameters:
-    curvature_speed_envelope_lateral_accel_mps2: 8.0
-    curvature_speed_envelope_braking_mps2: 5.0

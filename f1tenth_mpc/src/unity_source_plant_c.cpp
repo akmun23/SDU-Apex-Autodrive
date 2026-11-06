@@ -402,11 +402,11 @@ extern "C" int unity_source_plant_full_and_substep_sensitivity_c(
     *count=static_cast<int>(rows.size());
     if(*count>capacity)return 0;
     for(int wheel=0;wheel<4;++wheel) {
-        out->maximum_longitudinal_slip_excess_mps[wheel]=
-            complete.maximum_longitudinal_slip_excess_mps[wheel];
+        out->maximum_longitudinal_slip_residual_mps[wheel]=
+            complete.maximum_longitudinal_slip_residual_mps[wheel];
         for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane)
-            out->maximum_longitudinal_slip_excess_derivative[wheel][lane]=
-                complete.maximum_longitudinal_slip_excess_derivative[wheel][lane];
+            out->maximum_longitudinal_slip_residual_derivative[wheel][lane]=
+                complete.maximum_longitudinal_slip_residual_derivative[wheel][lane];
     }
     for(int src=0;src<UNITY_SOURCE_PLANT_STATE_SIZE;++src)
         for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane)
@@ -603,12 +603,12 @@ extern "C" int unity_source_plant_step_sensitivity_c(
           plant_state, plant_input, duration_s, typed_seeds,
           &typed_sensitivity)) return 0;
   for (std::size_t wheel = 0; wheel < 4; ++wheel) {
-    sensitivity->maximum_longitudinal_slip_excess_mps[wheel] =
-        typed_sensitivity.maximum_longitudinal_slip_excess_mps[wheel];
+    sensitivity->maximum_longitudinal_slip_residual_mps[wheel] =
+        typed_sensitivity.maximum_longitudinal_slip_residual_mps[wheel];
     for (std::size_t lane = 0;
          lane < UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH; ++lane)
-      sensitivity->maximum_longitudinal_slip_excess_derivative[wheel][lane] =
-          typed_sensitivity.maximum_longitudinal_slip_excess_derivative[wheel][lane];
+      sensitivity->maximum_longitudinal_slip_residual_derivative[wheel][lane] =
+          typed_sensitivity.maximum_longitudinal_slip_residual_derivative[wheel][lane];
   }
   for (std::size_t state = 0; state < UNITY_SOURCE_PLANT_STATE_SIZE; ++state)
     for (std::size_t lane = 0;

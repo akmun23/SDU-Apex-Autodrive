@@ -2293,11 +2293,12 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         // execution budget remains. An exact-source-feasible current
         // iterate is retained as the same NLP's latest verified solution.
         opts.minimum_remaining_us_for_new_iteration=
-            deadline_us>0.?9000.:0.;
-        // Reserve 1.5ms for independent physical validation, memory
-        // update and publication; never silently use stale solver data.
+            deadline_us>0.?10500.:0.;
+        // A 3ms reserved interval covers independently re-simulating
+        // the final exact-source horizon and publishing its command.
+        // This deliberately avoids starting expensive late SQP work.
         opts.absolute_deadline_monotonic_us=
-            deadline_us>0. ? std::max(0.,deadline_us-1500.):0.;
+            deadline_us>0. ? std::max(0.,deadline_us-3000.):0.;
         auto optimized=std::make_unique<sdu_apex::source_nlp::OfflineResult>();
         const bool completed=
             sdu_apex::source_nlp::optimize_offline_exact_source(
@@ -2357,6 +2358,12 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             out.stationarity_inf=in.source_nlp_stationarity_inf;
             out.complementarity_inf=in.source_nlp_complementarity_inf;
             out.maximum_footprint_prediction_error_m=in.model_maximum_hard_constraint_error;
+            out.model_actual_over_predicted_reduction=in.model_actual_over_predicted_reduction;
+            out.source_peak_slip_cost_before=in.source_peak_slip_cost_before;
+            out.source_peak_slip_cost_full_step=in.source_peak_slip_cost_full_step;
+            out.newly_activated_peak_slip_wheels=in.newly_activated_peak_slip_wheels;
+            out.qp_regularization_used=in.qp_regularization_used;
+            out.invalid_qp_duals_discarded=in.invalid_qp_duals_discarded;
         }
         if(completed) {
             result->source_optimized_control_count=horizon;
@@ -2439,7 +2446,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         result->published_throttle=
             result->first_control.throttle_command;
         memory->nominal=*checked;
-            memory->solver_nominal_progress_valid=0;
+        memory->solver_nominal_progress_valid=0;
         if(!mpc_rti_memory_set_warm_start_controls_at_epoch(
             memory,result->candidate_controls,horizon,
             configuration->command_epoch_ns)) {

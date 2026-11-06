@@ -44,6 +44,9 @@ struct SourceConstrainedQpOptions {
     double absolute_deadline_monotonic_us{};
     const std::array<double,4*kStages*kStages> *lagrangian_hessian_scaled{};
     bool refresh_known_gauss_newton{true};
+    // A failed hard QP need not run feasibility restoration when the
+    // original source primal has already passed all hard constraints.
+    bool original_source_primal_feasible{false};
 
 };
 struct SourceConstrainedQpResult {

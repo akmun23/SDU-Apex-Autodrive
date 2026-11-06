@@ -11,6 +11,9 @@ namespace f1tenth_mpc {
 // body, wheel-spin, sprung-body, steering, and suspension state. It remains a
 // source translation built on public PhysX APIs, not a bit-exact copy of the
 // simulator's private WheelCollider/contact solver.
+// Residual reported for a wheel that no substep evaluated; far below any hinge.
+inline constexpr double kNoSlipResidual = -1.0e3;
+
 template <typename Scalar>
 struct UnitySourcePlantStateT {
   Scalar u_mps{};
@@ -79,6 +82,10 @@ struct UnitySourcePlantOutputT {
   std::array<Scalar, 4> longitudinal_slip{};
   std::array<Scalar, 4> maximum_positive_longitudinal_slip{};
   std::array<Scalar, 4> maximum_longitudinal_slip_excess_mps{};
+  // Signed maximum of |wheel surface - ground speed| minus the tire curve's
+  // first extremum, over all substeps: max(0, residual) is the excess above.
+  // kNoSlipResidual when no substep was evaluated.
+  std::array<Scalar, 4> maximum_longitudinal_slip_residual_mps{};
   // Uses Unity WheelHit.sidewaysSlip sign convention. The force calculation
   // uses the opposite body-left-positive contact-velocity coordinate.
   std::array<Scalar, 4> lateral_slip{};
@@ -118,9 +125,9 @@ struct UnitySourcePlantSensitivity {
   std::array<double, kUnityPlantSensitivityWidth> body_forward_displacement{};
   std::array<double, kUnityPlantSensitivityWidth> body_lateral_displacement{};
   std::array<double, kUnityPlantSensitivityWidth> yaw_delta{};
-  std::array<double, 4> maximum_longitudinal_slip_excess_mps{};
+  std::array<double, 4> maximum_longitudinal_slip_residual_mps{};
   std::array<std::array<double, kUnityPlantSensitivityWidth>, 4>
-      maximum_longitudinal_slip_excess_derivative{};
+      maximum_longitudinal_slip_residual_derivative{};
 };
 
 // Exact branch-local directional second derivative of the full 1 ms source

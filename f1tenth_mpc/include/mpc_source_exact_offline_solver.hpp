@@ -113,6 +113,9 @@ struct OfflineIteration {
     double qp_regularization_used{};
     double model_predicted_hard_violation{};
     double model_actual_over_predicted_reduction{};
+    double source_peak_slip_cost_before{};
+    double source_peak_slip_cost_full_step{};
+    int newly_activated_peak_slip_wheels{};
     double model_maximum_hard_constraint_error{};
     bool source_constraint_path_model_valid{};
     int source_constraint_path_first_invalid_stage{-1};

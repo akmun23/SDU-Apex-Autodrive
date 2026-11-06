@@ -128,32 +128,20 @@ int vehicle_model_inject_source_state(
     const double source_state[UNITY_SOURCE_PLANT_STATE_SIZE]);
 
 /* Full 26-channel source-plant tangent integration in 28 independent
- * directions. Unlike the reduced 23-state QP Jacobian, the caller seeds and
- * receives ALL wheel/suspension/sticky-tire history coordinates, plus body
- * displacement and within-step slip derivatives. Requires a source-initialized
- * full state. No physics substitution and no finite-difference plant steps. */
+ * directions. The caller seeds and receives ALL wheel/suspension/sticky-tire
+ * history coordinates plus body displacement. slip_residual[w] is the signed
+ * maximum over the interval's substeps of |wheel surface - ground speed| minus
+ * the tire curve's first extremum (positive part = the objective's slip
+ * excess); slip_residual_derivative is its tangent. Requires a
+ * source-initialized state. No finite differences, no physics substitution. */
 int vehicle_model_full_source_interval_sensitivities(
     const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
     const double seed_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
     const double seed_control[2][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
     double next_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
     double body_motion[3][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
-    double slip_excess[4][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH]);
-
-/* One original source-plant AD evaluation returns the full physical
- * transition/body/peak tangents AND ALL physically observed substep tire
- * slip derivatives. Both components have exactly the same source branch
- * decisions; this feeds the sparse source-exact NLP in a single pass.
- */
-int vehicle_model_full_source_interval_and_substep_sensitivities(
-    const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
-    const double seed_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
-    const double seed_control[2][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
-    double next_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],double body_motion[3][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
-    double slip_excess[4][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
-    UnitySourceSlipSubstepSensitivityC *samples,
-    int capacity,int *count);
-
+    double slip_residual[4],
+    double slip_residual_derivative[4][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH]);
 /* Full-source second-order directional transition oracle.
  *
  * For the true 26-dimensional Unity-derived physical state x and absolute

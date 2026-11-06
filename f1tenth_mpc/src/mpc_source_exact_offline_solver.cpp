@@ -309,6 +309,7 @@ bool optimize_offline_exact_source(
         metrics.maximum_hard_violation_after=metrics.maximum_hard_violation_before;
         metrics.cost_before=current->cost;
         metrics.cost_after=current->cost;
+        metrics.source_peak_slip_cost_before=current->evaluation->source_peak_slip_cost;
         metrics.violation_before=current->total_violation;
         metrics.violation_after=current->total_violation;
         metrics.corridor_slack_after=current->corridor;
@@ -422,6 +423,7 @@ bool optimize_offline_exact_source(
         qp_opts.terminal_speed_viability_weight=
             options.terminal_speed_viability_weight;
         qp_opts.maximum_qp_iterations=options.source_qp_max_iterations;
+        qp_opts.original_source_primal_feasible=current->valid;
         qp_opts.inequality_multipliers=
             inequality_multipliers.empty()?
                 nullptr:&inequality_multipliers;
@@ -571,7 +573,9 @@ bool optimize_offline_exact_source(
             return -1;
         };
         SourceConstraintCurvature path_model{};
-        {
+        bool path_calculated=false;
+        const auto compute_exact_directional_path=[&]() {
+            path_calculated=true;
             metrics.source_constraint_path_model_valid=source_constraint_path_curvature(
                 *current->nominal,*current->evaluation,trajectory,trajectory_count,
                 lap_length,dt,configuration,physical_direction,&path_model);
@@ -590,7 +594,15 @@ bool optimize_offline_exact_source(
                         metrics.one_sided_constraint_direction_disagreement_inf,
                         std::abs(first-(qp->predicted_constraint_margins[r]-row.value)));
                 }
-        }
+        };
+        // The feasible exact source trajectory and the original-source
+        // reduced gradient already provide a valid descent test. Reserve
+        // full source second-order directional AD for rejected steps where
+        // its one-sided curvature/constraint information is required.
+        // Offline primal/curvature audits always compute it unconditionally.
+        if(!current->valid || options.record_primal_trace ||
+           options.exact_lagrangian_hessian)
+            compute_exact_directional_path();
         // Original nonlinear KKT conditions determine convergence. Primal
         // step size is not evidence either for or against stationarity.
         constexpr double kStationarityTolerance=1.e-2;
@@ -638,15 +650,35 @@ bool optimize_offline_exact_source(
         if(evaluated) {
             metrics.physical_violation_trial=proposed->hard_violation;
             metrics.cost_trial=proposed->cost;
+            metrics.source_peak_slip_cost_full_step=
+                proposed->evaluation->source_peak_slip_cost;
+            for(int k=0;k<kStages;++k)
+                for(int wheel=0;wheel<4;++wheel)
+                    metrics.newly_activated_peak_slip_wheels+=
+                        current->evaluation->source_peak_slip[k][wheel]<=1.e-8 &&
+                        proposed->evaluation->source_peak_slip[k][wheel]>1.e-5;
             metrics.violation_trial=proposed->total_violation;
             metrics.actual_cost_change=proposed->cost-current->cost;
         }
-        const double source_directional_slope=path_model.valid?
-            (current->valid?path_model.original_objective_first:
-             metrics.physical_violation_directional_first):0.;
+        double source_directional_slope=0.;
+        if(current->valid) {
+            for(int k=0;k<kStages;++k)
+                for(int axis=0;axis<2;++axis)
+                    source_directional_slope+=
+                        derivative->original_source_cost_control[k][axis]*
+                        physical_direction[k][axis];
+            if(path_model.valid)
+                source_directional_slope=path_model.original_objective_first;
+        } else if(path_model.valid)
+            source_directional_slope=metrics.physical_violation_directional_first;
         bool accepted=evaluated && accept_step(*proposed,*current,options,source_directional_slope) &&
             (!qp->normal_only_step || proposed->hard_violation<current->hard_violation);
         metrics.full_step_accepted=accepted;
+        if(!accepted && evaluated && !path_calculated && !overdue()) {
+            compute_exact_directional_path();
+            if(path_model.valid)
+                source_directional_slope=path_model.original_objective_first;
+        }
         if(evaluated) {
             // Audit the local QP against exact physical rollout. These
             // diagnostics never restrict the original legal control box.

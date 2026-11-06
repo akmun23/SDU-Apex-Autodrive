@@ -19,6 +19,7 @@ constexpr int N=2*kStages;
 constexpr int E=kStages*kState;
 constexpr double input_scale[2]={.15,.25};
 using Vector=Eigen::VectorXd;
+using ControlVector=Eigen::Matrix<double,N,1>;
 using Matrix=Eigen::MatrixXd;
 using Tangent=Eigen::Matrix<double,kState,N,Eigen::RowMajor>;
 
@@ -202,7 +203,7 @@ bool source_exact_constrained_qp_direction(
         const auto &cfg=options.source_configuration->model;
         const auto &schedule=*options.source_configuration->objective_schedule;
         const auto &nominal=*options.source_nominal;
-        const auto add=[&](const Vector &feature,double weight) {
+        const auto add=[&](const ControlVector &feature,double weight) {
             if(weight<=0.)return true;
             if(!std::isfinite(weight) || !feature.allFinite())return false;
             source_cost_hessian.noalias()+=
@@ -210,7 +211,7 @@ bool source_exact_constrained_qp_direction(
             return true;
         };
         const auto feature_for_state=[&](int stage,int state) {
-            Vector feature=Vector::Zero(n);
+            ControlVector feature=ControlVector::Zero();
             for(int j=0;j<N;++j)
                 feature(j)=sensitivity[stage](state,j)*
                     input_scale[j%2];
@@ -231,7 +232,7 @@ bool source_exact_constrained_qp_direction(
                     terminal*cfg.weight_e_psi))return false;
             if(!add(feature_for_state(k,UNITY_SOURCE_U),
                     terminal*schedule.speed_weights[k+1]))return false;
-            Vector rear=feature_for_state(k,UNITY_SOURCE_V)-
+            ControlVector rear=feature_for_state(k,UNITY_SOURCE_V)-
                 .15532*feature_for_state(k,UNITY_SOURCE_YAW_RATE);
             if(!add(rear,terminal*cfg.weight_v) ||
                !add(feature_for_state(k,UNITY_SOURCE_YAW_RATE),
@@ -246,7 +247,7 @@ bool source_exact_constrained_qp_direction(
             const double slip_weight=terminal*longitudinal_slip_weight_for_reference(
                 &cfg,&schedule.references[k+1]);
             for(int wheel=0;wheel<4;++wheel) {
-                Vector feature=Vector::Zero(n);
+                ControlVector feature=ControlVector::Zero();
                 for(int j=0;j<N;++j) {
                     double slope=j/2==k?stage.peak_slip_control[wheel][j%2]:0.;
                     if(k>0)
@@ -268,8 +269,8 @@ bool source_exact_constrained_qp_direction(
             // Direct command and source-delayed command queues, with
             // original stage reference/slew effects. Unlike diagonal
             // curvature, these features couple consecutive controls.
-            Vector steer=Vector::Zero(n);
-            Vector throttle=Vector::Zero(n);
+            ControlVector steer=ControlVector::Zero();
+            ControlVector throttle=ControlVector::Zero();
             steer(2*k)=input_scale[0];
             throttle(2*k+1)=input_scale[1];
             if(!add(steer,cfg.weight_steering_target+
@@ -511,7 +512,7 @@ bool source_exact_constrained_qp_direction(
         // Its independently certified elastic optimum distinguishes affine
         // inconsistency from failure of the hard-QP numerical algorithm.
         if((!hard_solved || !solved.converged) && !solved.deadline_exceeded &&
-           !output->normal_step_computed) {
+           !output->normal_step_computed && !options.original_source_primal_feasible) {
             SourceConvexQp normal;
             // Regularized affine normal step, in normalized controls.
             // Its fixed small norm term chooses a bounded, stable normal;
