@@ -51,7 +51,7 @@ int main(int argc,char **argv) {
         if(!decision_from_nominal(n,o.decision.get()) || !evaluate_existing_source_nominal(
             ctx->initial_state,ctx->progress_m,ctx->trajectory.data(),ctx->trajectory.size(),
             ctx->lap_length_m,ctx->prediction_dt,cfg,n,*o.decision,o.score.get()))return false;
-        const ConstraintMeritWeights weights{0.,0.,.03};
+        const ConstraintMeritWeights weights{0.,0.,0.};
         if(!source_exact_compact_qp_linearization(ctx->initial_state,ctx->progress_m,
             ctx->trajectory.data(),ctx->trajectory.size(),ctx->lap_length_m,
             ctx->prediction_dt,cfg,*o.decision,*o.score,n,weights,o.gradient.get(),o.program.get()))return false;
@@ -62,13 +62,11 @@ int main(int argc,char **argv) {
             o.gradient->original_source_cost_control,u.data(),opts,o.qp.get());
     };
     Oracle base;
-    if(!evaluate(controls,base))return 5;
+    if(!evaluate(controls,base) || !base.qp->original_duals_trustworthy)return 5;
     std::vector<double> lambda(base.qp->constraint_margins.size(),0.);
     for(size_t i=0;i<lambda.size();++i) {
         const int row=base.qp->constraint_row_indices[i];
         lambda[i]=base.qp->inequality_multipliers[row];
-        if(base.program->rows[row].type==NonlinearRowType::BodyCorner)
-            lambda[i]+=1.e6*std::max(0.,.03-base.qp->constraint_margins[i]);
     }
     const auto gradient=[&](const Oracle &o) {
         V g;
@@ -85,7 +83,7 @@ int main(int argc,char **argv) {
     const V g0=gradient(base);
     json report={{"schema","source-lagrangian-hvp/v1"},
         {"cost",base.score->objective},{"minimum_clearance_m",base.score->minimum_corridor_slack_m},
-        {"multipliers","frozen hard QP duals plus current elastic reserve duals"},
+        {"multipliers","frozen certified original physical QP duals"},
         {"directions",json::array()}};
     for(int axis=0;axis<4;++axis) {
         V direction=V::Zero();
@@ -119,10 +117,16 @@ int main(int argc,char **argv) {
             }
             Oracle p,m;
             if(!evaluate(plus,p) || !evaluate(minus,m))return 6;
+            SourceCurvatureBranches forward{},backward{};
+            if(!compare_source_curvature_branches(*base.nominal,*base.score,*p.nominal,*p.score,
+                ctx->trajectory.data(),ctx->trajectory.size(),ctx->lap_length_m,ctx->prediction_dt,&forward) ||
+               !compare_source_curvature_branches(*base.nominal,*base.score,*m.nominal,*m.score,
+                ctx->trajectory.data(),ctx->trajectory.size(),ctx->lap_length_m,ctx->prediction_dt,&backward))return 6;
             const V hvp=(gradient(p)-gradient(m))/(2.*epsilon);
             const double second=(lagrangian(p)-2.*lagrangian(base)+lagrangian(m))/(epsilon*epsilon);
             const double first_fd=(lagrangian(p)-lagrangian(m))/(2.*epsilon);
             samples.push_back({{"epsilon",epsilon},{"source_hvp_norm",hvp.norm()},
+                {"same_active_source_branches",forward.same && backward.same},
                 {"gn_hvp_norm",gn.norm()},{"relative_hvp_error",(hvp-gn).norm()/std::max(1.,hvp.norm())},
                 {"source_directional_curvature",direction.dot(hvp)},
                 {"gn_directional_curvature",direction.dot(gn)},

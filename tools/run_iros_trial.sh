@@ -97,10 +97,14 @@ if [[ -n "$iros_runtime_affinity" &&
 fi
 printf 'competition controller cpuset=%s simulator cpuset=%s\n' \
   "$iros_controller_cpus" "$iros_sim_cpus" >"$run_dir/runtime_affinity.txt"
+# libgomp binding also pins the initial thread before ROS creates its threads;
+# they inherit that single-core mask. Keep the outer CPU allocation, allowing
+# ROS and source-AD workers to share it. Explicit OpenMP binding is opt-in.
 docker run --rm --name "$controller" "${controller_cpuset_args[@]}" --network=host --ipc=host --privileged --gpus all \
   -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display \
   -e "SDU_APEX_IROS_RUNTIME_AFFINITY_CPUS=$iros_runtime_affinity" \
-  -e "OMP_NUM_THREADS=${OMP_NUM_THREADS:-6}" -e "OMP_PROC_BIND=TRUE" \
+  -e "OMP_NUM_THREADS=${OMP_NUM_THREADS:-6}" -e "OMP_PROC_BIND=${OMP_PROC_BIND:-FALSE}" \
+  -e "OMP_WAIT_POLICY=${OMP_WAIT_POLICY:-PASSIVE}" \
   -e "OMP_PLACES=${OMP_PLACES:-cores}" \
   -v "$repo_root:/workspace/src:rw" -e "SDU_APEX_TRAJECTORY_FILE=$trajectory_container" \
   -e "SDU_APEX_MPC_PARAMETER_FILE=$mpc_profile_container" -e "SDU_APEX_AMCL_PARAMETER_FILE=$amcl_profile_container" --entrypoint /bin/bash "$image" -lc '

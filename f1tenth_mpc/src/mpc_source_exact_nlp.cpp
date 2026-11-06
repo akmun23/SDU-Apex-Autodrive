@@ -1,6 +1,7 @@
 #include "mpc_source_exact_nlp.hpp"
 #include "vehicle_model.h"
 #include "mpc_rti_internal.hpp"
+#include "mpc_steering_variation.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -16,6 +17,105 @@ namespace sdu_apex::source_nlp {
 namespace {
 static_assert(kPhysical==26 && kState==29 && kStages==30);
 static_assert(MPC_PLANT_INTERNAL_STATE_COUNT==22);
+
+// Chain derivatives of the original racing features through the SAME
+// physical/path second-order rollout used for hard constraints. No extra
+// reserve loss or finite-difference source branch enters this calculation.
+bool accumulate_path_objective(int k,const MpcRtiNominal_t &nominal,
+    const Evaluation &score,const MpcRtiCycleConfiguration_t &configuration,
+    const double direction[kStages][2],
+    const UnitySourcePlantDirectionalCurvatureC &physical,
+    const double tracking_first[3],const double tracking_second[3],
+    SourceConstraintCurvature *out)
+{
+    const auto &cfg=configuration.model;
+    const auto &schedule=*configuration.objective_schedule;
+    const auto &plant=nominal.states[k+1].plant;
+    const auto &ref=schedule.references[k+1];
+    const double terminal=k==kStages-1?cfg.terminal_multiplier:1.;
+    const auto square=[&](double weight,double value,double first,double second) {
+        out->original_objective_first+=2.*weight*value*first;
+        out->original_objective_second+=2.*weight*(first*first+value*second);
+    };
+    const auto deadzone=[&](double weight,double error,double tolerance,double first,double second) {
+        const double excess=std::max(0.,std::abs(error)-tolerance);
+        const double sign=(error==0.?first:error)<0.?-1.:1.;
+        if(excess>0. || (std::abs(error)==tolerance && sign*first>0.))
+            square(weight,excess,sign*first,sign*second);
+    };
+    deadzone(terminal*cfg.weight_e_y,double(plant.e_y)-ref.e_y,
+        cfg.tracking_lateral_tolerance_m,tracking_first[0],tracking_second[0]);
+    deadzone(terminal*cfg.weight_e_psi,double(plant.e_psi)-ref.e_psi,
+        cfg.tracking_heading_tolerance_rad,tracking_first[1],tracking_second[1]);
+    const auto state_square=[&](int index,double error,double weight) {
+        square(terminal*weight,error,physical.first_state[index],physical.second_state[index]);
+    };
+    state_square(UNITY_SOURCE_U,double(plant.u)-ref.u,schedule.speed_weights[k+1]);
+    constexpr double com=.15532;
+    square(terminal*cfg.weight_v,double(plant.v)-ref.v,
+        physical.first_state[UNITY_SOURCE_V]-com*physical.first_state[UNITY_SOURCE_YAW_RATE],
+        physical.second_state[UNITY_SOURCE_V]-com*physical.second_state[UNITY_SOURCE_YAW_RATE]);
+    state_square(UNITY_SOURCE_YAW_RATE,double(plant.r)-ref.r,cfg.weight_r);
+    state_square(UNITY_SOURCE_PHYSICAL_STEERING,double(plant.actual_steering_angle)-ref.steering_command,
+        cfg.weight_steering_command);
+    square(terminal*cfg.weight_steering_command,
+        double(plant.delayed_steering_command_2)-ref.steering_command,direction[k][0],0.);
+    if(cfg.weight_source_lateral_slip>0.f) {
+        double state[kPhysical]{},slip[4]{},first[4]{},second[4]{};
+        if(!vehicle_model_pack_source_state(&plant,state) ||
+           !unity_source_plant_instantaneous_lateral_slip_second_c(state,
+                physical.first_state,physical.second_state,slip,first,second))return false;
+        for(int wheel=0;wheel<2;++wheel)
+            deadzone(terminal*cfg.weight_source_lateral_slip,slip[wheel],
+                kMpcSourceFrontLateralSlipReserveRad,first[wheel],second[wheel]);
+    }
+    const double slip_weight=terminal*longitudinal_slip_weight_for_reference(&cfg,&ref);
+    for(int wheel=0;wheel<4;++wheel)
+        square(slip_weight,score.source_peak_slip[k][wheel],
+            physical.first_slip_excess[wheel],physical.second_slip_excess[wheel]);
+    if(cfg.weight_source_corridor_reserve>0.f && cfg.near_wall_tracking_reserve_m>0.f) {
+        const auto &corners=score.corridor_corners[k];
+        double margin=INFINITY,first=0.,second=0.;
+        for(int j=0;j<8;++j) {
+            const double value=j<4?corners.left[j]:corners.right[j-4];
+            const int row=8*k+j;
+            const double d=out->first[row],dd=out->second[row];
+            if(value<margin || (value==margin &&
+                (d<first || (d==first && dd<second)))) {
+                margin=value;first=d;second=dd;
+            }
+        }
+        const double deficit=double(cfg.near_wall_tracking_reserve_m)-margin;
+        // The genuine original reserve cost has no terminal multiplier.
+        if(deficit>0. || (deficit==0. && first<0.))
+            square(cfg.weight_source_corridor_reserve,std::max(0.,deficit),-first,-second);
+    }
+    const auto &control=nominal.controls[k];
+    const auto &input_ref=schedule.references[k];
+    square(cfg.weight_steering_target,double(control.steering_target_rad)-input_ref.steering_command,
+        direction[k][0],0.);
+    square(cfg.weight_throttle_command,control.throttle_command,direction[k][1],0.);
+    const double previous_steer=k?nominal.controls[k-1].steering_target_rad:
+        nominal.states[0].plant.delayed_steering_command_2;
+    const double previous_throttle=k?nominal.controls[k-1].throttle_command:
+        nominal.states[0].plant.delayed_throttle_command_2;
+    const double steering_delta=double(control.steering_target_rad)-previous_steer-
+        steering_reference_increment(&input_ref,&ref);
+    const double steering_first=direction[k][0]-(k?direction[k-1][0]:0.);
+    square(cfg.weight_steering_slew,steering_delta,steering_first,0.);
+    square(cfg.weight_throttle_slew,double(control.throttle_command)-previous_throttle,
+        direction[k][1]-(k?direction[k-1][1]:0.),0.);
+    if(cfg.weight_steering_correction_variation>0.f) {
+        const double epsilon=cfg.steering_correction_variation_epsilon_rad;
+        const double radius=std::hypot(epsilon,steering_delta);
+        if(!(radius>0.))return false;
+        out->original_objective_first+=cfg.weight_steering_correction_variation*
+            steering_delta/radius*steering_first;
+        out->original_objective_second+=cfg.weight_steering_correction_variation*
+            epsilon*epsilon/(radius*radius*radius)*steering_first*steering_first;
+    }
+    return std::isfinite(out->original_objective_first) && std::isfinite(out->original_objective_second);
+}
 }
 
 void pack_state(const MpcRtiState_t &state,double progress,State *out) {
@@ -136,6 +236,238 @@ bool linearize_original_source_stage(
 // original tire-substep constraint come from the SAME source interval
 // and the SAME 28-lane source AD seed. No second plant integration can
 // silently select a different friction/contact branch.
+bool compare_source_curvature_branches(const MpcRtiNominal_t &base,const Evaluation &base_score,
+    const MpcRtiNominal_t &candidate,const Evaluation &candidate_score,
+    const MpcTrajectorySample_t *trajectory,size_t count,double lap_length,float dt,
+    SourceCurvatureBranches *out)
+{
+    if(!out || !base.valid || !candidate.valid || !base_score.valid || !candidate_score.valid)return false;
+    *out={};out->same=true;
+    // Tracking projection depends on the loaded centreline/heading segment,
+    // even on a constant-width track. Comparing corridor-width slopes alone
+    // misses those switches and can falsely certify a smooth Hessian secant.
+    for(int k=0;k<=kStages;++k) {
+        MpcTrajectoryProgressDifferential_t a{},b{};
+        if(!mpc_trajectory_sample_progress_differential(trajectory,count,lap_length,base.progress[k],&a) ||
+           !mpc_trajectory_sample_progress_differential(trajectory,count,lap_length,candidate.progress[k],&b))return false;
+        out->tracking_reference_changes+=a.forward_segment!=b.forward_segment ||
+            a.backward_segment!=b.backward_segment;
+    }
+    out->reference_changes=out->tracking_reference_changes;
+    for(int k=0;k<kStages;++k) {
+        UnitySourcePlantInputC first{},second{};
+        const auto pack=[](const MpcRtiState_t &state,const MpcModelControl_t &command,UnitySourcePlantInputC &input) {
+            if(!vehicle_model_pack_source_state(&state.plant,input.state))return false;
+            input.steering_target_rad=std::clamp(double(command.steering_target_rad),
+                -double(UNITY_SOURCE_MAX_STEERING_RAD),double(UNITY_SOURCE_MAX_STEERING_RAD));
+            input.throttle_normalized=command.throttle_command;
+            input.suspension_history_initialized=state.plant.source_suspension_history_initialized;
+            return true;
+        };
+        if(!pack(base.states[k],base.controls[k],first) || !pack(candidate.states[k],candidate.controls[k],second))return false;
+        UnitySourcePhysicalBranchComparisonC comparison{};
+        if(!unity_source_plant_compare_physical_branches_c(&first,&second,dt,&comparison) || !comparison.valid)return false;
+#define SUM_BRANCH(name) out->physical.name+=comparison.name; out->same&=comparison.name==0
+        SUM_BRANCH(mismatched_substep_schedule_events);
+        SUM_BRANCH(contact_grounded_changes);
+        SUM_BRANCH(sticky_forward_changes);
+        SUM_BRANCH(sticky_side_changes);
+        SUM_BRANCH(longitudinal_spline_region_changes);
+        SUM_BRANCH(lateral_spline_region_changes);
+        SUM_BRANCH(tire_load_filter_changes);
+        SUM_BRANCH(combined_slip_saturation_changes);
+        SUM_BRANCH(suspension_jounce_region_changes);
+        SUM_BRANCH(slip_denominator_region_changes);
+        SUM_BRANCH(steering_target_reached_changes);
+        SUM_BRANCH(throttle_brake_mode_changes);
+#undef SUM_BRANCH
+        UnitySourcePeakSlipTraceC old_peak[4]{},new_peak[4]{};
+        if(!vehicle_model_trace_peak_longitudinal_slip(&base.states[k].plant,&base.controls[k],dt,old_peak) ||
+           !vehicle_model_trace_peak_longitudinal_slip(&candidate.states[k].plant,&candidate.controls[k],dt,new_peak))return false;
+        for(int wheel=0;wheel<4;++wheel)
+            if((old_peak[wheel].actual_source_max_excess_mps>0. || new_peak[wheel].actual_source_max_excess_mps>0.) &&
+               (old_peak[wheel].active_fixed_tick!=new_peak[wheel].active_fixed_tick ||
+                old_peak[wheel].active_vehicle_substep!=new_peak[wheel].active_vehicle_substep))++out->peak_changes;
+        const auto &old=base_score.corridor_corners[k];
+        const auto &next=candidate_score.corridor_corners[k];
+        out->reference_changes+=std::abs(old.left_d_progress_forward-next.left_d_progress_forward)>1.e-8 ||
+            std::abs(old.right_d_progress_forward-next.right_d_progress_forward)>1.e-8 ||
+            old.reference_progress_kink || next.reference_progress_kink;
+    }
+    out->same&=out->peak_changes==0 && out->reference_changes==0;
+    out->physical.valid=1;
+    return true;
+}
+
+bool source_constraint_path_curvature(const MpcRtiNominal_t &nominal,
+    const Evaluation &score,const MpcTrajectorySample_t *trajectory,
+    size_t count,double lap_length,float dt,
+    const MpcRtiCycleConfiguration_t &configuration,
+    const double direction[kStages][2],SourceConstraintCurvature *out)
+{
+    if(!out||!direction||!nominal.valid||nominal.horizon!=kStages||!score.valid)return false;
+    if(!configuration.objective_schedule || !configuration.objective_schedule->valid ||
+       configuration.objective_schedule->horizon!=kStages)return false;
+    *out={};
+    std::array<double,kPhysical> first{},second{};
+    double tracking_first[3]{},tracking_second[3]{};
+    for(int k=0;k<kStages;++k) {
+        out->first_invalid_stage=k;
+        const auto &current=nominal.states[k];
+        const auto &next=nominal.states[k+1];
+        if(!next.incoming_transition_valid)return false;
+        UnitySourcePlantInputC input{};
+        if(!vehicle_model_pack_source_state(&current.plant,input.state))return false;
+        input.suspension_history_initialized=current.plant.source_suspension_history_initialized;
+        const double target=nominal.controls[k].steering_target_rad;
+        input.steering_target_rad=std::clamp(target,-UNITY_SOURCE_MAX_STEERING_RAD,UNITY_SOURCE_MAX_STEERING_RAD);
+        input.throttle_normalized=nominal.controls[k].throttle_command;
+        for(double value:direction[k])if(!std::isfinite(value))return false;
+        // The original plant consumes the absolute steering target even at
+        // its LEGAL endpoint. Previously this silently zeroed the tangent
+        // at equality, so an inward one-sided command correction acquired
+        // a false zero source Jacobian/Hessian. The hard command-box
+        // constraint makes outward motion infeasible; do not invent an
+        // extension of source dynamics outside that physical control domain.
+        if(!std::isfinite(target) ||
+           std::abs(target)>UNITY_SOURCE_MAX_STEERING_RAD+1.e-6 ||
+           (target<=-UNITY_SOURCE_MAX_STEERING_RAD &&
+            direction[k][0]<0.) ||
+           (target>=UNITY_SOURCE_MAX_STEERING_RAD &&
+            direction[k][0]>0.))
+            return false;
+        const double du[2]={direction[k][0],direction[k][1]};
+        UnitySourcePlantDirectionalCurvatureC physical{};
+        UnitySourceDirectionalBranchReportC branches{};
+        if(!unity_source_plant_step_path_curvature_c(&input,dt,first.data(),second.data(),du,
+            &physical,&branches))return false;
+        out->physical_switch_ties+=branches.exact_physical_switch_ties;
+        out->selected_switch_ties+=branches.derivative_selected_switch_ties;
+        out->contact_switches+=branches.contact_switch_ties;
+        out->substep_switches+=branches.discrete_substep_schedule_switches;
+        out->brake_switches+=branches.zero_throttle_brake_switches;
+        if(!branches.valid_one_sided_directional)return false;
+        // Rate rows refer to the incoming rack and original command queue.
+        const int rate=8*kStages+4*k,box=12*kStages+4*k;
+        const double rack_difference=direction[k][0]-first[UNITY_SOURCE_PHYSICAL_STEERING];
+        out->first[rate]=-rack_difference;out->first[rate+1]=rack_difference;
+        out->second[rate]=second[UNITY_SOURCE_PHYSICAL_STEERING];
+        out->second[rate+1]=-out->second[rate];
+        const double throttle_difference=direction[k][1]-(k?direction[k-1][1]:0.);
+        out->first[rate+2]=-throttle_difference;out->first[rate+3]=throttle_difference;
+        for(int j=0;j<4;++j)out->first[box+j]=(j%2?1.:-1.)*direction[k][j/2];
+        const float body[3]={next.incoming_body_forward_delta_m,
+            next.incoming_body_lateral_delta_m,next.incoming_body_yaw_delta_rad};
+        double input_first[6]={tracking_first[0],tracking_first[1],physical.first_body[0],
+            physical.first_body[1],physical.first_body[2],tracking_first[2]};
+        double input_second[6]={tracking_second[0],tracking_second[1],physical.second_body[0],
+            physical.second_body[1],physical.second_body[2],tracking_second[2]};
+        int knots=0;
+        if(!mpc_trajectory_tracking_path_curvature(trajectory,count,lap_length,
+            nominal.progress[k],current.plant.e_y,current.plant.e_psi,body,
+            nominal.progress[k+1],next.plant.e_y,input_first,input_second,
+            tracking_first,tracking_second,&knots))return false;
+        out->reference_knots+=knots;
+        const auto &geometry=score.corridor_corners[k];
+        if(!geometry.reference_derivatives_valid)return false;
+        const double progress_sign=tracking_first[2]!=0.?tracking_first[2]:tracking_second[2];
+        const double slopes[2]={progress_sign<0.?geometry.left_d_progress_backward:geometry.left_d_progress_forward,
+            progress_sign<0.?geometry.right_d_progress_backward:geometry.right_d_progress_forward};
+        const double x[2]={-double(MPC_REAR_OVERHANG_M),double(MPC_REAR_AXLE_TO_FRONT_BUMPER_M)};
+        const double y[2]={-.5*double(MPC_CAR_WIDTH_M),.5*double(MPC_CAR_WIDTH_M)};
+        const double sine=std::sin(next.plant.e_psi),cosine=std::cos(next.plant.e_psi);
+        for(int side=0;side<2;++side)for(int j=0;j<4;++j) {
+            const int row=8*k+4*side+j;
+            const double sign=side?1.:-1.;
+            const double heading=side?geometry.right_d_psi[j]:geometry.left_d_psi[j];
+            const double lateral=x[j/2]*sine+y[j%2]*cosine;
+            out->first[row]=sign*tracking_first[0]+heading*tracking_first[1]+slopes[side]*tracking_first[2];
+            out->second[row]=sign*tracking_second[0]+heading*tracking_second[1]+
+                slopes[side]*tracking_second[2]-sign*lateral*tracking_first[1]*tracking_first[1];
+        }
+        if(!accumulate_path_objective(k,nominal,score,configuration,direction,physical,
+            tracking_first,tracking_second,out))return false;
+        std::copy_n(physical.first_state,kPhysical,first.begin());
+        std::copy_n(physical.second_state,kPhysical,second.begin());
+    }
+    for(int row=0;row<16*kStages;++row)
+        if(!std::isfinite(out->first[row])||!std::isfinite(out->second[row]))return false;
+    out->first_invalid_stage=-1;out->valid=true;
+    return true;
+}
+
+bool source_lagrangian_hessian(const MpcRtiNominal_t &nominal,
+    const Evaluation &score,const MpcTrajectorySample_t *trajectory,
+    size_t count,double lap_length,float dt,
+    const MpcRtiCycleConfiguration_t &configuration,
+    const std::array<double,16*kStages> &multipliers,
+    SourceLagrangianHessian *out,double deadline)
+{
+    if(!out)return false;
+    *out={};
+    for(double value:multipliers)if(!std::isfinite(value)||value<0.)return false;
+    constexpr int n=2*kStages;
+    constexpr double scales[2]={.15,.25};
+    const auto curvature=[&](const std::array<double,n> &d,double *value) {
+        if(deadline>0. && mpc_rti_monotonic_time_us()>=deadline)return false;
+        double physical[kStages][2]{};
+        for(int j=0;j<n;++j)physical[j/2][j%2]=scales[j%2]*d[j];
+        SourceConstraintCurvature path{};
+        ++out->source_directional_evaluations;
+        if(!source_constraint_path_curvature(nominal,score,trajectory,count,lap_length,
+            dt,configuration,physical,&path))return false;
+        *value=path.original_objective_second;
+        for(size_t i=0;i<multipliers.size();++i)*value-=multipliers[i]*path.second[i];
+        return std::isfinite(*value);
+    };
+    std::array<double,n> orientation{},diagonal{},direction{};
+    for(int j=0;j<n;++j) {
+        const double value=j%2?nominal.controls[j/2].throttle_command:
+            nominal.controls[j/2].steering_target_rad;
+        const double upper=j%2?MPC_THROTTLE_MAX:configuration.model.max_steering_rad;
+        orientation[j]=value>=upper?-1.:1.;
+        direction[j]=orientation[j];
+        if(!curvature(direction,&diagonal[j]))return false;
+        out->scaled[j*n+j]=diagonal[j];
+        direction[j]=0.;
+    }
+    for(int i=0;i<n;++i)for(int j=0;j<i;++j) {
+        direction[i]=orientation[i];direction[j]=orientation[j];
+        double pair=0.;
+        if(!curvature(direction,&pair))return false;
+        const double entry=.5*(pair-diagonal[i]-diagonal[j])*orientation[i]*orientation[j];
+        out->scaled[i*n+j]=out->scaled[j*n+i]=entry;
+        direction[i]=direction[j]=0.;
+    }
+    // Directions independent of the polarization basis expose branch-local
+    // second derivatives that cannot represent one coherent Hessian.
+    for(int probe=0;probe<3;++probe) {
+        double norm=0.;
+        for(int j=0;j<n;++j) {
+            const double value=j%2?nominal.controls[j/2].throttle_command:
+                nominal.controls[j/2].steering_target_rad;
+            const double lower=j%2?MPC_THROTTLE_MIN_DRIVE:-configuration.model.max_steering_rad;
+            const double upper=j%2?MPC_THROTTLE_MAX:configuration.model.max_steering_rad;
+            const double oscillation=std::sin((j+1.)*(probe+1.)*.731);
+            direction[j]=(value<=lower || value>=upper)?
+                orientation[j]*std::abs(oscillation):oscillation;
+            norm+=direction[j]*direction[j];
+        }
+        for(double &value:direction)value/=std::sqrt(norm);
+        double actual=0.,predicted=0.,magnitude=0.;
+        if(!curvature(direction,&actual))return false;
+        for(int i=0;i<n;++i)for(int j=0;j<n;++j) {
+            const double term=direction[i]*out->scaled[i*n+j]*direction[j];
+            predicted+=term;magnitude+=std::abs(term);
+        }
+        const double error=std::abs(actual-predicted)/std::max({1.,std::abs(actual),magnitude});
+        out->quadratic_consistency_relative=std::max(out->quadratic_consistency_relative,error);
+        if(error>1.e-6)return false;
+    }
+    out->valid=true;
+    return true;
+}
+
 bool linearize_dynamics_and_slip_epigraph(
     const MpcRtiState_t &initial,double initial_progress,
     const MpcTrajectorySample_t *trajectory,size_t trajectory_count,

@@ -7,6 +7,31 @@ from pathlib import Path
 from analyze_mpc_qp_agreement import report, accepted_cost_precision_gate
 
 class AgreementAuditTests(unittest.TestCase):
+    def test_current_source_iterations_compare_same_controls_only(self):
+        full=dict(full_step_evaluated=True,full_step_accepted=True,
+                  original_cost_before=10.,full_step_original_cost=7.,
+                  qp_predicted_cost_change=-4.,linearization_ms=3.,
+                  qp_ms=2.,source_rollout_ms=.5,total_ms=6.)
+        corrected=dict(full,full_step_accepted=False,
+                       full_step_original_cost=12.,original_cost_after=8.)
+        unevaluated=dict(full,full_step_evaluated=False,
+                         full_step_accepted=False,full_step_original_cost=0.)
+        rows=[dict(status="accepted_feasible",command_published=True,
+                   solver=dict(source_iterations=[full,corrected,unevaluated])),
+              dict(status="waiting_for_solver_budget",command_published=False,
+                   solver=dict(source_iterations=[]))]
+        with tempfile.TemporaryDirectory() as folder:
+            p=Path(folder)/"current.jsonl"
+            p.write_text("\n".join(json.dumps(r) for r in rows)+"\n")
+            data=report(p)
+        self.assertEqual(data["telemetry_cycles"],1)
+        self.assertEqual(data["cost_model"]["samples"],2)
+        self.assertEqual(data["cost_model"]["sign_mismatch_count"],1)
+        self.assertEqual(data["accepted_cost_model"]["samples"],1)
+        self.assertEqual(data["accepted_cost_model"]["absolute_cost_error"]["p99"],1.)
+        self.assertEqual(data["iteration_timing"]["total_ms"]["count"],3)
+        self.assertIn("not measured Unity cost",data["interpretation"])
+
     def test_full_step_false_safe_rejection_and_cost_error(self):
         rows=[
             dict(status="accepted_feasible",command_published=True,

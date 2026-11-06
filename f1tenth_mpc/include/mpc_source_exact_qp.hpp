@@ -9,13 +9,6 @@ namespace sdu_apex::source_nlp {
 // body-corner and actuator-rate inequalities retain their row identities.
 // Positive multipliers are carried across SQP linearizations, not guessed by
 // a separate feasibility-first optimizer.
-// PSD secant of the ORIGINAL source nonlinear objective and constraint
-// merit along a rejected full SQP step. These are Hessian corrections of
-// the SAME NLP, not input trust regions or alternate candidate searches.
-struct SourceNonlinearCurvatureSecant {
-    std::array<double,2*kStages> unit_direction{};
-    double curvature{};
-};
 struct SourceSlipCurvatureMultiplier {
     int stage{},wheel{},fixed_tick{},vehicle_substep{};
     size_t source_row_index{};
@@ -43,20 +36,27 @@ struct SourceConstrainedQpOptions {
     const std::vector<double> *inequality_multipliers{nullptr};
     const MpcRtiCycleConfiguration_t *source_configuration{nullptr};
     const MpcRtiNominal_t *source_nominal{nullptr};
-    const std::vector<SourceNonlinearCurvatureSecant> *
-        source_curvature_secants{nullptr};
     bool capture_curvature_model{false};
     bool linearization_audit_only{false};
     // Maratos second-order constraint defect, in original row units.
     const std::vector<double> *constraint_margin_corrections{nullptr};
     SourceLagrangianMemory *lagrangian_memory{nullptr};
     double absolute_deadline_monotonic_us{};
-    double infeasible_linearization_l1_weight{};
     const std::array<double,4*kStages*kStages> *lagrangian_hessian_scaled{};
     bool refresh_known_gauss_newton{true};
+
 };
 struct SourceConstrainedQpResult {
+    const char *failure_reason{"invalid_or_unsolved_source_qp"};
     double direction[kStages][2]{};
+    double normal_direction[kStages][2]{};
+    bool normal_step_computed{};
+    bool normal_only_step{};
+    double normal_primal_residual{};
+    double normal_dual_residual{};
+    bool original_duals_trustworthy{};
+    double normal_linearized_violation{};
+    double linearized_physical_violation_inf{};
     std::vector<double> inequality_multipliers;
     std::vector<double> predicted_constraint_margins;
     double source_cost_linear_slope{};
@@ -69,6 +69,8 @@ struct SourceConstrainedQpResult {
     double primal_residual{};
     double dual_residual{};
     double complementarity_residual{};
+    double hessian_min_eigenvalue{};
+    double hessian_max_eigenvalue{};
     double tolerance_used{};
     bool deadline_exceeded{};
     bool lagrangian_bfgs_updated{};
@@ -78,6 +80,7 @@ struct SourceConstrainedQpResult {
     std::vector<SourceSlipCurvatureMultiplier> slip_curvature_multipliers;
     // First-order KKT diagnostics of the ORIGINAL constrained source NLP,
     // never the elastic QP's nominal objective.
+    // Infinity norm in U = D_u z coordinates (0.15 rad / 0.25 throttle).
     double original_nlp_stationarity_inf{};
     double original_nlp_inequality_residual_inf{};
     double original_nlp_complementarity_inf{};

@@ -35,6 +35,13 @@ class SourceOnlyArchitecture(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertFalse((MPC / "src" / name).exists())
 
+    def test_no_multiple_shooting_solver_tools(self):
+        for name in ("mpc_source_shooting_feasibility_oracle.cpp",
+                     "reference_mpc_source_shooting_feasibility.py"):
+            self.assertFalse((ROOT/"tools"/name).exists())
+        self.assertNotIn("mpc_source_shooting_feasibility_oracle",
+                         (MPC/"CMakeLists.txt").read_text())
+
     def test_no_dead_riccati_interfaces(self):
         self.assertFalse((MPC / "include/riccati_solver.h").exists())
         self.assertFalse((MPC / "include/mpc_qp_fixture_format.hpp").exists())
@@ -77,14 +84,20 @@ class SourceOnlyArchitecture(unittest.TestCase):
         self.assertNotIn("declare_parameter<bool>(\"native_source_reduced_sqp\"", code)
         self.assertNotIn("declare_parameter<bool>(\"source_exact_nlp_live\"", code)
 
-    def test_extra_clearance_is_soft_but_physical_wall_is_hard(self):
+    def test_solver_has_no_artificial_control_neighborhood(self):
+        for source in ("include/mpc_source_exact_qp.hpp",
+                       "include/mpc_source_exact_offline_solver.hpp",
+                       "src/mpc_source_exact_qp.cpp",
+                       "src/mpc_source_exact_offline_solver.cpp"):
+            with self.subTest(source=source):
+                self.assertNotIn("source_model_radius", (MPC/source).read_text())
+
+    def test_extra_clearance_is_diagnostic_but_physical_wall_is_hard(self):
         solver=(MPC / "src/mpc_source_exact_offline_solver.cpp").read_text()
         self.assertIn("out.corridor>=0.",solver)
         self.assertNotIn(
             "out.corridor>=options.minimum_source_clearance_m",solver)
-        self.assertIn("options.source_qp_soft_physical_weight*",solver)
-        self.assertIn("current.total_violation+",solver)
-        self.assertIn("next.total_violation+",solver)
+        self.assertNotIn("options.source_qp_soft_physical_weight*",solver)
 
     def test_source_input_envelope_initialized_after_legacy_cleanup(self):
         node=(MPC / "src/mpc_controller_node_impl.hpp").read_text()

@@ -1,11 +1,11 @@
 #pragma once
-/* Authoritative NONLINEAR source multiple-shooting evaluation.
+/* Authoritative nonlinear source evaluation.
  *
  * No quadratic/QP objective, approximated plant, or substituted reference.
- * The optimization variables are 30 future 29-state physical/path nodes,
- * plus 30 original steering/throttle control pairs. The initial state is
- * fixed and never optimized. Each equality is evaluated by the same exact
- * nonlinear stage function used by mpc_rti_build_nominal_same_epoch().
+ * The runtime optimizes only 30 original steering/throttle pairs. Stored
+ * 29-state nodes describe their exact condensed rollout. Independent-node
+ * evaluation remains available for offline derivative/oracle checks; it is
+ * not a multiple-shooting runtime solver. The initial state is fixed.
  *
  * This is the nonlinear problem oracle, NOT yet a solver. Source-model exact
  * does not imply bit-exact equivalence with the private Unity/PhysX solver.
@@ -61,6 +61,54 @@ struct Evaluation {
     // objective oracle even when the dynamics equalities are violated.
     int valid{};
 };
+
+// Smooth Lagrangian curvature is reusable only on the same original physical,
+// peak-slip and progress-reference branches. Comparison never modifies a primal.
+struct SourceCurvatureBranches {
+    UnitySourcePhysicalBranchComparisonC physical{};
+    int peak_changes{};
+    int tracking_reference_changes{};
+    int reference_changes{};
+    bool same{};
+};
+bool compare_source_curvature_branches(const MpcRtiNominal_t &base,const Evaluation &base_score,
+    const MpcRtiNominal_t &candidate,const Evaluation &candidate_score,
+    const MpcTrajectorySample_t *trajectory,size_t trajectory_count,double lap_length,float dt,
+    SourceCurvatureBranches *result);
+
+// Directional local constraint model for U(t)=U+t*dU. Canonical physical
+// row order is all 240 corners, 120 rates, then 120 boxes. The second
+// derivative includes propagated physical, implicit path-frame and corner
+// curvature. Discontinuous source ties invalidate this model, never physics.
+struct SourceConstraintCurvature {
+    std::array<double,16*kStages> first{},second{};
+    double original_objective_first{},original_objective_second{};
+    int first_invalid_stage{-1};
+    int physical_switch_ties{},selected_switch_ties{},reference_knots{};
+    int contact_switches{},substep_switches{},brake_switches{};
+    bool valid{};
+};
+bool source_constraint_path_curvature(const MpcRtiNominal_t &nominal,
+    const Evaluation &score,const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,double lap_length,float dt,
+    const MpcRtiCycleConfiguration_t &configuration,
+    const double direction[kStages][2],SourceConstraintCurvature *result);
+
+// Expensive offline reference in z=(steer/.15, throttle/.25) coordinates.
+// Polarize exact source directional derivatives, then independently check
+// their quadratic consistency. A nonsmooth nonquadratic path is rejected.
+struct SourceLagrangianHessian {
+    std::array<double,4*kStages*kStages> scaled{};
+    int source_directional_evaluations{};
+    double quadratic_consistency_relative{};
+    bool valid{};
+};
+bool source_lagrangian_hessian(const MpcRtiNominal_t &nominal,
+    const Evaluation &score,const MpcTrajectorySample_t *trajectory,
+    size_t trajectory_count,double lap_length,float dt,
+    const MpcRtiCycleConfiguration_t &configuration,
+    const std::array<double,16*kStages> &physical_multipliers,
+    SourceLagrangianHessian *result,double absolute_deadline_monotonic_us=0.);
 
 // The EXACT active-branch Jacobian of the ORIGINAL nonlinear equalities.
  // Rows are grouped by source interval: r_k=z_{k+1}-F_source(z_k,u_k).
@@ -247,6 +295,29 @@ struct SparseNonlinearRow {
     int source_vehicle_substep{-1};
     double value{};
 };
+// Persistent SQP dual and Lagrangian memory is attached to the IDENTITY
+// of each physical source constraint, not merely to a vector position.
+// Two branches may produce the same row count with different constraints.
+// Ignore the changing numerical margin; keep stage, corner/rate index and
+// source fixed-tick/substep identity exact. No fuzzy value comparison.
+inline bool same_original_source_constraint_identity(
+    const SparseNonlinearRow &a,const SparseNonlinearRow &b)
+{
+    return a.type==b.type && a.stage==b.stage && a.index==b.index &&
+           a.source_fixed_tick==b.source_fixed_tick &&
+           a.source_vehicle_substep==b.source_vehicle_substep;
+}
+inline bool same_original_source_constraint_layout(
+    const std::vector<SparseNonlinearRow> &previous,
+    const std::vector<SparseNonlinearRow> &current)
+{
+    if(previous.size()!=current.size())return false;
+    for(size_t i=0;i<previous.size();++i)
+        if(!same_original_source_constraint_identity(previous[i],current[i]))
+            return false;
+    return true;
+}
+
 struct SparseNonlinearDerivative {
     int row{};
     int column{};

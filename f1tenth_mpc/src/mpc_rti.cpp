@@ -2332,6 +2332,32 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             optimized->final_minimum_corridor_slack;
         result->source_exact_nlp_final_original_violation=
             optimized->final_exact_constraint_violation;
+        result->source_iteration_metrics_count=static_cast<int>(std::min(
+            optimized->history.size(),size_t(MPC_RTI_SOURCE_TRACE_CAPACITY)));
+        for(int i=0;i<result->source_iteration_metrics_count;++i) {
+            const auto &in=optimized->history[i];
+            auto &out=result->source_iteration_metrics[i];
+            out.accepted=in.accepted;
+            out.full_step_evaluated=in.full_step_evaluated;
+            out.full_step_accepted=in.full_step_accepted;
+            out.qp_converged=in.qp_converged;
+            out.original_duals_trustworthy=in.original_duals_trustworthy;
+            out.qp_iterations=in.qp_iterations;
+            out.linearization_ms=in.linearization_wall_ms;
+            out.qp_ms=in.qp_wall_ms;
+            out.source_rollout_ms=in.source_rollout_wall_ms;
+            out.total_ms=in.iteration_wall_ms;
+            out.cost_before=in.cost_before;
+            out.predicted_cost_change=in.predicted_cost_change;
+            out.full_step_cost=in.cost_trial;
+            out.cost_after=in.cost_after;
+            out.accepted_step_length=in.safeguarded_step_length;
+            out.qp_primal_residual=in.qp_primal_residual;
+            out.qp_dual_residual=in.qp_dual_residual;
+            out.stationarity_inf=in.source_nlp_stationarity_inf;
+            out.complementarity_inf=in.source_nlp_complementarity_inf;
+            out.maximum_footprint_prediction_error_m=in.model_maximum_hard_constraint_error;
+        }
         if(completed) {
             result->source_optimized_control_count=horizon;
             std::copy_n(optimized->optimized.controls,horizon,
@@ -2348,6 +2374,11 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
             out.trial_evaluated=in.trial_evaluated;
             out.correction_evaluated=in.correction_evaluated;
             out.correction_accepted=in.correction_accepted;
+            out.normal_accepted=in.normal_accepted;out.filter_accepted=in.safeguarded_accepted;
+            const auto &accepted=in.normal_accepted?in.normal:
+                in.safeguarded_accepted?in.safeguarded_trials.back():
+                in.correction_accepted?in.correction:in.trial;
+            if(in.accepted)std::copy_n(accepted.controls,horizon,out.accepted_controls);
             std::copy_n(in.warm_start.controls,horizon,out.warm_start);
             std::copy_n(in.trial.controls,horizon,out.trial);
             std::copy_n(in.correction.controls,horizon,out.correction);

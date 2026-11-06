@@ -12,6 +12,7 @@
 #include <memory>
 #include "vehicle_model.h"
 #include <Eigen/Eigenvalues>
+#include <Eigen/Cholesky>
 
 namespace sdu_apex::source_nlp {
 namespace {
@@ -184,8 +185,8 @@ bool exact_source_rollout(const MpcRtiState_t &initial,
     // nominal safety reserve is an ELASTIC inequality of the SAME
     // nonlinear program, not an independent collision boundary. An extra
     // 2mm reserve deficit must never suppress a command whose EXACT
-    // source footprint remains inside the wall. The reserve participates
-    // in the merit function and constrained SQP direction.
+    // source footprint remains inside the wall. Extra reserve is diagnostic;
+    // genuine original-source reserve costs remain inside out.cost.
     out.valid=
         out.corridor>=0. &&
         out.rate>=-options.allowable_command_rate_violation &&
@@ -194,35 +195,6 @@ bool exact_source_rollout(const MpcRtiState_t &initial,
 }
 
 
-bool accept_step(const Snapshot &next,const Snapshot &current,
-                 const OfflineOptions &options)
-{
-    if(next.valid!=current.valid)return next.valid;
-    // This is one augmented nonlinear racing objective: original exact
-    // source cost plus the explicitly SOFT extra-margin penalty used by
-    // the constrained QP. Full nonlinearity is independently integrated.
-    // A better source-feasible solution may trade a small racing cost
-    // increase for significantly better 3cm reserve, never for a wall hit.
-    const double current_merit=
-        current.cost+options.source_qp_soft_physical_weight*
-            current.total_violation+
-        options.terminal_speed_viability_weight*
-            current.terminal_speed_violation;
-    const double next_merit=
-        next.cost+options.source_qp_soft_physical_weight*
-            next.total_violation+
-        options.terminal_speed_viability_weight*
-            next.terminal_speed_violation;
-    if(next.valid)
-        return next_merit<current_merit-std::max(options.minimum_source_cost_reduction,
-            32.*std::numeric_limits<double>::epsilon()*std::max(1.,std::abs(current_merit)));
-    if(options.elastic_sqp_globalization)
-        return next_merit+1.e6*next.hard_violation_l1<
-            current_merit+1.e6*current.hard_violation_l1-options.minimum_source_cost_reduction;
-    return next.hard_violation<current.hard_violation-
-        std::max(options.minimum_violation_reduction,
-            32.*std::numeric_limits<double>::epsilon()*current.hard_violation);
-}
 double wall_ms(std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double,std::milli>(
         std::chrono::steady_clock::now()-start).count();
@@ -268,19 +240,40 @@ bool optimize_offline_exact_source(
         lap_length,dt,configuration,seed,options,*current,
         options.initial_same_epoch_source_nominal))
         return false;
+    result->exact_source_evaluations=1;
+    // Monotone feasibility restoration within this SQP. No racing-cost
+    // decrease can compensate for larger physical violation. Once the
+    // exact source iterate is feasible, preserve it and optimize original J.
+    const auto accept_step=[&](const Snapshot &next,const Snapshot &origin,
+        const OfflineOptions &settings,double directional_slope=0.,double alpha=1.) {
+        if(origin.valid && !next.valid)return false;
+        if(next.valid && !origin.valid)return true;
+        const double value=origin.valid?origin.cost:origin.hard_violation;
+        const double candidate=origin.valid?next.cost:next.hard_violation;
+        const double requested=origin.valid?settings.minimum_source_cost_reduction:
+            settings.minimum_violation_reduction;
+        const double sufficient=-1.e-4*alpha*std::min(0.,directional_slope);
+        const double roundoff=32.*std::numeric_limits<double>::epsilon()*std::max(1.,std::abs(value));
+        return candidate<value-std::max({requested,sufficient,roundoff});
+    };
+    int rejected_iterations=0;
+    int source_precision_stagnation_iterations=0;
     std::vector<double> inequality_multipliers;
-    std::vector<SourceNonlinearCurvatureSecant> source_secants;
+    // Constraint row identities guard carried hard duals and BFGS
+    // multipliers across nonsmooth reference/source branch transitions.
+    std::vector<SparseNonlinearRow> previous_row_identities;
+    bool previous_row_identities_valid=false;
     auto lagrangian_memory=std::make_unique<SourceLagrangianMemory>();
     auto derivative=std::make_unique<ReducedSourceGradient>();
     auto program=std::make_unique<SparseNonlinearProgram>();
     bool have_current_exact_source_linearization=false;
-    std::array<double,4*kStages*kStages> fd_lagrangian_hessian{};
-    bool have_current_fd_hessian=false;
+    std::array<double,4*kStages*kStages> reference_lagrangian_hessian{};
+    bool have_current_reference_hessian=false;
+    bool current_reference_hessian_evaluated=false;
     double qp_regularization=options.source_qp_curvature_regularization;
     // Scaled source curvature can exceed 1e8 near tire saturation. A fixed
     // 1e5 ceiling stopped globalization before it could produce a local step.
     constexpr double kMaxRegularization=1.e12;
-    constexpr double kRejectedFullStepDampingGrowth=3.;
     result->initial_source_feasible=current->valid;
     result->initial_source_cost=current->cost;
     result->initial_terminal_speed_margin_mps=
@@ -294,13 +287,15 @@ bool optimize_offline_exact_source(
             mpc_rti_monotonic_time_us()>=
                 options.absolute_deadline_monotonic_us;
     };
+    double measured_iteration_us=0.;
     for(int iteration=0;iteration<options.maximum_iterations;++iteration) {
         if(overdue() ||
            (options.absolute_deadline_monotonic_us>0. &&
             options.minimum_remaining_us_for_new_iteration>0. &&
             options.absolute_deadline_monotonic_us-
                 mpc_rti_monotonic_time_us()<
-                options.minimum_remaining_us_for_new_iteration)) {
+            std::max(options.minimum_remaining_us_for_new_iteration,
+                     measured_iteration_us))) {
             result->deadline_exhausted=true;
             result->iteration_admission_stopped=!overdue();
             break;
@@ -308,6 +303,10 @@ bool optimize_offline_exact_source(
         const auto iter_begin=std::chrono::steady_clock::now();
         OfflineIteration metrics{};
         metrics.iteration=iteration;
+        metrics.physical_violation_before=current->hard_violation;
+        metrics.physical_violation_after=current->hard_violation;
+        metrics.maximum_hard_violation_before=std::max({0.,-current->corridor,-current->rate,-current->box});
+        metrics.maximum_hard_violation_after=metrics.maximum_hard_violation_before;
         metrics.cost_before=current->cost;
         metrics.cost_after=current->cost;
         metrics.violation_before=current->total_violation;
@@ -320,6 +319,21 @@ bool optimize_offline_exact_source(
             trace->warm_start=*current->decision;
         }
 
+        const auto record_iteration=[&]() {
+            metrics.iteration_wall_ms=wall_ms(iter_begin);
+            // Optional refinement must fit the work actually observed in
+            // this cycle, not only the nominal admission estimate. This
+            // leaves the independently verified current NLP iterate intact.
+            measured_iteration_us=std::max(measured_iteration_us,
+                1000.*metrics.iteration_wall_ms);
+            metrics.exact_source_evaluations=result->exact_source_evaluations;
+            result->history.push_back(metrics);
+            if(trace) {
+                trace->accepted=metrics.accepted;
+                result->primal_trace.push_back(std::move(*trace));
+            }
+        };
+
         const auto lin_begin=std::chrono::steady_clock::now();
         // The convex subproblem is a LOCAL model of the SAME original
         // constrained NLP. Physical equality constraints are eliminated
@@ -327,17 +341,15 @@ bool optimize_offline_exact_source(
         // vehicle model, fallback QP or multiple-shooting optimization.
         // Rejected full steps do NOT invalidate the exact current
         // primal, source AD or physical Jacobian. Re-solve the SAME
-        // constrained SQP quadratic model with stronger regularization,
+        // constrained SQP quadratic model with revised damping,
         // rather than paying for identical source Jacobians again.
         metrics.qp_regularization_used=qp_regularization;
         metrics.reused_exact_source_linearization=
             have_current_exact_source_linearization;
         if(!have_current_exact_source_linearization) {
-            const double rho=current->valid?0.:
-                std::max(2.e6,3.*(1.+std::abs(current->cost))/
-                         std::max(1.e-9,current->total_violation));
+            const double rho=0.;
             const ConstraintMeritWeights merit_weights{
-                rho,rho,options.minimum_source_clearance_m,
+                rho,rho,0.,
                 options.terminal_speed_viability_weight,
                 options.terminal_speed_allowance_mps,
                 options.source_slip_epigraph};
@@ -354,28 +366,53 @@ bool optimize_offline_exact_source(
                     derivative.get(),merit_weights,program.get(),
                     current->evaluation.get(),current->nominal.get());
             if(!valid_derivatives || !derivative->valid || !program->valid) {
-                result->linearization_failed=true;break;
+                result->linearization_failed=true;
+                metrics.linearization_failed=true;
+                record_iteration();break;
             }
             if(std::abs(derivative->exact_source_violation_half_squared-
-                        current->total_violation)>1.e-8*
-                   std::max(1.,current->total_violation))
+                        current->hard_violation)>1.e-8*
+                   std::max(1.,current->hard_violation))
                 return false;
             have_current_exact_source_linearization=true;
-            if(!inequality_multipliers.empty() && inequality_multipliers.size()!=program->rows.size()) {
-                // A nonsmooth terminal reference can add/remove one cut.
-                // Reset the dual metric instead of rejecting a valid primal
-                // or assigning a carried multiplier to a different row.
+            if(previous_row_identities_valid &&
+               !same_original_source_constraint_layout(
+                    previous_row_identities,program->rows)) {
+                // An active source constraint may change ID even when
+                // the number of rows is unchanged. Never reuse a dual or
+                // source Lagrangian curvature with a different physical
+                // constraint. The current exact primal remains untouched.
                 inequality_multipliers.clear();
                 *lagrangian_memory={};
+                metrics.source_constraint_layout_reset=true;
+                ++result->source_constraint_layout_resets;
             }
+            previous_row_identities=program->rows;
+            previous_row_identities_valid=true;
         }
         metrics.linearization_wall_ms=wall_ms(lin_begin);
         if(overdue()) {
             result->deadline_exhausted=true;
-            if(trace)result->primal_trace.push_back(std::move(*trace));
-            break;
+            record_iteration();break;
         }
         auto qp=std::make_unique<SourceConstrainedQpResult>();
+        const auto record_qp_failure=[&]() {
+            const bool expired=qp->deadline_exceeded || overdue();
+            result->deadline_exhausted=expired;
+            result->qp_failed=!expired;metrics.qp_failed=!expired;
+            result->numerical_failure=!expired;
+            result->termination_reason=expired?"deadline_exhausted":qp->failure_reason;
+            result->final_physical_multipliers.clear();
+            metrics.normal_step_computed=qp->normal_step_computed;
+            metrics.normal_primal_residual=qp->normal_primal_residual;
+            metrics.normal_dual_residual=qp->normal_dual_residual;
+            metrics.normal_linearized_violation=qp->normal_linearized_violation;
+            metrics.qp_primal_residual=qp->primal_residual;
+            metrics.qp_dual_residual=qp->dual_residual;
+            metrics.qp_complementarity_residual=qp->complementarity_residual;
+            metrics.qp_iterations=qp->iterations;
+            record_iteration();
+        };
         SourceConstrainedQpOptions qp_opts{};
         qp_opts.requested_corner_clearance_m=
             options.minimum_source_clearance_m;
@@ -393,107 +430,96 @@ bool optimize_offline_exact_source(
         // racing problem with coupled source-derived GN curvature.
         qp_opts.source_configuration=&configuration;
         qp_opts.source_nominal=current->nominal.get();
-        qp_opts.source_curvature_secants=
-            source_secants.empty()?nullptr:&source_secants;
         qp_opts.lagrangian_memory=lagrangian_memory.get();
-        qp_opts.refresh_known_gauss_newton=current->valid;
+        // Source feature Jacobians change during restoration too. Refresh
+        // their known curvature at every new source primal; retain only the
+        // learned residual part of the previous Lagrangian approximation.
+        qp_opts.refresh_known_gauss_newton=true;
         qp_opts.absolute_deadline_monotonic_us=options.absolute_deadline_monotonic_us;
-        qp_opts.capture_curvature_model=options.finite_difference_lagrangian_hessian;
-        // Exact-L1 elastic SQP only regularizes an infeasible local model.
-        // It is never a source-feasibility certificate or a publication policy.
-        if(!current->valid && options.elastic_sqp_globalization) {
-            qp_opts.infeasible_linearization_l1_weight=1.e6;
-        }
-        metrics.calibrated_source_secants=
-            static_cast<int>(source_secants.size());
+        qp_opts.capture_curvature_model=
+            options.record_primal_trace || options.exact_lagrangian_hessian;
+        metrics.qp_attempted=true;
         if(!source_exact_constrained_qp_direction(
             *program,derivative->original_source_cost_control,
             current->decision->controls,qp_opts,qp.get())) {
-            result->qp_failed=true;break;
+            record_qp_failure();break;
         }
-        if(options.finite_difference_lagrangian_hessian && !options.source_slip_epigraph) {
+        if(options.exact_lagrangian_hessian && !options.source_slip_epigraph) {
             constexpr int dimension=2*kStages;
-            constexpr double scale[2]={.15,.25};
-            if(!have_current_fd_hessian) {
+            if(!current_reference_hessian_evaluated) {
+                current_reference_hessian_evaluated=true;
                 const auto hessian_begin=std::chrono::steady_clock::now();
-                const auto lagrangian_gradient=[&](const ReducedSourceGradient &gradient,
-                                                   const SourceConstrainedQpResult &linear) {
-                    Eigen::VectorXd value(dimension);
-                    for(int j=0;j<dimension;++j)value(j)=gradient.original_source_cost_control[j/2][j%2]*scale[j%2];
-                    for(size_t r=0;r<linear.constraint_row_indices.size();++r) {
-                        const size_t row=linear.constraint_row_indices[r];
-                        if(row>=qp->curvature_multipliers.size())return Eigen::VectorXd();
-                        for(int j=0;j<dimension;++j)value(j)-=qp->curvature_multipliers[row]*
-                            linear.constraint_jacobian_scaled[r*dimension+j];
-                    }
-                    return value;
-                };
-                const Eigen::VectorXd origin=lagrangian_gradient(*derivative,*qp);
-                const auto gradient_at=[&](const MpcModelControl_t controls[kStages]) {
-                    auto point=std::make_unique<Snapshot>();
-                    auto gradient=std::make_unique<ReducedSourceGradient>();
-                    auto linear=std::make_unique<SparseNonlinearProgram>();
-                    auto audit=std::make_unique<SourceConstrainedQpResult>();
-                    const ConstraintMeritWeights weights{0.,0.,options.minimum_source_clearance_m,
-                        options.terminal_speed_viability_weight,options.terminal_speed_allowance_mps};
-                    if(!exact_source_rollout(initial,initial_progress,trajectory,trajectory_count,
-                         lap_length,dt,configuration,controls,options,*point,nullptr,true) ||
-                       !source_exact_compact_qp_linearization(initial,initial_progress,trajectory,
-                         trajectory_count,lap_length,dt,configuration,*point->decision,*point->evaluation,
-                         *point->nominal,weights,gradient.get(),linear.get()))return Eigen::VectorXd();
-                    auto audit_options=qp_opts;
-                    audit_options.lagrangian_memory=nullptr;
-                    audit_options.source_nominal=point->nominal.get();
-                    audit_options.linearization_audit_only=true;
-                    audit_options.inequality_multipliers=nullptr;
-                    if(!source_exact_constrained_qp_direction(*linear,gradient->original_source_cost_control,
-                        point->decision->controls,audit_options,audit.get()))return Eigen::VectorXd();
-                    return lagrangian_gradient(*gradient,*audit);
-                };
-                Eigen::MatrixXd hessian(dimension,dimension);
-                bool valid=origin.size()==dimension;
-                for(int j=0;j<dimension && valid && !overdue();++j) {
-                    MpcModelControl_t plus[kStages],minus[kStages];
-                    std::copy_n(current->decision->controls,kStages,plus);
-                    std::copy_n(current->decision->controls,kStages,minus);
-                    const int axis=j%2;
-                    const double lower=axis?MPC_THROTTLE_MIN_DRIVE:-configuration.model.max_steering_rad;
-                    const double upper=axis?MPC_THROTTLE_MAX:configuration.model.max_steering_rad;
-                    const double value=axis?plus[j/2].throttle_command:plus[j/2].steering_target_rad;
-                    const float a=static_cast<float>(std::min(upper,value+1.e-3*scale[axis]));
-                    const float b=static_cast<float>(std::max(lower,value-1.e-3*scale[axis]));
-                    (axis?plus[j/2].throttle_command:plus[j/2].steering_target_rad)=a;
-                    (axis?minus[j/2].throttle_command:minus[j/2].steering_target_rad)=b;
-                    const Eigen::VectorXd forward=a==value?origin:gradient_at(plus);
-                    const Eigen::VectorXd backward=b==value?origin:gradient_at(minus);
-                    valid=forward.size()==dimension && backward.size()==dimension && a>b;
-                    if(valid)hessian.col(j)=(forward-backward)/((double(a)-double(b))/scale[axis]);
+                std::array<double,16*kStages> multipliers{};
+                // Restoration has no original-NLP dual certificate. Zero
+                // multipliers still give the exact objective Hessian; do
+                // not silently lose all source curvature there, or use
+                // elastic/equality duals as physical multipliers.
+                for(size_t r=0;qp->original_duals_trustworthy && r<program->rows.size();++r) {
+                    const auto &row=program->rows[r];
+                    int index=-1;
+                    if(row.type==NonlinearRowType::BodyCorner)index=8*row.stage+row.index;
+                    if(row.type==NonlinearRowType::PhysicalCommandRate)index=8*kStages+4*row.stage+row.index;
+                    if(row.type==NonlinearRowType::PhysicalCommandBox)index=12*kStages+4*row.stage+row.index;
+                    if(index>=0)multipliers[index]=qp->inequality_multipliers[r];
                 }
-                if(valid && !overdue()) {
-                    hessian=(.5*(hessian+hessian.transpose())).eval();
-                    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen(hessian);
-                    valid=eigen.info()==Eigen::Success;
-                    if(valid) {
+                SourceLagrangianHessian exact{};
+                if(source_lagrangian_hessian(*current->nominal,*current->evaluation,
+                    trajectory,trajectory_count,lap_length,dt,configuration,multipliers,
+                    &exact,options.absolute_deadline_monotonic_us) && !overdue()) {
+                    Eigen::Map<const Eigen::Matrix<double,dimension,dimension,Eigen::RowMajor>> raw(exact.scaled.data());
+                    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen(raw);
+                    if(eigen.info()==Eigen::Success) {
                         metrics.lagrangian_hessian_min_eigenvalue=eigen.eigenvalues().minCoeff();
                         const double floor=std::max(1.e-3,1.e-9*eigen.eigenvalues().cwiseAbs().maxCoeff());
-                        const Eigen::VectorXd values=options.absolute_lagrangian_curvature?
-                            Eigen::VectorXd(eigen.eigenvalues().cwiseAbs()):Eigen::VectorXd(eigen.eigenvalues());
-                        hessian=eigen.eigenvectors()*values.cwiseMax(floor).asDiagonal()*
-                            eigen.eigenvectors().transpose();
-                        for(int i=0;i<dimension;++i)
-                            for(int j=0;j<dimension;++j)fd_lagrangian_hessian[i*dimension+j]=hessian(i,j);
-                        have_current_fd_hessian=true;
+                        const Eigen::MatrixXd stabilized=eigen.eigenvectors()*
+                            eigen.eigenvalues().cwiseMax(floor).asDiagonal()*eigen.eigenvectors().transpose();
+                        for(int i=0;i<dimension;++i)for(int j=0;j<dimension;++j)
+                            reference_lagrangian_hessian[i*dimension+j]=stabilized(i,j);
+                        have_current_reference_hessian=true;
                     }
                 }
+                result->exact_source_evaluations+=exact.source_directional_evaluations;
+                metrics.hessian_source_directional_evaluations=exact.source_directional_evaluations;
+                metrics.hessian_quadratic_consistency_relative=exact.quadratic_consistency_relative;
                 metrics.lagrangian_hessian_wall_ms=wall_ms(hessian_begin);
             }
-            if(have_current_fd_hessian && !overdue()) {
-                qp_opts.lagrangian_hessian_scaled=&fd_lagrangian_hessian;
+            metrics.lagrangian_hessian_valid=have_current_reference_hessian;
+            if(have_current_reference_hessian && !overdue()) {
+                qp_opts.lagrangian_hessian_scaled=&reference_lagrangian_hessian;
                 qp_opts.lagrangian_memory=nullptr;
                 if(!source_exact_constrained_qp_direction(*program,derivative->original_source_cost_control,
-                    current->decision->controls,qp_opts,qp.get())) {result->qp_failed=true;break;}
+                    current->decision->controls,qp_opts,qp.get())) {
+                    record_qp_failure();break;
+                }
             }
         }
+        metrics.normal_step_computed=qp->normal_step_computed;
+        metrics.normal_only_step=qp->normal_only_step;
+        metrics.normal_primal_residual=qp->normal_primal_residual;
+        metrics.normal_dual_residual=qp->normal_dual_residual;
+        metrics.normal_linearized_violation=qp->normal_linearized_violation;
+        metrics.linearized_physical_violation_inf=qp->linearized_physical_violation_inf;
+        metrics.original_duals_trustworthy=qp->original_duals_trustworthy;
+        metrics.qp_complementarity_residual=qp->complementarity_residual;
+        metrics.qp_hessian_min_eigenvalue=qp->hessian_min_eigenvalue;
+        metrics.qp_hessian_max_eigenvalue=qp->hessian_max_eigenvalue;
+        const auto physical_duals=[&]() {
+            std::vector<double> values;
+            for(size_t r=0;r<program->rows.size();++r) {
+                const auto type=program->rows[r].type;
+                if(type==NonlinearRowType::BodyCorner ||
+                   type==NonlinearRowType::PhysicalCommandRate ||
+                   type==NonlinearRowType::PhysicalCommandBox)
+                    values.push_back(qp->inequality_multipliers[r]);
+            }
+            return values;
+        };
+        if(trace)trace->physical_multipliers=physical_duals();
+        // A dual estimate is not a convergence claim. The qualification
+        // oracle scores it at the final exact source controls independently.
+        if(options.record_primal_trace && qp->original_duals_trustworthy)
+            result->final_physical_multipliers=physical_duals();
+        if(!qp->original_duals_trustworthy)result->final_physical_multipliers.clear();
         metrics.qp_iterations=qp->iterations;
         metrics.qp_converged=qp->converged;
         metrics.qp_dual_residual=qp->dual_residual;
@@ -513,14 +539,13 @@ bool optimize_offline_exact_source(
         metrics.predicted_cost_change=qp->predicted_original_objective_change;
         if(overdue()) {
             result->deadline_exhausted=true;
-            if(trace)result->primal_trace.push_back(std::move(*trace));
-            break;
+            record_iteration();break;
         }
 
-        // Exactly ONE full QP step. No alpha sampling, alternate direction,
-        // physical-control trust box or second optimizer is permitted.
-        // Every proposed source state is independently reintegrated.
+        // Try the full SQP direction first. Filter globalization below
+        // evaluates this same nonlinear problem at each internal trial.
         MpcModelControl_t commands[kStages]{};
+        double physical_direction[kStages][2]{};
         bool changed=false;
         for(int k=0;k<kStages;++k) {
             const auto &u=current->decision->controls[k];
@@ -536,12 +561,41 @@ bool optimize_offline_exact_source(
                 double(MPC_THROTTLE_MAX)));
             changed|=v.steering_target_rad!=u.steering_target_rad ||
                      v.throttle_command!=u.throttle_command;
+            physical_direction[k][0]=double(v.steering_target_rad)-u.steering_target_rad;
+            physical_direction[k][1]=double(v.throttle_command)-u.throttle_command;
+        }
+        const auto physical_row_index=[](const SparseNonlinearRow &row) {
+            if(row.type==NonlinearRowType::BodyCorner)return 8*row.stage+row.index;
+            if(row.type==NonlinearRowType::PhysicalCommandRate)return 8*kStages+4*row.stage+row.index;
+            if(row.type==NonlinearRowType::PhysicalCommandBox)return 12*kStages+4*row.stage+row.index;
+            return -1;
+        };
+        SourceConstraintCurvature path_model{};
+        {
+            metrics.source_constraint_path_model_valid=source_constraint_path_curvature(
+                *current->nominal,*current->evaluation,trajectory,trajectory_count,
+                lap_length,dt,configuration,physical_direction,&path_model);
+            metrics.source_constraint_path_first_invalid_stage=path_model.first_invalid_stage;
+            if(path_model.valid)
+                for(size_t r=0;r<program->rows.size();++r) {
+                    const auto &row=program->rows[r];
+                    const int index=physical_row_index(row);
+                    if(index<0)continue;
+                    const double negative=std::min(0.,row.value);
+                    const double first=path_model.first[index];
+                    metrics.physical_violation_directional_first+=negative*first;
+                    metrics.physical_violation_directional_second+=negative*path_model.second[index]+
+                        ((row.value<0. || (row.value==0. && first<0.))?first*first:0.);
+                    metrics.one_sided_constraint_direction_disagreement_inf=std::max(
+                        metrics.one_sided_constraint_direction_disagreement_inf,
+                        std::abs(first-(qp->predicted_constraint_margins[r]-row.value)));
+                }
         }
         // Original nonlinear KKT conditions determine convergence. Primal
         // step size is not evidence either for or against stationarity.
         constexpr double kStationarityTolerance=1.e-2;
         constexpr double kComplementarityTolerance=1.e-4;
-        const bool nonlinear_kkt_converged=current->valid &&
+        const bool nonlinear_kkt_converged=current->valid && qp->original_duals_trustworthy &&
                 qp->original_nlp_stationarity_inf<=
                     kStationarityTolerance &&
                 qp->original_nlp_inequality_residual_inf<=
@@ -554,23 +608,27 @@ bool optimize_offline_exact_source(
             result->source_nlp_kkt_converged=nonlinear_kkt_converged;
             if(!result->source_nlp_kkt_converged)
                 result->full_step_sqp_stalled=true;
-            metrics.iteration_wall_ms=wall_ms(iter_begin);
-            result->history.push_back(metrics);
-            if(trace)result->primal_trace.push_back(std::move(*trace));
-            if(result->source_nlp_kkt_converged)break;
-            // A rounded-zero primal correction can still improve the dual
-            // estimate. Retain that estimate and tighten the SAME QP; do not
-            // mistake command quantization for nonlinear convergence.
-            inequality_multipliers=std::move(qp->inequality_multipliers);
-            continue;
+            record_iteration();
+            if(result->source_nlp_kkt_converged) {result->termination_reason="original_nlp_kkt";break;}
+            result->numerical_failure=true;
+            result->termination_reason="rounded_zero_step_without_nlp_kkt";
+            break;
+        }
+        if(!qp->converged && !qp->normal_only_step) {
+            result->qp_failed=true;result->numerical_failure=true;
+            result->termination_reason="uncertified_tangential_qp";
+            metrics.qp_failed=true;metrics.invalid_qp_duals_discarded=true;
+            record_iteration();break;
         }
         const auto rollout_begin=std::chrono::steady_clock::now();
         ++result->source_trial_evaluations;
+        ++result->exact_source_evaluations;
         const bool evaluated=exact_source_rollout(
             initial,initial_progress,trajectory,trajectory_count,
             lap_length,dt,configuration,commands,options,*proposed,
             current->nominal.get());
         metrics.source_rollout_wall_ms=wall_ms(rollout_begin);
+        metrics.full_step_evaluated=evaluated;
         metrics.nonlinear_evaluation_failed=!evaluated;
         if(trace) {
             trace->trial_evaluated=evaluated;
@@ -578,14 +636,77 @@ bool optimize_offline_exact_source(
             else std::copy_n(commands,kStages,trace->trial.controls);
         }
         if(evaluated) {
+            metrics.physical_violation_trial=proposed->hard_violation;
             metrics.cost_trial=proposed->cost;
             metrics.violation_trial=proposed->total_violation;
             metrics.actual_cost_change=proposed->cost-current->cost;
         }
-        bool accepted=evaluated && accept_step(*proposed,*current,options);
-        const double primary_terminal_violation=proposed->terminal_speed_violation;
+        const double source_directional_slope=path_model.valid?
+            (current->valid?path_model.original_objective_first:
+             metrics.physical_violation_directional_first):0.;
+        bool accepted=evaluated && accept_step(*proposed,*current,options,source_directional_slope) &&
+            (!qp->normal_only_step || proposed->hard_violation<current->hard_violation);
+        metrics.full_step_accepted=accepted;
+        if(evaluated) {
+            // Audit the local QP against exact physical rollout. These
+            // diagnostics never restrict the original legal control box.
+            double predicted_hard=0.;
+            double worst_error=0.;
+            if(evaluated) {
+                for(size_t row=0;row<program->rows.size();++row) {
+                    const auto &r=program->rows[row];
+                    double actual=INFINITY;
+                    if(r.type==NonlinearRowType::BodyCorner) {
+                        const auto &corners=
+                            proposed->evaluation->corridor_corners[r.stage];
+                        actual=r.index<4?corners.left[r.index]:
+                            corners.right[r.index-4];
+                    } else if(r.type==NonlinearRowType::PhysicalCommandRate)
+                        actual=proposed->evaluation->command_rate[r.stage][r.index];
+                    else if(r.type==NonlinearRowType::PhysicalCommandBox)
+                        actual=proposed->evaluation->command_box[r.stage][r.index];
+                    else continue;
+                    const double prediction=
+                        qp->predicted_constraint_margins[row];
+                    const double deficit=std::min(0.,prediction);
+                    predicted_hard+=.5*deficit*deficit;
+                    if(r.type==NonlinearRowType::BodyCorner)
+                        worst_error=std::max(worst_error,
+                                             std::abs(actual-prediction));
+                    if(r.type==NonlinearRowType::BodyCorner && path_model.valid) {
+                        const int index=physical_row_index(r);
+                        const double quadratic=r.value+path_model.first[index]+.5*path_model.second[index];
+                        metrics.model_maximum_quadratic_footprint_error_m=std::max(
+                            metrics.model_maximum_quadratic_footprint_error_m,std::abs(actual-quadratic));
+                    }
+                }
+            }
+            metrics.model_predicted_hard_violation=predicted_hard;
+            metrics.model_maximum_hard_constraint_error=worst_error;
+            const double predicted=current->valid?
+                -qp->predicted_original_objective_change:
+                current->hard_violation-predicted_hard;
+            const double actual=evaluated?(current->valid?
+                current->cost-proposed->cost:
+                current->hard_violation-proposed->hard_violation):
+                -INFINITY;
+            const double ratio=predicted>1.e-12?
+                actual/predicted:-INFINITY;
+            metrics.model_actual_over_predicted_reduction=ratio;
+
+        }
+        if(accepted && qp->normal_only_step) {
+            metrics.normal_step_accepted=true;
+            if(trace) {
+                trace->normal_evaluated=true;trace->normal_accepted=true;
+                trace->normal=*proposed->decision;
+            }
+        }
         const double correction_budget_us=1200.+1.3*1000.*qp->wall_ms;
-        if(!accepted && evaluated && qp->converged &&
+        if(!accepted && evaluated &&
+           (qp->original_duals_trustworthy ||
+            (options.source_infeasible_second_order_correction &&
+             !current->valid)) &&
            (options.absolute_deadline_monotonic_us<=0. ||
             options.absolute_deadline_monotonic_us-mpc_rti_monotonic_time_us()>correction_budget_us)) {
             // One Maratos correction of this SQP step. The source defect is
@@ -631,6 +752,7 @@ bool optimize_offline_exact_source(
                 if(correction_squared<=primary_squared*primary_squared && !overdue()) {
                     auto corrected=std::make_unique<Snapshot>();
                     ++result->source_trial_evaluations;
+                    ++result->exact_source_evaluations;
                     const auto start=std::chrono::steady_clock::now();
                     const bool valid=exact_source_rollout(initial,initial_progress,trajectory,
                         trajectory_count,lap_length,dt,configuration,corrected_commands,options,
@@ -644,7 +766,7 @@ bool optimize_offline_exact_source(
                         metrics.second_order_correction_cost=corrected->cost;
                         metrics.second_order_correction_clearance=corrected->corridor;
                     }
-                    if(valid && accept_step(*corrected,*current,options)) {
+                    if(valid && accept_step(*corrected,*current,options,source_directional_slope)) {
                         metrics.second_order_correction_accepted=true;
                         if(trace)trace->correction_accepted=true;
                         std::swap(proposed,corrected);
@@ -654,191 +776,372 @@ bool optimize_offline_exact_source(
                 }
             }
         }
-        if(!accepted && evaluated && qp->converged && options.safeguarded_merit_globalization) {
-            double penalty=1.e6;
-            for(double lambda:qp->inequality_multipliers)penalty=std::max(penalty,1.1*lambda);
-            const auto merit=[&](const Snapshot &point) {
-                return point.cost+options.source_qp_soft_physical_weight*point.total_violation+
-                    options.terminal_speed_viability_weight*point.terminal_speed_violation+
-                    penalty*point.hard_violation_l1;
-            };
-            double slope=qp->source_cost_linear_slope;
-            for(size_t r=0;r<program->rows.size();++r) {
-                const auto &row=program->rows[r];
-                if(row.type!=NonlinearRowType::BodyCorner &&
-                   row.type!=NonlinearRowType::PhysicalCommandRate &&
-                   row.type!=NonlinearRowType::PhysicalCommandBox)continue;
-                const double change=qp->predicted_constraint_margins[r]-row.value;
-                if(row.value<0.)slope-=penalty*change;
-                else if(row.value==0.)slope+=penalty*std::max(0.,-change);
-                if(row.type==NonlinearRowType::BodyCorner)
-                    slope+=options.source_qp_soft_physical_weight*
-                        std::min(0.,row.value-options.minimum_source_clearance_m)*change;
-                else if(row.type==NonlinearRowType::PhysicalCommandRate)
-                    slope+=options.source_qp_soft_physical_weight*std::min(0.,row.value)*change;
+        if(options.source_trial_relinearized_correction &&
+           !accepted && evaluated && !overdue()) {
+            // Mathematically distinct from shifting stale margins at U:
+            // compute source F, constraint g, and exact source-AD J at
+            // U+d itself, then solve ONE corrective local SQP QP there.
+            // The physical correction is integrated as U+d+c and checked
+            // against the ORIGINAL source constraints before acceptance.
+            auto candidate_gradient=std::make_unique<ReducedSourceGradient>();
+            auto candidate_program=std::make_unique<SparseNonlinearProgram>();
+            const ConstraintMeritWeights weights{
+                0.,0.,options.minimum_source_clearance_m,
+                options.terminal_speed_viability_weight,
+                options.terminal_speed_allowance_mps};
+            const bool candidate_derivatives=
+                source_exact_compact_qp_linearization(
+                    initial,initial_progress,trajectory,trajectory_count,
+                    lap_length,dt,configuration,*proposed->decision,
+                    *proposed->evaluation,*proposed->nominal,weights,
+                    candidate_gradient.get(),candidate_program.get());
+            if(candidate_derivatives && !overdue()) {
+                auto candidate_options=qp_opts;
+                candidate_options.lagrangian_memory=nullptr;
+                candidate_options.inequality_multipliers=nullptr;
+                candidate_options.source_nominal=proposed->nominal.get();
+                candidate_options.constraint_margin_corrections=nullptr;
+                candidate_options.capture_curvature_model=false;
+                auto correction=std::make_unique<SourceConstrainedQpResult>();
+                metrics.second_order_correction_attempted=true;
+                if(source_exact_constrained_qp_direction(
+                    *candidate_program,candidate_gradient->original_source_cost_control,
+                    proposed->decision->controls,candidate_options,
+                    correction.get()) &&
+                   (correction->converged || correction->normal_only_step)) {
+                    MpcModelControl_t commands2[kStages]{};
+                    double primary_norm2=0.,correction_norm2=0.;
+                    for(int k=0;k<kStages;++k) {
+                        const auto &u=proposed->decision->controls[k];
+                        commands2[k].steering_target_rad=static_cast<float>(
+                            std::clamp(double(u.steering_target_rad)+
+                                          correction->direction[k][0],
+                                       -double(configuration.model.max_steering_rad),
+                                       double(configuration.model.max_steering_rad)));
+                        commands2[k].throttle_command=static_cast<float>(
+                            std::clamp(double(u.throttle_command)+
+                                          correction->direction[k][1],
+                                       double(MPC_THROTTLE_MIN_DRIVE),
+                                       double(MPC_THROTTLE_MAX)));
+                        for(int j=0;j<2;++j) {
+                            const double scale=j==0?.15:.25;
+                            primary_norm2+=std::pow(qp->direction[k][j]/scale,2);
+                            correction_norm2+=std::pow(
+                                correction->direction[k][j]/scale,2);
+                        }
+                    }
+                    // Source curvature correction must be small compared
+                    // with the first-order step, never an arbitrarily new
+                    // warm start or another controller.
+                    if(correction_norm2<=
+                            std::max(1.e-7,2.*primary_norm2*primary_norm2) &&
+                       !overdue()) {
+                        auto corrected=std::make_unique<Snapshot>();
+                        ++result->source_trial_evaluations;
+                        ++result->exact_source_evaluations;
+                        const auto start=std::chrono::steady_clock::now();
+                        const bool valid=exact_source_rollout(
+                            initial,initial_progress,trajectory,trajectory_count,
+                            lap_length,dt,configuration,commands2,options,
+                            *corrected,current->nominal.get());
+                        metrics.source_rollout_wall_ms+=wall_ms(start);
+                        if(trace) {
+                            trace->correction_evaluated=valid;
+                            if(valid)trace->correction=*corrected->decision;
+                        }
+                        if(valid) {
+                            metrics.second_order_correction_cost=corrected->cost;
+                            metrics.second_order_correction_clearance=
+                                corrected->corridor;
+                        }
+                        if(valid && accept_step(*corrected,*current,options,source_directional_slope)) {
+                            metrics.second_order_correction_accepted=true;
+                            if(trace)trace->correction_accepted=true;
+                            std::swap(proposed,corrected);
+                            // The correction QP was linearized at the
+                            // previously rejected U+d, NOT at current U.
+                            // Neither set of QP duals may be used to claim
+                            // original-NLP KKT at the new accepted primal.
+                            qp->original_duals_trustworthy=false;
+                            accepted=true;
+                        }
+                    }
+                }
             }
-            const double origin=merit(*current);
-            double previous_alpha=1.,previous_merit=merit(*proposed);
-            for(int search=0;slope<0. && search<8 && !accepted && !overdue();++search) {
-                const double denominator=2.*(previous_merit-origin-previous_alpha*slope);
-                const double interpolated=denominator>0.?
+        }
+        if(!accepted && evaluated &&
+           qp->converged) {
+            // Adaptive filter backtracking of this one SQP direction. The
+            // scalar interpolant is V while infeasible and J while feasible;
+            // the filter always checks both original nonlinear quantities.
+            // At a source/reference tie, the actual one-sided derivative
+            // can differ from the nominal branch's J*d. Use the complete
+            // condensed path derivative for the violation interpolant.
+            // A genuinely discontinuous source direction has no derivative;
+            // halve then evaluate exact physics rather than invent a slope.
+            const double slope=source_directional_slope;
+            const double origin=current->valid?current->cost:current->hard_violation;
+            double previous_alpha=1.;
+            double previous_value=current->valid?proposed->cost:proposed->hard_violation;
+            for(int search=0;search<20 && !accepted && !overdue();++search) {
+                const double denominator=2.*(previous_value-origin-previous_alpha*slope);
+                const double interpolated=slope<0. && denominator>0.?
                     -slope*previous_alpha*previous_alpha/denominator:.5*previous_alpha;
                 const double alpha=std::clamp(interpolated,.1*previous_alpha,.5*previous_alpha);
-                if(alpha<1.e-8)break;
-                MpcModelControl_t safeguarded_commands[kStages]{};
-                bool safeguarded_changed=false;
+                MpcModelControl_t candidate[kStages]{};
+                bool moved=false;
                 for(int k=0;k<kStages;++k) {
                     const auto &u=current->decision->controls[k];
-                    safeguarded_commands[k].steering_target_rad=static_cast<float>(std::clamp(
+                    candidate[k].steering_target_rad=static_cast<float>(std::clamp(
                         double(u.steering_target_rad)+alpha*qp->direction[k][0],
                         -double(configuration.model.max_steering_rad),double(configuration.model.max_steering_rad)));
-                    safeguarded_commands[k].throttle_command=static_cast<float>(std::clamp(
+                    candidate[k].throttle_command=static_cast<float>(std::clamp(
                         double(u.throttle_command)+alpha*qp->direction[k][1],
                         double(MPC_THROTTLE_MIN_DRIVE),double(MPC_THROTTLE_MAX)));
-                    safeguarded_changed|=safeguarded_commands[k].steering_target_rad!=u.steering_target_rad ||
-                        safeguarded_commands[k].throttle_command!=u.throttle_command;
+                    moved|=candidate[k].steering_target_rad!=u.steering_target_rad ||
+                        candidate[k].throttle_command!=u.throttle_command;
                 }
-                if(!safeguarded_changed)break;
-                ++metrics.safeguarded_evaluations;
-                ++result->source_trial_evaluations;
-                const auto score_begin=std::chrono::steady_clock::now();
-                const bool valid=exact_source_rollout(initial,initial_progress,trajectory,
-                    trajectory_count,lap_length,dt,configuration,safeguarded_commands,
-                    options,*proposed,current->nominal.get());
-                metrics.source_rollout_wall_ms+=wall_ms(score_begin);
+                if(!moved)break;
+                ++metrics.safeguarded_evaluations;++result->source_trial_evaluations;
+                ++result->exact_source_evaluations;
+                const auto start=std::chrono::steady_clock::now();
+                const bool valid=exact_source_rollout(initial,initial_progress,trajectory,trajectory_count,
+                    lap_length,dt,configuration,candidate,options,*proposed,current->nominal.get());
+                metrics.source_rollout_wall_ms+=wall_ms(start);
                 if(trace) {
                     trace->safeguarded_trials.push_back(*proposed->decision);
                     trace->safeguarded_step_lengths.push_back(alpha);
                     trace->safeguarded_valid.push_back(valid);
                 }
                 previous_alpha=alpha;
-                previous_merit=valid?merit(*proposed):INFINITY;
-                accepted=valid && (!current->valid || proposed->valid) &&
-                    ((proposed->valid && !current->valid) ||
-                     (previous_merit<origin-32.*std::numeric_limits<double>::epsilon()*std::max(1.,std::abs(origin)) &&
-                      previous_merit<=origin+1.e-4*alpha*slope));
+                previous_value=valid?(current->valid?proposed->cost:proposed->hard_violation):INFINITY;
+                accepted=valid && accept_step(*proposed,*current,options,slope,alpha);
                 if(accepted) {
                     metrics.safeguarded_step_length=alpha;
                     if(trace)trace->safeguarded_accepted=true;
                 }
             }
         }
+        if(!accepted &&
+           qp->normal_step_computed && !current->valid) {
+            SourceConstraintCurvature normal_model{};
+            double normal_slope=0.;
+            if(source_constraint_path_curvature(*current->nominal,*current->evaluation,
+                trajectory,trajectory_count,lap_length,dt,configuration,
+                qp->normal_direction,&normal_model))
+                for(const auto &row:program->rows) {
+                    const int index=physical_row_index(row);
+                    if(index>=0)normal_slope+=std::min(0.,row.value)*normal_model.first[index];
+                }
+            double alpha=1.;
+            for(int search=0;search<20 && !accepted && !overdue();++search) {
+                MpcModelControl_t normal[kStages]{};
+                for(int k=0;k<kStages;++k) {
+                    const auto &u=current->decision->controls[k];
+                    normal[k].steering_target_rad=static_cast<float>(std::clamp(
+                        double(u.steering_target_rad)+alpha*qp->normal_direction[k][0],
+                        -double(configuration.model.max_steering_rad),double(configuration.model.max_steering_rad)));
+                    normal[k].throttle_command=static_cast<float>(std::clamp(
+                        double(u.throttle_command)+alpha*qp->normal_direction[k][1],
+                        double(MPC_THROTTLE_MIN_DRIVE),double(MPC_THROTTLE_MAX)));
+                }
+                ++result->source_trial_evaluations;++result->exact_source_evaluations;
+                const bool valid=exact_source_rollout(initial,initial_progress,trajectory,trajectory_count,
+                    lap_length,dt,configuration,normal,options,*proposed,current->nominal.get());
+                if(trace) {
+                    trace->normal_evaluated=valid;
+                    if(valid)trace->normal=*proposed->decision;
+                }
+                accepted=valid && accept_step(*proposed,*current,options,normal_slope,alpha);
+                if(accepted) {
+                    metrics.normal_step_accepted=true;metrics.safeguarded_step_length=alpha;
+                    qp->original_duals_trustworthy=false;metrics.original_duals_trustworthy=false;
+                    if(trace)trace->normal_accepted=true;
+                }
+                alpha*=.5;
+            }
+        }
         if(accepted) {
+            double nominal_coordinate_scale=1.;
+            for(int k=0;k<kStages;++k) {
+                const auto &u=current->decision->controls[k];
+                const auto &v=proposed->decision->controls[k];
+                nominal_coordinate_scale=std::max({nominal_coordinate_scale,
+                    std::abs(double(u.steering_target_rad))/.15,
+                    std::abs(double(u.throttle_command))/.25});
+                metrics.accepted_step_inf_scaled=std::max({metrics.accepted_step_inf_scaled,
+                    std::abs(double(v.steering_target_rad)-u.steering_target_rad)/.15,
+                    std::abs(double(v.throttle_command)-u.throttle_command)/.25});
+            }
+            metrics.physical_violation_after=proposed->hard_violation;
+            metrics.maximum_hard_violation_after=std::max({0.,-proposed->corridor,-proposed->rate,-proposed->box});
             metrics.accepted=true;
             metrics.actual_cost_change=proposed->cost-current->cost;
             metrics.predicted_cost_change=qp->predicted_original_objective_change;
             metrics.cost_after=proposed->cost;
             metrics.violation_after=proposed->total_violation;
             metrics.corridor_slack_after=proposed->corridor;
-            lagrangian_memory->anchor_valid=true;
-            lagrangian_memory->frozen_curvature_multipliers=qp->curvature_multipliers;
-            lagrangian_memory->frozen_slip_multipliers=qp->slip_curvature_multipliers;
-            for(int j=0;j<2*kStages;++j) {
-                const auto &u=current->decision->controls[j/2];
-                lagrangian_memory->anchor_controls[j]=(j%2?
-                    double(u.throttle_command):double(u.steering_target_rad))/(j%2?.25:.15);
-                lagrangian_memory->anchor_gradient[j]=qp->lagrangian_gradient_at_qp_duals[j];
+            // A representable change in one near-zero float command can
+            // survive while every physically significant coordinate rounds
+            // away. Do not spend thousands of iterations claiming progress
+            // from roundoff-sized changes in the original scalar score.
+            const double value_before=current->valid?current->cost:current->hard_violation;
+            const double value_after=current->valid?proposed->cost:proposed->hard_violation;
+            const double accumulation_roundoff=64.*kStages*std::numeric_limits<double>::epsilon()*
+                std::max({1.,std::abs(value_before),std::abs(value_after)});
+            const bool precision_limited=
+                metrics.accepted_step_inf_scaled<=std::numeric_limits<float>::epsilon()*nominal_coordinate_scale &&
+                std::abs(value_after-value_before)<=accumulation_roundoff;
+            source_precision_stagnation_iterations=precision_limited?
+                source_precision_stagnation_iterations+1:0;
+            metrics.original_duals_trustworthy=qp->original_duals_trustworthy;
+            if(options.record_primal_trace && qp->original_duals_trustworthy)
+                result->final_physical_multipliers=physical_duals();
+            else result->final_physical_multipliers.clear();
+            // Source-contact, tire, suspension, peak-active and reference
+            // switches change the *function being differentiated* even when
+            // every original hard constraint retains the same row identity.
+            // Reusing a cross-mode BFGS secant corrupts the next SQP Hessian.
+            // Compare the two ALREADY integrated original-source trajectories;
+            // do not create another candidate or change the plant.
+            SourceCurvatureBranches accepted_branches{};
+            const bool check_curvature_switches=
+                options.strict_accepted_source_branch_curvature_guard ||
+                options.source_discontinuous_secant_guard;
+            const bool valid_branch_comparison=
+                !check_curvature_switches ||
+                compare_source_curvature_branches(
+                    *current->nominal,*current->evaluation,
+                    *proposed->nominal,*proposed->evaluation,trajectory,trajectory_count,lap_length,dt,
+                    &accepted_branches);
+            const bool same_source_curvature_regime=
+                !options.strict_accepted_source_branch_curvature_guard ||
+                (valid_branch_comparison && accepted_branches.same);
+            // These events change the original source *integration schedule*
+            // or the force/contact mode. In contrast, WheelFrictionCurve
+            // spline knots are value/first-derivative continuous and should
+            // not automatically suppress a BFGS secant.
+            const auto &physics=accepted_branches.physical;
+            const bool discontinuous_source_mode_switch=
+                options.source_discontinuous_secant_guard &&
+                (!valid_branch_comparison ||
+                 physics.mismatched_substep_schedule_events>0 ||
+                 physics.contact_grounded_changes>0 ||
+                 physics.throttle_brake_mode_changes>0 ||
+                 physics.sticky_forward_changes>0 ||
+                 physics.sticky_side_changes>0);
+            metrics.accepted_source_branch_curvature_reset=
+                !same_source_curvature_regime;
+            if(check_curvature_switches && valid_branch_comparison) {
+                const auto &p=accepted_branches.physical;
+                metrics.accepted_source_physical_branch_changes=
+                    p.mismatched_substep_schedule_events+
+                    p.contact_grounded_changes+
+                    p.sticky_forward_changes+p.sticky_side_changes+
+                    p.longitudinal_spline_region_changes+
+                    p.lateral_spline_region_changes+
+                    p.tire_load_filter_changes+
+                    p.combined_slip_saturation_changes+
+                    p.suspension_jounce_region_changes+
+                    p.slip_denominator_region_changes+
+                    p.steering_target_reached_changes+
+                    p.throttle_brake_mode_changes;
+                metrics.accepted_source_peak_branch_changes=
+                    accepted_branches.peak_changes;
+                metrics.accepted_source_reference_branch_changes=
+                    accepted_branches.reference_changes;
             }
-            // Curvature stabilization must decay when the original nonlinear
-            // response agrees with the model. Permanently retaining the last
-            // rejected-step damping prevents fast local KKT convergence.
-            if(metrics.safeguarded_step_length<.75) {
-                qp_regularization=std::min(kMaxRegularization,
-                    qp_regularization/metrics.safeguarded_step_length);
-            } else if(current->valid && proposed->valid) {
-                const double predicted=-(qp->predicted_original_objective_change+
-                    options.source_qp_soft_physical_weight*(
-                        qp->predicted_linearized_violation_after-
-                        qp->predicted_linearized_violation_before));
-                const double actual=current->cost-proposed->cost+
-                    options.source_qp_soft_physical_weight*(
-                        current->total_violation-proposed->total_violation);
-                if(predicted>1.e-9 && actual>.75*predicted)
-                    qp_regularization=std::max(.001,qp_regularization*.3);
-            } else if(current->hard_violation>1.e-12 &&
-                      proposed->hard_violation<.5*current->hard_violation)
-                qp_regularization=std::max(.001,qp_regularization*.5);
+            if(!same_source_curvature_regime) {
+                *lagrangian_memory={};
+                ++result->accepted_source_branch_curvature_resets;
+            } else {
+                // Within one source regime, preserve the same original
+                // Lagrangian BFGS update. During infeasible restoration
+                // retain the original objective curvature with lambda=0.
+                lagrangian_memory->anchor_valid=true;
+                const bool use_constraint_curvature=
+                    current->valid && qp->original_duals_trustworthy;
+                lagrangian_memory->frozen_curvature_multipliers=
+                    use_constraint_curvature?
+                    qp->curvature_multipliers:
+                    std::vector<double>(program->rows.size(),0.);
+                lagrangian_memory->frozen_slip_multipliers=
+                    use_constraint_curvature?
+                    qp->slip_curvature_multipliers:
+                    std::vector<SourceSlipCurvatureMultiplier>();
+                for(int j=0;j<2*kStages;++j) {
+                    const auto &u=current->decision->controls[j/2];
+                    lagrangian_memory->anchor_controls[j]=(j%2?
+                        double(u.throttle_command):
+                        double(u.steering_target_rad))/(j%2?.25:.15);
+                    lagrangian_memory->anchor_gradient[j]=
+                        use_constraint_curvature?
+                        qp->lagrangian_gradient_at_qp_duals[j]:
+                        derivative->original_source_cost_control[j/2][j%2]*
+                            (j%2?.25:.15);
+                }
+            }
+            rejected_iterations=0;
+            if(metrics.safeguarded_step_length>=.5)
+                qp_regularization=std::max(.001,.3*qp_regularization);
+            if(discontinuous_source_mode_switch) {
+                // Keep the valid previous Hessian/regularization, but never
+                // form y = grad L(new branch)-grad L(old branch) as if it
+                // measured smooth curvature. Re-anchor only after the next
+                // accepted step that stays in a compatible physical mode.
+                lagrangian_memory->anchor_valid=false;
+                metrics.accepted_source_discontinuous_secant_skipped=true;
+                ++result->accepted_source_discontinuous_secant_skips;
+            }
             // Standard SQP dual update: only hard original constraints have
-            // carried multipliers. Preferred clearance is a finite elastic
-            // objective term and must not accumulate an AL multiplier that
-            // eventually turns its reserve into an unintended hard wall.
-            inequality_multipliers=std::move(qp->inequality_multipliers);
+            // carried multipliers. Preferred extra clearance is diagnostic
+            // and has no original-source multiplier or curvature term.
+            if(qp->original_duals_trustworthy &&
+               same_source_curvature_regime)
+                inequality_multipliers=std::move(qp->inequality_multipliers);
+            else {
+                // An infeasible/nonconverged QP may still give an improving
+                // exact nonlinear primal, but its multipliers cannot be
+                // treated as source KKT estimates or BFGS curvature memory.
+                inequality_multipliers.clear();
+                metrics.invalid_qp_duals_discarded=true;
+            }
+            // The QP duals were computed at the PRE-step source primal.
+            // Once a different command sequence is accepted, they cannot
+            // certify KKT stationarity of the new terminal iterate. A future
+            // SQP linearization must produce fresh multipliers there.
+            result->final_physical_multipliers.clear();
             std::swap(current,proposed);
-            source_secants.clear();
             have_current_exact_source_linearization=false;
-            have_current_fd_hessian=false;
+            have_current_reference_hessian=false;
+            current_reference_hessian_evaluated=false;
             result->full_step_sqp_stalled=false;
             ++result->accepted_iterations;
+            if(source_precision_stagnation_iterations>=8) {
+                result->numerical_failure=true;
+                result->full_step_sqp_stalled=true;
+                result->termination_reason="source_precision_stagnation_without_nlp_kkt";
+            }
         } else {
             metrics.full_step_rejected=true;
             result->full_step_sqp_stalled=true;
-            if(evaluated && source_secants.size()<4) {
-                // Curvature calibration uses the ACTUAL nonlinear source
-                // evaluation already performed in this SQP iteration.
-                // It is a positive-semidefinite secant correction along
-                // the rejected direction of the SAME nonlinear problem.
-                constexpr double kScale[2]={.15,.25};
-                std::array<double,2*kStages> unit{};
-                double magnitude_squared=0.;
-                for(int k=0;k<kStages;++k)
-                    for(int axis=0;axis<2;++axis) {
-                        const double component=
-                            qp->direction[k][axis]/kScale[axis];
-                        unit[2*k+axis]=component;
-                        magnitude_squared+=component*component;
-                    }
-                if(magnitude_squared>1.e-12) {
-                    const double predicted_merit_delta=
-                        qp->predicted_original_objective_change+
-                        options.source_qp_soft_physical_weight*
-                        (qp->predicted_linearized_violation_after-
-                         qp->predicted_linearized_violation_before)+
-                        options.terminal_speed_viability_weight*
-                        (qp->predicted_terminal_speed_violation_after-
-                         qp->predicted_terminal_speed_violation_before);
-                    const double actual_merit_delta=
-                        (metrics.cost_trial-current->cost)+
-                        options.source_qp_soft_physical_weight*
-                        (metrics.violation_trial-
-                         current->total_violation)+
-                        options.terminal_speed_viability_weight*
-                        (primary_terminal_violation-
-                         current->terminal_speed_violation);
-                    const double missing_curvature=
-                        std::max(0.,2.*(actual_merit_delta-
-                              predicted_merit_delta)/
-                              magnitude_squared);
-                    if(std::isfinite(missing_curvature) &&
-                       missing_curvature>1.e-6) {
-                        const double norm=std::sqrt(magnitude_squared);
-                        for(double &value:unit)value/=norm;
-                        const double curvature=std::min(
-                            1.e9,missing_curvature);
-                        source_secants.push_back({unit,curvature});
-                        metrics.secant_curvature_added=curvature;
-                    }
-                }
+            // No multiplier from a rejected or relaxed QP enters source
+            // curvature memory. A finite rejection budget bounds stagnation.
+            ++rejected_iterations;
+            if(qp_regularization>=kMaxRegularization || rejected_iterations>=12) {
+                result->numerical_failure=true;
+                result->termination_reason=qp_regularization>=kMaxRegularization?
+                    "regularization_saturated_without_progress":"filter_rejected_without_progress";
             }
-            // This is Hessian stabilization of ONE nonlinear SQP,
-            // NOT a previous-iterate command trust region, alternate
-            // optimizer, alpha grid or permission to publish infeasibility.
-            // Every attempted full step uses the original source plant.
-            qp_regularization=std::min(kMaxRegularization,
-                qp_regularization*kRejectedFullStepDampingGrowth);
+            qp_regularization=std::min(kMaxRegularization,10.*qp_regularization);
         }
-        metrics.iteration_wall_ms=wall_ms(iter_begin);
-        result->history.push_back(metrics);
-        if(trace) {
-            trace->accepted=metrics.accepted;
-            result->primal_trace.push_back(std::move(*trace));
-        }
-        if(!metrics.accepted &&
-           (qp_regularization<=metrics.qp_regularization_used ||
-            iteration+1>=options.maximum_iterations))
-            break;
+        record_iteration();
+        if(result->numerical_failure)break;
     }
+    if(result->deadline_exhausted)result->termination_reason="deadline_exhausted";
+    else if(result->linearization_failed)result->termination_reason="source_linearization_failed";
     result->solver_status=overdue()?MPC_SOURCE_DEADLINE_EXCEEDED:
-        result->linearization_failed || result->qp_failed?MPC_SOURCE_KKT_NOT_CONVERGED:
+        result->linearization_failed || result->qp_failed || result->numerical_failure?MPC_SOURCE_KKT_NOT_CONVERGED:
         result->full_step_sqp_stalled?MPC_SOURCE_NONLINEAR_STEP_REJECTED:
         result->source_nlp_kkt_converged?MPC_SOURCE_FEASIBLE_SOLUTION_AVAILABLE:
         current->valid?MPC_SOURCE_KKT_NOT_CONVERGED:MPC_SOURCE_PRIMAL_INFEASIBLE;

@@ -25,31 +25,36 @@ class SourceSQPRegression(unittest.TestCase):
         env=os.environ.copy()
         env.update(MPC_SOURCE_NLP_MIN_CLEARANCE_M="0.03",
                    MPC_SOURCE_NLP_QP_REGULARIZATION="10000",
-                   MPC_SOURCE_NLP_QP_SOFT_WEIGHT="1000000")
+                   MPC_SOURCE_NLP_QP_SOFT_WEIGHT="1000000",
+                   MPC_SOURCE_NLP_RECORD_PRIMAL_TRACE="1")
         run=subprocess.run([str(EXE),str(path),str(controls),str(steps)],
                            cwd=ROOT,env=env,capture_output=True,text=True,timeout=30)
         self.assertEqual(run.returncode,0,run.stderr[-3000:])
         data=json.loads(run.stdout)
         self.assertEqual(data["schema"],"source-exact-single-nlp-sqp/v1")
-        self.assertTrue(data["single_full_step_per_sqp"])
-        self.assertFalse(data["alpha_search"])
+        self.assertFalse(data["single_full_step_per_sqp"])
+        self.assertTrue(data["alpha_search"])
         self.assertFalse(data["fallback_controller"])
         self.assertFalse(data["multiple_shooting"])
         self.assertTrue(data["source_feasible_final"],name)
         self.assertGreaterEqual(data["final_corridor_margin_m"],0.)
-        # The original finite preferred-clearance penalty may trade racing
-        # cost for reserve. Only physical penetration is inadmissible.
-        self.assertLess(data["final_cost"]+1e6*data["final_constraint_violation"],
-                        data["initial_cost"]+1e6*data["initial_constraint_violation"])
+        self.assertLess(data["final_cost"],data["initial_cost"])
+        for row in data["history"]:
+            self.assertLessEqual(row["cost_after"],row["cost_before"])
         self.assertGreater(data["accepted_sqp_iterations"],0)
         self.assertLessEqual(data["accepted_sqp_iterations"],len(data["history"]))
         soc=sum(i["second_order_correction_attempted"] for i in data["history"])
-        self.assertLessEqual(data["exact_source_full_step_evaluations"],len(data["history"])+soc)
+        self.assertLessEqual(data["exact_source_full_step_evaluations"],len(data["history"])+soc+sum(i["safeguarded_evaluations"] for i in data["history"]))
         for iteration in data["history"]:
             self.assertGreaterEqual(iteration["qp_iterations"],1)
             self.assertGreaterEqual(iteration["original_nlp_stationarity_inf"],0)
             self.assertGreaterEqual(iteration["original_nlp_complementarity_inf"],0)
             self.assertGreaterEqual(iteration["original_nlp_inequality_residual_inf"],0)
+        # A QP multiplier calculated at U_old cannot certify the final
+        # accepted U_new. The solver must clear stale terminal duals
+        # until a fresh original-source linearization is available.
+        if data["history"] and data["history"][-1]["accepted"]:
+            self.assertEqual(data["final_physical_multipliers"], [])
         if data["original_nlp_kkt_converged"]:
             last=data["history"][-1]
             self.assertLessEqual(last["original_nlp_stationarity_inf"],1e-2)

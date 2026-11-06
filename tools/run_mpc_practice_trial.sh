@@ -53,7 +53,7 @@ python3 tools/seal_mpc_run_manifest.py --run-id "$run_id" \
   --output "$run_dir/run_manifest.json" --acknowledge-not-started \
   --track practice --unity-mode batchmode \
   --simulator-image autodriveecosystem/autodrive_roboracer_sim@sha256:b4bbda41fdb1da7a2eadba4350ed3a0cb5020e7eb783454e78399ef5852dbd76 \
-  --controller-image sdu-apex-autodrive:dev \
+  --controller-image "${SDU_APEX_IMAGE:-sdu-apex-autodrive:dev}" \
   --simulator-container "$simulator" --controller-container "$controller" \
   --map "$map" --trajectory "$trajectory" "$@" \
   --initial-pose '{"x":0.8,"y":3.1592,"yaw":-1.5708251687330668}' \

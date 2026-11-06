@@ -179,15 +179,15 @@ The 16/22-feasible report in `artifacts/phase2_current_20/report.json` predates
 later BFGS changes; it is not the current solver's result. These experiments
 show useful curvature effects but no complete phase-2 exit.
 
-Independent tools retained:
+Independent tools (historical experiments were superseded November 6):
 
-- `tools/compare_source_nlp_methods.py`: native SQP versus SciPy SLSQP, using
-  the same exact source oracle and physical bounds. This found the 775 witness.
-- `tools/compare_source_ipopt.py`: CasADi/IPOPT interface to the native oracle,
-  not a symbolic surrogate plant. `--oracle` selects a research build. IPOPT
-  also failed late cold seeds. A solver's infeasibility status is not a physical
-  infeasibility proof; independent scoring even found a feasible final primal
-  in one run that reported infeasibility.
+- `tools/reference_mpc_source_ipopt.py` now owns the mature NLP comparison.
+  The older `compare_source_nlp_methods.py` and `compare_source_ipopt.py`
+  experiments were removed: their oracle calls retained an unintended extra
+  reserve penalty. Their historical results cannot qualify the original-cost
+  problem. Previously captured feasible witnesses remain physical evidence,
+  with optimality checked separately. IPOPT's infeasibility status is not a
+  proof of physical unrecoverability.
 - `tools/mpc_source_curvature_audit.cpp`: frozen-multiplier source Lagrangian
   secants in steering/throttle/coupled/SQP directions. Crossing source branches
   is not a smooth-Hessian certificate.

@@ -31,10 +31,16 @@ ARG AUTODRIVE_TRAJECTORY_REL
 ENV SDU_APEX_MAP_REL=${AUTODRIVE_MAP_REL}
 ENV SDU_APEX_TRAJECTORY_REL=${AUTODRIVE_TRAJECTORY_REL}
 
+# Native + LTO is explicitly opt-in, as the resulting binary targets the
+# CPU used by the Docker builder. Keep generic published images portable.
+ARG SDU_APEX_MPC_NATIVE_TUNING=OFF
+ARG SDU_APEX_MPC_LTO=OFF
 RUN source /opt/ros/humble/setup.bash \
     && source /home/autodrive_devkit/install/setup.bash \
     && CMAKE_BUILD_PARALLEL_LEVEL=8 colcon build --parallel-workers 8 --merge-install --symlink-install \
       --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+      -DSDU_APEX_MPC_NATIVE_TUNING=${SDU_APEX_MPC_NATIVE_TUNING} \
+      -DSDU_APEX_MPC_LTO=${SDU_APEX_MPC_LTO} \
       -DCMAKE_CUDA_ARCHITECTURES="61;86;89"
 
 # The competition image has one fixed, self-contained startup path.

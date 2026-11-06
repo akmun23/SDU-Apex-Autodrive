@@ -167,6 +167,18 @@ bool unity_source_plant_step_with_directional_curvature(
     const std::array<double,2> &direction_control,
     UnitySourcePlantDirectionalCurvature *output);
 
+// Chain a curved incoming state path through the same source equations.
+// Controls follow u(t)=u+t*du. A report selects the existing one-sided
+// branch semantics; nullptr retains the nominal selected branch.
+bool unity_source_plant_step_path_curvature(
+    const UnitySourcePlantState &state, const UnitySourcePlantInput &input,
+    double duration_s,
+    const std::array<double,kUnityPlantSensitivityStateSize> &first_state,
+    const std::array<double,kUnityPlantSensitivityStateSize> &second_state,
+    const std::array<double,2> &first_control,
+    UnitySourcePlantDirectionalCurvature *output,
+    UnitySourceDirectionalBranchReport *branch_report = nullptr);
+
 // VehicleController stores AutonomousSteering with the opposite sign in its
 // internal wheel angle, then publishes CurrentSteeringAngle as the negated
 // internal angle. The externally normalized command therefore maps to the

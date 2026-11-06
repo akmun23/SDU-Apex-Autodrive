@@ -2,6 +2,8 @@
 #include "mpc_rti.h"
 
 #include <Eigen/Cholesky>
+#include <Eigen/SVD>
+#include <vector>
 #include <algorithm>
 #include <cmath>
 
@@ -26,6 +28,8 @@ bool solve_source_convex_qp(const SourceConvexQp &p,int maximum_iterations,
     const int groups=p.elastic_weight.size();
     if(!out || n<1 || maximum_iterations<1 || !(tolerance>0.) || !std::isfinite(tolerance) ||
        !std::isfinite(absolute_deadline_monotonic_us) || absolute_deadline_monotonic_us<0. ||
+       (p.equality_rhs.size() && (p.equality_jacobian.rows()!=p.equality_rhs.size() || p.equality_jacobian.cols()!=n)) ||
+       !p.equality_jacobian.allFinite() || !p.equality_rhs.allFinite() ||
        p.hessian.rows()!=n || p.hessian.cols()!=n ||
        p.hard_jacobian.rows()!=mh || p.hard_jacobian.cols()!=n ||
        p.elastic_jacobian.rows()!=me || p.elastic_jacobian.cols()!=n ||
@@ -41,6 +45,80 @@ bool solve_source_convex_qp(const SourceConvexQp &p,int maximum_iterations,
        !p.elastic_weight.allFinite() || (me && p.elastic_weight.minCoeff()<0.) ||
        (p.elastic_linear_cost.size() && p.elastic_linear_cost.minCoeff()<0.))return false;
     *out={};
+    if(p.equality_rhs.size()) {
+        M equations=p.equality_jacobian;
+        V rhs=p.equality_rhs,equation_scale=V::Ones(rhs.size());
+        for(int i=0;i<rhs.size();++i) {
+            equation_scale(i)=1./std::max({1.e-12,equations.row(i).norm(),std::abs(rhs(i))});
+            equations.row(i)*=equation_scale(i);rhs(i)*=equation_scale(i);
+        }
+        Eigen::JacobiSVD<M> decomposition(equations,Eigen::ComputeFullU|Eigen::ComputeFullV);
+        decomposition.setThreshold(1.e-12);
+        const int rank=decomposition.rank();
+        const V anchor=decomposition.solve(rhs);
+        if(!anchor.allFinite() || inf(p.equality_jacobian*anchor-p.equality_rhs)>1.e-8)return false;
+        const M nullspace=decomposition.matrixV().rightCols(n-rank);
+        SourceConvexQp reduced=p;
+        reduced.equality_jacobian.resize(0,0);reduced.equality_rhs.resize(0);
+        reduced.hessian=nullspace.transpose()*p.hessian*nullspace;
+        reduced.gradient=nullspace.transpose()*(p.hessian*anchor+p.gradient);
+        std::vector<int> active_hard;
+        const M projected=p.hard_jacobian*nullspace;
+        const V shifted=p.hard_margin+p.hard_jacobian*anchor;
+        for(int i=0;i<mh;++i) {
+            if(projected.row(i).norm()>1.e-12*std::max(1.,p.hard_jacobian.row(i).norm()))active_hard.push_back(i);
+            else if(shifted(i)<-1.e-8)return false;
+        }
+        reduced.hard_jacobian.resize(active_hard.size(),n-rank);
+        reduced.hard_margin.resize(active_hard.size());
+        reduced.initial_hard_multipliers.resize(p.initial_hard_multipliers.size()?active_hard.size():0);
+        for(size_t i=0;i<active_hard.size();++i) {
+            reduced.hard_jacobian.row(i)=projected.row(active_hard[i]);
+            reduced.hard_margin(i)=shifted(active_hard[i]);
+            if(p.initial_hard_multipliers.size())reduced.initial_hard_multipliers(i)=p.initial_hard_multipliers(active_hard[i]);
+        }
+        reduced.elastic_jacobian=p.elastic_jacobian*nullspace;
+        reduced.elastic_margin=p.elastic_margin+p.elastic_jacobian*anchor;
+        SourceConvexQpResult solved;
+        if(n>rank) {
+            if(!solve_source_convex_qp(reduced,maximum_iterations,tolerance,&solved,absolute_deadline_monotonic_us))return false;
+            *out=solved;out->step=anchor+nullspace*solved.step;
+        } else {
+            out->step=anchor;out->iterations=1;out->converged=true;
+            out->elastic_values=V::Zero(groups);out->elastic_multipliers=V::Zero(me);
+            for(int i=0;i<me;++i) {
+                const int group=p.elastic_groups.size()?p.elastic_groups(i):i;
+                out->elastic_values(group)=std::max(out->elastic_values(group),-reduced.elastic_margin(i));
+            }
+            for(int group=0;group<groups;++group)if(out->elastic_values(group)>0.)
+                for(int i=0;i<me;++i)
+                    if((p.elastic_groups.size()?p.elastic_groups(i):i)==group &&
+                       std::abs(out->elastic_values(group)+reduced.elastic_margin(i))<1.e-10) {
+                        out->elastic_multipliers(i)=p.elastic_weight(group)*out->elastic_values(group)+
+                            (p.elastic_linear_cost.size()?p.elastic_linear_cost(group):0.);
+                        break;
+                    }
+        }
+        out->hard_multipliers=V::Zero(mh);
+        for(size_t i=0;i<active_hard.size();++i)out->hard_multipliers(active_hard[i])=solved.hard_multipliers(i);
+        const V gradient=p.hessian*out->step+p.gradient-p.hard_jacobian.transpose()*out->hard_multipliers-
+            p.elastic_jacobian.transpose()*out->elastic_multipliers;
+        out->equality_multipliers=decomposition.matrixU().leftCols(rank)*
+            decomposition.singularValues().head(rank).cwiseInverse().asDiagonal()*
+            decomposition.matrixV().leftCols(rank).transpose()*gradient;
+        out->equality_multipliers.array()*=equation_scale.array();
+        out->equality_dual_reconstruction_inf=inf(gradient-p.equality_jacobian.transpose()*out->equality_multipliers);
+        out->equality_basis_multipliers=decomposition.matrixV().leftCols(rank).transpose()*gradient;
+        // Certify stationarity using the equivalent orthonormal equations;
+        // do not subtract enormous cancelling original equality multipliers.
+        out->dual_inf=std::max(out->dual_inf,inf(gradient-
+            decomposition.matrixV().leftCols(rank)*out->equality_basis_multipliers));
+        const V margins=p.hard_margin+p.hard_jacobian*out->step;
+        out->primal_inf=std::max({out->primal_inf,mh?std::max(0.,-margins.minCoeff()):0.,
+            inf(p.equality_jacobian*out->step-p.equality_rhs)});
+        out->converged&=out->primal_inf<=1.e-8 && out->dual_inf<=tolerance && out->complementarity_inf<=tolerance;
+        return out->step.allFinite() && out->equality_multipliers.allFinite();
+    }
     // Scaling changes neither the primal problem nor physical multipliers.
     const double objective_scale=std::max({1.,inf(p.gradient),
         p.hessian.diagonal().cwiseAbs().maxCoeff(),me?inf(p.elastic_weight):0.,
@@ -112,29 +190,57 @@ bool solve_source_convex_qp(const SourceConvexQp &p,int maximum_iterations,
         }
         const V Dh=lh.array()/sh.array(),Dr=lr.array()/sr.array(),Dt=lt.array()/st.array();
         const V diagonal=w+sum_groups(Dr)+Dt;
-        M coupling=M::Zero(n,groups);
-        for(int i=0;i<me;++i)coupling.col(group(i)).noalias()+=C.row(i).transpose()*Dr(i);
+        // Form each elastic Schur contribution as a weighted covariance.
+        // C' Dr C - v v'/diagonal loses all significant digits when an
+        // active elastic row has Dr >> w+Dt. The equivalent positive sum
+        // preserves curvature for both independent and shared epigraphs.
+        const V group_dr=sum_groups(Dr);
+        const V remaining=w+Dt;
+        M mean=M::Zero(n,groups);
+        for(int i=0;i<me;++i)
+            mean.col(group(i)).noalias()+=C.row(i).transpose()*(Dr(i)/group_dr(group(i)));
         M weighted=A;
         for(int i=0;i<mh;++i)weighted.row(i)*=std::sqrt(Dh(i));
         M normal=H+weighted.transpose()*weighted;
-        weighted=C;
-        for(int i=0;i<me;++i)weighted.row(i)*=std::sqrt(Dr(i));
-        normal.noalias()+=weighted.transpose()*weighted;
-        M scaled_coupling=coupling;
-        for(int i=0;i<groups;++i)scaled_coupling.col(i)/=std::sqrt(diagonal(i));
-        normal.noalias()-=scaled_coupling*scaled_coupling.transpose();
-        Eigen::LLT<M> factor(normal);
+        for(int i=0;i<me;++i) {
+            const V centered=C.row(i).transpose()-mean.col(group(i));
+            normal.noalias()+=Dr(i)*centered*centered.transpose();
+        }
+        for(int i=0;i<groups;++i)
+            normal.noalias()+=(group_dr(i)/diagonal(i))*remaining(i)*
+                mean.col(i)*mean.col(i).transpose();
+        // Symmetric diagonal equilibration also protects nearly parallel
+        // active hard rows without deleting any physical restriction.
+        const V equilibration=normal.diagonal().cwiseMax(1.e-300).cwiseSqrt().cwiseInverse();
+        const M equilibrated=equilibration.asDiagonal()*normal*equilibration.asDiagonal();
+        Eigen::LLT<M> factor(equilibrated);
         if(factor.info()!=Eigen::Success)break;
+        const auto solve=[&](const V &rhs)->V {
+            V value=equilibration.asDiagonal()*factor.solve(equilibration.asDiagonal()*rhs);
+            for(int refinement=0;refinement<2;++refinement) {
+                const V residual=rhs-normal*value;
+                if(inf(residual)<=1.e-12*std::max(1.,inf(rhs)))break;
+                value+=equilibration.asDiagonal()*factor.solve(equilibration.asDiagonal()*residual);
+            }
+            return value;
+        };
         const auto newton=[&](double target,const V &cross_h,const V &cross_r,const V &cross_t,
                              V &dx,V &dt,V &dsh,V &dsr,V &dst,V &dlh,V &dlr,V &dlt) {
             const V qh=(-sh.array()*lh.array()+target-lh.array()*ph.array()-cross_h.array()).matrix();
             const V qr=(-sr.array()*lr.array()+target-lr.array()*pr.array()-cross_r.array()).matrix();
             const V qt=(-st.array()*lt.array()+target-lt.array()*pt.array()-cross_t.array()).matrix();
             const V rhs_t=-dt_residual+sum_groups((qr.array()/sr.array()).matrix())+(qt.array()/st.array()).matrix();
-            const V rhs=-dx_residual+A.transpose()*(qh.array()/sh.array()).matrix()+
-                C.transpose()*(qr.array()/sr.array()).matrix()-coupling*(rhs_t.array()/diagonal.array()).matrix();
-            dx=factor.solve(rhs);
-            dt=(rhs_t-coupling.transpose()*dx).array()/diagonal.array();
+            const V reduced_r=(qr.array()/sr.array()).matrix();
+            const V group_r=sum_groups(reduced_r);
+            V rhs=-dx_residual+A.transpose()*(qh.array()/sh.array()).matrix();
+            for(int i=0;i<me;++i)
+                rhs.noalias()+=(C.row(i).transpose()-mean.col(group(i)))*reduced_r(i);
+            const V mean_rhs=(remaining.array()/diagonal.array()*group_r.array()+
+                group_dr.array()/diagonal.array()*(dt_residual.array()-qt.array()/st.array())).matrix();
+            rhs.noalias()+=mean*mean_rhs;
+            dx=solve(rhs);
+            dt=rhs_t.array()/diagonal.array()-
+                group_dr.array()/diagonal.array()*(mean.transpose()*dx).array();
             dsh=A*dx+ph;dsr=C*dx+expand(dt)+pr;dst=dt+pt;
             dlh=qh.array()/sh.array()-Dh.array()*(A*dx).array();
             dlr=qr.array()/sr.array()-Dr.array()*(C*dx+expand(dt)).array();

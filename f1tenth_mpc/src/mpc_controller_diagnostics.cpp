@@ -60,6 +60,40 @@ void MpcControllerNode::publish_cycle_diagnostics(
     finite_json(json,result.source_exact_nlp_final_original_margin_m);
     json<<",\"source_exact_nlp_original_constraint_violation\":";
     finite_json(json,result.source_exact_nlp_final_original_violation);
+    json<<",\"source_iterations\":[";
+    for(int i=0;i<result.source_iteration_metrics_count;++i) {
+        if(i)json<<',';
+        const auto &in=result.source_iteration_metrics[i];
+        json<<"{\"iteration\":"<<i
+            <<",\"accepted\":"<<(in.accepted?"true":"false")
+            <<",\"full_step_evaluated\":"<<(in.full_step_evaluated?"true":"false")
+            <<",\"full_step_accepted\":"<<(in.full_step_accepted?"true":"false")
+            <<",\"qp_converged\":"<<(in.qp_converged?"true":"false")
+            <<",\"original_duals_trustworthy\":"<<(in.original_duals_trustworthy?"true":"false")
+            <<",\"qp_iterations\":"<<in.qp_iterations;
+        const auto field=[&](const char *name,double value) {
+            json<<",\""<<name<<"\":";finite_json(json,value);
+        };
+        field("linearization_ms",in.linearization_ms);
+        field("qp_ms",in.qp_ms);
+        field("source_rollout_ms",in.source_rollout_ms);
+        field("total_ms",in.total_ms);
+        field("original_cost_before",in.cost_before);
+        field("original_cost_after",in.cost_after);
+        field("line_search_alpha",in.accepted?in.accepted_step_length:NAN);
+        field("qp_primal_residual",in.qp_converged?in.qp_primal_residual:NAN);
+        field("qp_dual_residual",in.qp_converged?in.qp_dual_residual:NAN);
+        field("initial_nlp_stationarity_inf",in.original_duals_trustworthy?in.stationarity_inf:NAN);
+        field("initial_nlp_complementarity_inf",in.original_duals_trustworthy?in.complementarity_inf:NAN);
+        field("qp_predicted_cost_change",in.full_step_evaluated?in.predicted_cost_change:NAN);
+        field("full_step_original_cost",in.full_step_evaluated?in.full_step_cost:NAN);
+        field("full_step_cost_prediction_error",in.full_step_evaluated?
+            in.full_step_cost-in.cost_before-in.predicted_cost_change:NAN);
+        field("maximum_footprint_prediction_error_m",in.full_step_evaluated?
+            in.maximum_footprint_prediction_error_m:NAN);
+        json<<'}';
+    }
+    json<<']';
     json<<"},\"source_stamp_ns\":"<<synchronized.source_stamp_ns
         <<",\"odom_source_stamp_ns\":"<<synchronized.odom_source_stamp_ns
         <<",\"map_pose_source_stamp_ns\":"
@@ -158,6 +192,9 @@ void MpcControllerNode::publish_cycle_diagnostics(
         json<<",\"correction_evaluated\":"<<(trace.correction_evaluated?"true":"false")
             <<",\"correction_accepted\":"<<(trace.correction_accepted?"true":"false");
         if(trace.correction_evaluated)commands("correction_controls",trace.correction);
+        json<<",\"normal_accepted\":"<<(trace.normal_accepted?"true":"false")
+            <<",\"filter_accepted\":"<<(trace.filter_accepted?"true":"false");
+        if(trace.accepted)commands("accepted_controls",trace.accepted_controls);
         json<<'}';
     }
     json<<']';

@@ -158,6 +158,15 @@ int unity_source_plant_step_one_sided_directional_c(
     UnitySourcePlantDirectionalCurvatureC *out,
     UnitySourceDirectionalBranchReportC *report);
 
+/* Includes A*x'' in the same branch-selected Jet2 pass. A null report
+ * retains nominal branch selection; otherwise uses one-sided semantics. */
+int unity_source_plant_step_path_curvature_c(
+    const UnitySourcePlantInputC *input,double duration_s,
+    const double first_state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double second_state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double first_control[2],UnitySourcePlantDirectionalCurvatureC *out,
+    UnitySourceDirectionalBranchReportC *report);
+
 /* Exact original 1ms/0.2ms physical source branch comparison.
  * Both sides are independently evaluated through the ORIGINAL plant,
  * not through finite-difference forces or surrogate tire curves.

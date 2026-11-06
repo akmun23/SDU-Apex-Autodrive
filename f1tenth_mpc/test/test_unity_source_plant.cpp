@@ -79,6 +79,128 @@ TEST(UnitySourcePlant, UsesExactPracticePlayerWheelSubstepSchedule)
   EXPECT_EQ(f1tenth_mpc::unity_source_wheel_substep_count(-128.0), 1U);
 }
 
+TEST(UnitySourcePlant, OriginalFiveMeterSubstepBoundaryHasMeasuredFiniteJump)
+{
+  // A literal source hybrid switch, unlike the C1 tire-curve interpolation
+  // knots. Retain all other physical initial states identical, including
+  // wheel angular speeds, and approach 5 m/s from both sides.
+  auto s=state_at_speed(5.);
+  s.v_mps=.37;
+  s.yaw_rate_radps=.8;
+  s.physical_steering_rad=.12;
+  const f1tenth_mpc::UnitySourcePlantInput command{.2,.3};
+  double differences[3]{};
+  int index=0;
+  for(double eps:{1.e-3,1.e-4,1.e-5}) {
+    auto below=s,above=s;
+    below.u_mps=5.-eps;above.u_mps=5.+eps;
+    f1tenth_mpc::UnitySourcePlantOutput a{},b{};
+    ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+        below,command,&a));
+    ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+        above,command,&b));
+    const double difference=
+        std::abs(a.state.yaw_rate_radps-b.state.yaw_rate_radps)+
+        std::abs(a.state.v_mps-b.state.v_mps)+
+        std::abs(a.state.wheel_omega_radps[0]-b.state.wheel_omega_radps[0]);
+    differences[index++]=difference;
+  }
+  // Exact source-mode discontinuity must not be disguised with a smooth
+  // Hessian. If the source build changes, this assertion forces a review
+  // of the branch assumptions rather than silently applying old curvature.
+  EXPECT_GT(differences[2],1.e-8);
+  EXPECT_LT(differences[2],differences[0]*10.);
+}
+
+TEST(UnitySourcePlant, PathCurvaturePropagatesIncomingSecondStateDerivative)
+{
+  const auto state=state_at_speed(8.);
+  const f1tenth_mpc::UnitySourcePlantInput input{.13,.25};
+  std::array<double,26> first{},second{};
+  second[UNITY_SOURCE_U]=.2;
+  second[UNITY_SOURCE_V]=-.03;
+  second[UNITY_SOURCE_PHYSICAL_STEERING]=.01;
+  std::array<double,2> control{};
+  f1tenth_mpc::UnitySourcePlantDirectionalCurvature path{},linear{};
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_path_curvature(
+      state,input,.025,first,second,control,&path));
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_with_directional_curvature(
+      state,input,.025,second,control,&linear));
+  for(int i=0;i<26;++i) {
+    EXPECT_DOUBLE_EQ(path.first_state[i],0.);
+    EXPECT_NEAR(path.second_state[i],linear.first_state[i],1.e-10);
+  }
+  for(int i=0;i<3;++i)EXPECT_NEAR(path.second_body[i],linear.first_body[i],1.e-10);
+}
+
+TEST(UnitySourcePlant, InwardSteeringAtLegalBoundHasSourcePathDerivative)
+{
+  auto state=state_at_speed(8.);
+  state.physical_steering_rad=UNITY_SOURCE_MAX_STEERING_RAD;
+  const f1tenth_mpc::UnitySourcePlantInput input{
+      UNITY_SOURCE_MAX_STEERING_RAD,.25};
+  std::array<double,26> zero{};
+  const std::array<double,2> inward{-0.01,0.};
+  f1tenth_mpc::UnitySourcePlantDirectionalCurvature path{},ordinary{};
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_path_curvature(
+      state,input,.025,zero,zero,inward,&path));
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_with_directional_curvature(
+      state,input,.025,zero,inward,&ordinary));
+  EXPECT_NE(path.first_state[UNITY_SOURCE_PHYSICAL_STEERING],0.);
+  for(size_t j=0;j<path.first_state.size();++j)
+    EXPECT_NEAR(path.first_state[j],ordinary.first_state[j],1.e-10);
+}
+
+TEST(UnitySourcePlant, SecondOrderPathAtDiscreteSubstepSwitchIsNotSmooth)
+{
+  const auto state=state_at_speed(5.);
+  std::array<double,26> first{},second{};
+  second[UNITY_SOURCE_U]=-.2;
+  f1tenth_mpc::UnitySourcePlantDirectionalCurvature path{};
+  f1tenth_mpc::UnitySourceDirectionalBranchReport report{};
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_path_curvature(
+      state,{.1,.25},.001,first,second,{},&path,&report));
+  EXPECT_GT(report.discrete_substep_schedule_switches,0);
+  EXPECT_FALSE(report.valid_one_sided_directional);
+}
+
+TEST(UnitySourcePlant, SteeringThrottleCrossCurvatureMatchesSourceDifferences)
+{
+  auto state=state_at_speed(7.);
+  state.physical_steering_rad=.1;
+  state.v_mps=.06;
+  state.yaw_rate_radps=.2;
+  const f1tenth_mpc::UnitySourcePlantInput input{.101,.4};
+  constexpr double dt=.01;
+  f1tenth_mpc::UnitySourcePlantDirectionalCurvature steer{},throttle{},coupled{};
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_with_directional_curvature(
+      state,input,dt,{},{{1.,0.}},&steer));
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_with_directional_curvature(
+      state,input,dt,{},{{0.,1.}},&throttle));
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_with_directional_curvature(
+      state,input,dt,{},{{1.,1.}},&coupled));
+  constexpr double h_steer=1.e-5,h_throttle=1.e-4;
+  double cross[3]{};
+  for(int a : {-1,1})for(int b : {-1,1}) {
+    auto candidate=input;
+    candidate.steering_target_rad+=a*h_steer;
+    candidate.throttle_normalized+=b*h_throttle;
+    f1tenth_mpc::UnitySourcePlantOutput output{};
+    ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step(state,candidate,dt,&output));
+    const double values[3]={output.state.u_mps,output.state.v_mps,output.state.yaw_rate_radps};
+    for(int j=0;j<3;++j)cross[j]+=a*b*values[j]/(4.*h_steer*h_throttle);
+  }
+  double maximum=0.;
+  const int indices[3]={UNITY_SOURCE_U,UNITY_SOURCE_V,UNITY_SOURCE_YAW_RATE};
+  for(int j=0;j<3;++j) {
+    const int index=indices[j];
+    const double analytic=.5*(coupled.second_state[index]-steer.second_state[index]-throttle.second_state[index]);
+    EXPECT_NEAR(analytic,cross[j],5.e-5+3.e-4*std::abs(cross[j]));
+    maximum=std::max(maximum,std::abs(analytic));
+  }
+  EXPECT_GT(maximum,1.e-4); // This fixture must exercise actual cross coupling.
+}
+
 TEST(UnitySourcePlant, ReconcilesJounceAfterBodyStateCorrection)
 {
   auto state = state_at_speed(3.2);
@@ -1003,6 +1125,27 @@ TEST(UnitySourcePlant, SteeringPreservesVehicleControllerTargetCrossingClamp)
   // equivalent.
   EXPECT_NEAR(output.state.physical_steering_rad,
               0.1 * max_steering_rad, 1.0e-6);
+}
+
+TEST(UnitySourcePlant, OppositeSteeringTargetHasFiniteSourceBranchJump)
+{
+  // Isolated from the stalled recorded epoch-775 trajectory. Unity Steer()
+  // compares command_norm to the opposite-sign internal angle, then clamps
+  // against -command_norm*30. These two nearby legal commands therefore
+  // select different actuator modes. This is not smooth servo curvature.
+  auto state = state_at_speed(2.4122047424316406);
+  state.physical_steering_rad = 0.39126089215278625;
+  constexpr double lower = -0.39126095175743103;
+  constexpr double upper = -0.39126086235046387;
+  f1tenth_mpc::UnitySourcePlantOutput a, b;
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+      state, {lower, 0.1}, &a));
+  ASSERT_TRUE(f1tenth_mpc::unity_source_plant_step_1ms(
+      state, {upper, 0.1}, &b));
+  EXPECT_LT(upper - lower, 1.e-7);
+  EXPECT_GT(a.state.physical_steering_rad, 0.38);
+  EXPECT_NEAR(b.state.physical_steering_rad, upper, 1.e-12);
+  EXPECT_GT(a.state.physical_steering_rad - b.state.physical_steering_rad, 0.77);
 }
 
 TEST(UnitySourcePlant, InertialAccelerationIncludesBodyFrameYawTransport)

@@ -10,6 +10,10 @@ namespace sdu_apex::source_nlp {
 struct SourceConvexQp {
     Eigen::MatrixXd hessian;
     Eigen::VectorXd gradient;
+    // Internal normal/tangential equations E*x=e, eliminated by rank-revealing
+    // SVD before the same primal-dual inequality solve. No shooting states.
+    Eigen::MatrixXd equality_jacobian;
+    Eigen::VectorXd equality_rhs;
     Eigen::MatrixXd hard_jacobian;
     Eigen::VectorXd hard_margin;
     Eigen::MatrixXd elastic_jacobian;
@@ -27,6 +31,11 @@ struct SourceConvexQp {
 struct SourceConvexQpResult {
     Eigen::VectorXd step;
     Eigen::VectorXd hard_multipliers;
+    Eigen::VectorXd equality_multipliers;
+    // Stable multipliers of the orthonormalized normal equations. The
+    // original row reconstruction may be ill conditioned and is diagnostic.
+    Eigen::VectorXd equality_basis_multipliers;
+    double equality_dual_reconstruction_inf{};
     Eigen::VectorXd elastic_multipliers;
     Eigen::VectorXd elastic_values;
     double primal_inf{};

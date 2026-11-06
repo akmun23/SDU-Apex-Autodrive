@@ -68,9 +68,9 @@ int main(int argc,char **argv) {
         const auto &trace=captured->source_primal_trace[i];
         if(std::memcmp(retained,trace.warm_start,sizeof(retained))!=0)return 6;
         if(trace.accepted) {
-            if(!trace.trial_evaluated)return 7;
+            if(!trace.trial_evaluated && !trace.normal_accepted)return 7;
             if(trace.correction_accepted && !trace.correction_evaluated)return 7;
-            std::copy_n(trace.correction_accepted?trace.correction:trace.trial,PREDICTION_HORIZON,retained);
+            std::copy_n(trace.accepted_controls,PREDICTION_HORIZON,retained);
         }
     }
     if(std::memcmp(retained,captured->source_optimized_controls,sizeof(retained))!=0)return 8;

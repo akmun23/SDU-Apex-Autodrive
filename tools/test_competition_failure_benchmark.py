@@ -74,6 +74,78 @@ class CompetitionFailureBenchmark(unittest.TestCase):
             self.assertFalse(r["brake_branch_searched"])
             self.assertTrue(all(.001 <= u[1] <= 1. for u in r["controls"]))
 
+    def test_default_filter_sqp_uses_original_objective_and_physics(self):
+        # Primary recorded controls, one default SQP, independent source
+        # verification. Preferred reserve changes must not change J or U.
+        import json
+        tools = Path(os.environ.get(
+            "MPC_SOURCE_BENCHMARK_TOOLS", benchmark.DEFAULT_TOOLS))
+        names = ("mpc_source_live_fixture",
+                 "mpc_source_exact_offline_optimize",
+                 "mpc_source_feasibility_witness_probe",
+                 "mpc_source_nlp_oracle")
+        if not all((tools / name).is_file() for name in names):
+            if os.environ.get("MPC_SOURCE_BENCHMARK_REQUIRE_NATIVE"):
+                self.fail("Build original-source oracle and benchmark tools")
+            self.skipTest("Native competition benchmark tools unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            # Independently reconstruct source state, reference and exact
+            # physics from the tracked original replay, not an improved seed.
+            report = benchmark.replay(
+                self.bundle, work, tools, "recorded", 1)
+            self.assertTrue(report["passed"])
+            env = benchmark.solver_environment(self.sequence["parameters"], controls_only_trace=True)
+            for epoch, iterations in ((765, 500), (769, 500)):
+                case = work / f"epoch_{epoch}"
+                output = case / "original_objective.controls"
+                run = subprocess.run(
+                    [str(tools / "mpc_source_exact_offline_optimize"),
+                     str(case), "-", str(iterations), str(output)],
+                    cwd=benchmark.ROOT, env=env, capture_output=True,
+                    text=True, timeout=120)
+                self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+                result = json.loads(run.stdout)
+                self.assertTrue(result["source_feasible_final"], epoch)
+                if result["original_nlp_kkt_converged"]:
+                    self.assertEqual(result["termination_reason"], "original_nlp_kkt")
+                    self.assertTrue(result["history"][-1]["original_duals_trustworthy"])
+                self.assertTrue(result["alpha_search"])
+                self.assertFalse(result["fixed_alpha_grid"])
+                self.assertFalse(result["fallback_controller"])
+                self.assertEqual(result["nonlinear_acceptance_objective"],"original_racing_cost")
+                if epoch == 765:
+                    variant = dict(env, MPC_SOURCE_NLP_MIN_CLEARANCE_M="0", MPC_SOURCE_NLP_QP_SOFT_WEIGHT="10")
+                    changed = subprocess.run([str(tools / "mpc_source_exact_offline_optimize"),
+                        str(case), "-", str(iterations), str(case / "reserve_variant.controls")],
+                        env=variant, capture_output=True,text=True,check=True,timeout=120)
+                    variant_result = json.loads(changed.stdout)
+                    self.assertEqual(output.read_bytes(),(case / "reserve_variant.controls").read_bytes())
+                    self.assertEqual(result["final_cost"],variant_result["final_cost"])
+                controls = [list(map(float, line.split()))
+                            for line in output.read_text().splitlines()
+                            if line.strip()]
+                self.assertEqual(len(controls), 30)
+                oracle = subprocess.run(
+                    [str(tools / "mpc_source_nlp_oracle"), str(case)],
+                    input=json.dumps({
+                        "controls": controls,
+                        "derivatives": False}) + "\n",
+                    capture_output=True, text=True, timeout=30)
+                self.assertEqual(
+                    oracle.returncode, 0, oracle.stderr[-2000:])
+                original = json.loads(oracle.stdout)
+                self.assertTrue(original["valid"])
+                self.assertGreaterEqual(
+                    original["minimum_clearance_m"], 0.)
+                self.assertGreaterEqual(
+                    original["minimum_rate_margin"], -1e-7)
+                self.assertGreaterEqual(
+                    original["minimum_box_margin"], -1e-7)
+                self.assertAlmostEqual(
+                    original["original_cost"], result["final_cost"],
+                    delta=1e-4 * max(1, abs(result["final_cost"])))
+
     def test_native_recorded_replay_and_live_capture(self):
         tools = Path(os.environ.get("MPC_SOURCE_BENCHMARK_TOOLS", benchmark.DEFAULT_TOOLS))
         required = [tools/name for name in ("mpc_source_live_fixture",

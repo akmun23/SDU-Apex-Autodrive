@@ -386,7 +386,35 @@ typedef struct {
     int correction_evaluated;
     int correction_accepted;
     MpcModelControl_t correction[PREDICTION_HORIZON];
+    int normal_accepted;
+    int filter_accepted;
+    MpcModelControl_t accepted_controls[PREDICTION_HORIZON];
 } MpcRtiSourcePrimalTrace_t;
+
+/* Scalar diagnostics are always retained; full primal captures remain opt-in.
+ * QP multipliers and NLP residuals refer to the iteration START controls. */
+typedef struct {
+    int accepted;
+    int full_step_evaluated;
+    int full_step_accepted;
+    int qp_converged;
+    int original_duals_trustworthy;
+    int qp_iterations;
+    double linearization_ms;
+    double qp_ms;
+    double source_rollout_ms;
+    double total_ms;
+    double cost_before;
+    double predicted_cost_change;
+    double full_step_cost;
+    double cost_after;
+    double accepted_step_length;
+    double qp_primal_residual;
+    double qp_dual_residual;
+    double stationarity_inf;
+    double complementarity_inf;
+    double maximum_footprint_prediction_error_m;
+} MpcRtiSourceIterationMetrics_t;
 
 typedef struct
 {
@@ -584,6 +612,8 @@ typedef struct
     double source_exact_nlp_final_source_cost;
     double source_exact_nlp_final_original_margin_m;
     double source_exact_nlp_final_original_violation;
+    int source_iteration_metrics_count;
+    MpcRtiSourceIterationMetrics_t source_iteration_metrics[MPC_RTI_SOURCE_TRACE_CAPACITY];
     int source_nominal_repair_attempted;
     int source_nominal_repair_accepted;
     int source_nominal_repair_phase_one_iterations;

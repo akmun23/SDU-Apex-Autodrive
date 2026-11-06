@@ -28,7 +28,8 @@ endif()
 # The original source and objective are unchanged; require byte-for-byte
 # cost/command replay parity before enabling in a simulator image.
 option(SDU_APEX_MPC_LTO
-  "Enable link-time optimization for native original-source MPC builds" OFF)
+  "Enable link-time optimization for native original-source MPC builds"
+  ${SDU_APEX_MPC_NATIVE_TUNING})
 if(SDU_APEX_MPC_LTO)
   include(CheckIPOSupported)
   check_ipo_supported(RESULT mpc_ipo_ok OUTPUT mpc_ipo_reason)
@@ -170,6 +171,15 @@ if(BUILD_TESTING)
         "MPC_SOURCE_BENCHMARK_TOOLS=$<TARGET_FILE_DIR:mpc_source_live_fixture>"
         "MPC_SOURCE_BENCHMARK_REQUIRE_NATIVE=1"
         ${Python3_EXECUTABLE} -m unittest tools.test_competition_failure_benchmark -v)
+    add_test(NAME test_mpc_source_phase1_qualification
+      COMMAND ${CMAKE_COMMAND} -E env
+        "MPC_SOURCE_BENCHMARK_TOOLS=$<TARGET_FILE_DIR:mpc_source_live_fixture>"
+        "MPC_SOURCE_BENCHMARK_REQUIRE_NATIVE=1"
+        ${Python3_EXECUTABLE} -m unittest tools.test_qualify_mpc_source_phase1
+          tools.test_audit_mpc_source_lagrangian
+          tools.test_audit_mpc_source_linearization_domain.ConstraintPathIdentityTest -v)
+    set_tests_properties(test_mpc_source_phase1_qualification PROPERTIES
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/..")
     set_tests_properties(test_competition_failure_benchmark PROPERTIES
       WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/..")
   endif()
@@ -178,6 +188,8 @@ if(BUILD_TESTING)
   set_tests_properties(test_source_only_architecture PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/..")
   ament_add_gtest(test_mpc_trajectory_io test/test_mpc_trajectory_io.cpp)
+  ament_add_gtest(test_mpc_source_constraint_identity test/test_mpc_source_constraint_identity.cpp)
+  target_link_libraries(test_mpc_source_constraint_identity mpc_core)
   ament_add_gtest(test_mpc_source_convex_qp test/test_mpc_source_convex_qp.cpp)
   target_link_libraries(test_mpc_source_convex_qp mpc_core Eigen3::Eigen)
   target_link_libraries(test_mpc_trajectory_io mpc_core)

@@ -250,9 +250,9 @@ double primal(const SourceJet2 &v){return v.value;}
 SourceJet2 scalar_max(const SourceJet2 &a,const SourceJet2 &b) {
   if(source_one_sided_scope && a.value==b.value) {
     ++source_one_sided_scope->exact_ties;
-    if(a.first!=b.first) {
+    if(a.first!=b.first || a.second!=b.second) {
       ++source_one_sided_scope->derivative_resolved_ties;
-      return a.first<b.first?b:a;
+      return a.first<b.first || (a.first==b.first && a.second<b.second)?b:a;
     }
   }
   return a.value < b.value ? b : a;
@@ -260,9 +260,9 @@ SourceJet2 scalar_max(const SourceJet2 &a,const SourceJet2 &b) {
 SourceJet2 scalar_max(double a,const SourceJet2 &b) {
   if(source_one_sided_scope && a==b.value) {
     ++source_one_sided_scope->exact_ties;
-    if(b.first!=0.) {
+    if(b.first!=0. || b.second!=0.) {
       ++source_one_sided_scope->derivative_resolved_ties;
-      return b.first>0.?b:SourceJet2(a);
+      return b.first>0. || (b.first==0. && b.second>0.)?b:SourceJet2(a);
     }
   }
   return a < b.value ? b : SourceJet2(a);
@@ -270,9 +270,9 @@ SourceJet2 scalar_max(double a,const SourceJet2 &b) {
 SourceJet2 scalar_max(const SourceJet2 &a,double b) {
   if(source_one_sided_scope && a.value==b) {
     ++source_one_sided_scope->exact_ties;
-    if(a.first!=0.) {
+    if(a.first!=0. || a.second!=0.) {
       ++source_one_sided_scope->derivative_resolved_ties;
-      return a.first>0.?a:SourceJet2(b);
+      return a.first>0. || (a.first==0. && a.second>0.)?a:SourceJet2(b);
     }
   }
   return a.value < b ? SourceJet2(b) : a;
@@ -293,6 +293,13 @@ double primal(const Dual28 &value) { return value.value; }
 double source_branch_tangent(double) { return 0.; }
 double source_branch_tangent(const Dual28 &) { return 0.; }
 double source_branch_tangent(const SourceJet2 &a) { return a.first; }
+double source_branch_second(double) { return 0.; }
+double source_branch_second(const Dual28 &) { return 0.; }
+double source_branch_second(const SourceJet2 &a) { return a.second; }
+template <typename Scalar>
+bool source_path_varies(const Scalar &a) {
+  return source_branch_tangent(a)!=0. || source_branch_second(a)!=0.;
+}
 
 template <typename A,typename B>
 int source_directional_compare(const A &a,const B &b)
@@ -315,6 +322,11 @@ int source_directional_compare(const A &a,const B &b)
     if(da>db) {
       ++source_one_sided_scope->derivative_resolved_ties;
       return 1;
+    }
+    const double dda=source_branch_second(a),ddb=source_branch_second(b);
+    if(dda!=ddb) {
+      ++source_one_sided_scope->derivative_resolved_ties;
+      return dda<ddb?-1:1;
     }
   }
   return 0;
@@ -871,9 +883,9 @@ bool wheel_contact_kinematics(const UnitySourcePlantStateT<Scalar> &s,
   const Scalar ray_jounce = rest_travel - ray_travel;
   out->raw_jounce_m = ray_jounce;
   if(source_one_sided_scope &&
-     ((primal(ray_travel)==0.&&source_branch_tangent(ray_travel)!=0.) ||
+     ((primal(ray_travel)==0.&&source_path_varies(ray_travel)) ||
       (primal(ray_jounce)==-kSuspensionMaxDroopM &&
-       source_branch_tangent(ray_jounce)!=0.)))
+       source_path_varies(ray_jounce))))
     ++source_one_sided_scope->contact_switch_ties;
   out->grounded = source_branch_gt(ray_travel,0.0) &&
       source_branch_gt(ray_jounce,-kSuspensionMaxDroopM);
@@ -1280,7 +1292,7 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
   // nominal brake-branch tangent as a valid one-sided derivative.
   if(source_one_sided_scope &&
      primal(input.throttle_normalized)==0. &&
-     source_branch_tangent(input.throttle_normalized)!=0.)
+     source_path_varies(input.throttle_normalized))
     ++source_one_sided_scope->discrete_control_switches;
   const Scalar drive_torque = primal(input.throttle_normalized) == 0.0
       ? Scalar(0.0) : kMotorTorqueNm * input.throttle_normalized / 4.0;
@@ -1293,7 +1305,7 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
   // branch only and MARK it as discontinuous for the NLP.
   if(source_one_sided_scope &&
      std::abs(primal(s.u_mps))==kWheelSubstepThresholdMps &&
-     source_branch_tangent(s.u_mps)!=0.) {
+     source_path_varies(s.u_mps)) {
     ++source_one_sided_scope->discontinuous_substep_schedules;
     substep_count=source_branch_lt(
         scalar_abs(s.u_mps),kWheelSubstepThresholdMps)?
@@ -1378,7 +1390,7 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
       // Source tire force selection at zero load can be discontinuous
       // because the original PhysX load-filter has a nonzero floor.
       if(source_one_sided_scope && primal(load[i])==0. &&
-         source_branch_tangent(load[i])!=0.)
+         source_path_varies(load[i]))
         ++source_one_sided_scope->contact_switch_ties;
       const bool tire_force_branch_active=source_branch_gt(load[i],0.);
       if (tire_force_branch_active &&
@@ -1405,7 +1417,7 @@ bool step(const UnitySourcePlantStateT<Scalar> &input_state,
         // not differentiable tire forces when the row is switched.
         const auto sticky_tie=[&](const Scalar &x,double boundary) {
           if(primal(x)==boundary &&
-             source_branch_tangent(x)!=0.)
+             source_path_varies(x))
             ++source_one_sided_scope->contact_switch_ties;
         };
         sticky_tie(scalar_abs(sticky_wheel_forward),
@@ -2242,6 +2254,7 @@ static bool source_step_with_directional_curvature_impl(
     const UnitySourcePlantInput &input,
     double duration_s,
     const std::array<double,kUnityPlantSensitivityStateSize> &ds,
+    const std::array<double,kUnityPlantSensitivityStateSize> &dds,
     const std::array<double,2> &du,
     UnitySourcePlantDirectionalCurvature *output,
     UnitySourceDirectionalBranchReport *branch_report)
@@ -2251,10 +2264,12 @@ static bool source_step_with_directional_curvature_impl(
   if(branch_report)*branch_report={};
   if(!output || !finite_state(state))return false;
   for(double v:ds)if(!std::isfinite(v))return false;
+  for(double v:dds)if(!std::isfinite(v))return false;
   for(double v:du)if(!std::isfinite(v))return false;
   const auto seeded=[&](double v,int index) {
     SourceJet2 jet(v);
     jet.first=ds[index];
+    jet.second=dds[index];
     return jet;
   };
   UnitySourcePlantStateT<SourceJet2> s{};
@@ -2365,7 +2380,7 @@ bool unity_source_plant_step_with_directional_curvature(
     UnitySourcePlantDirectionalCurvature *output)
 {
   return source_step_with_directional_curvature_impl(
-      state,input,duration_s,ds,du,output,nullptr);
+      state,input,duration_s,ds,{},du,output,nullptr);
 }
 
 bool unity_source_plant_step_one_sided_directional(
@@ -2378,7 +2393,20 @@ bool unity_source_plant_step_one_sided_directional(
 {
   if(!branch_report)return false;
   return source_step_with_directional_curvature_impl(
-      state,input,duration_s,ds,du,output,branch_report);
+      state,input,duration_s,ds,{},du,output,branch_report);
+}
+
+bool unity_source_plant_step_path_curvature(
+    const UnitySourcePlantState &state,const UnitySourcePlantInput &input,
+    double duration_s,
+    const std::array<double,kUnityPlantSensitivityStateSize> &ds,
+    const std::array<double,kUnityPlantSensitivityStateSize> &dds,
+    const std::array<double,2> &du,
+    UnitySourcePlantDirectionalCurvature *output,
+    UnitySourceDirectionalBranchReport *branch_report)
+{
+  return source_step_with_directional_curvature_impl(
+      state,input,duration_s,ds,dds,du,output,branch_report);
 }
 
 bool unity_source_plant_slip_excess(

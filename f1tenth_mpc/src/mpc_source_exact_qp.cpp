@@ -5,6 +5,7 @@
 
 #include <Eigen/Cholesky>
 #include <Eigen/Core>
+#include <Eigen/Eigenvalues>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -22,8 +23,10 @@ using Matrix=Eigen::MatrixXd;
 using Tangent=Eigen::Matrix<double,kState,N,Eigen::RowMajor>;
 
 struct PhysicalRow {
-    explicit PhysicalRow(int n):slope(Vector::Zero(n)) {}
-    Vector slope;
+    // Every reduced QP has exactly 2*kStages controls. Keep constraint
+    // slopes inline rather than allocating one dynamic Eigen vector for
+    // every one of the 480 original physical inequalities, per SQP pass.
+    Eigen::Matrix<double,N,1> slope=Eigen::Matrix<double,N,1>::Zero();
     double margin{};
     double original_margin{};
     double weight{};
@@ -48,7 +51,6 @@ bool source_exact_constrained_qp_direction(
        program.equality_rows!=E ||
        !(options.curvature_regularization>0.) || !std::isfinite(options.curvature_regularization) ||
        !(options.inequality_penalty_weight>0.) || !std::isfinite(options.inequality_penalty_weight) ||
-       !std::isfinite(options.infeasible_linearization_l1_weight) || options.infeasible_linearization_l1_weight<0. ||
        options.maximum_qp_iterations<1 ||
        options.maximum_qp_iterations>5000 ||
        !(options.kkt_tolerance>0.) ||
@@ -68,21 +70,26 @@ bool source_exact_constrained_qp_direction(
     // The state tangent and sparse physical rows are evaluated at exactly
     // the source model's own nonlinear nominal, never a QP surrogate plant.
     // S[k] = d state[k+1] / d all 60 ORIGINAL control commands.
-    std::vector<Tangent> sensitivity(kStages,Tangent::Zero());
+    std::vector<Tangent> sensitivity(kStages);
     for(int k=0;k<kStages;++k) {
         const auto &stage=program.original_source_stage_derivatives[k];
         auto &S=sensitivity[k];
-        for(int i=0;i<kState;++i) {
-            for(int j=0;j<N;++j) {
-                double v=0.;
-                if(k>0)
-                    for(int state=0;state<kState;++state)
-                        v+=stage.A[i][state]*sensitivity[k-1](state,j);
-                if(j/2==k)v+=stage.B[i][j%2];
-                S(i,j)=v;
-                if(!std::isfinite(v))return false;
-            }
+        // Dense state-to-control sensitivities are the dominant QP assembly
+        // operation. Use a single contiguous matrix product instead of
+        // 29 x 60 separately dispatched 29-term dot products. The exact
+        // source Jacobians, control scaling and shooting convention remain
+        // unchanged; B enters only the two controls of this stage.
+        if(k==0) S.setZero();
+        else {
+            const Eigen::Map<const Eigen::Matrix<double,kState,kState,Eigen::RowMajor>>
+                A(&stage.A[0][0]);
+            S.noalias()=A*sensitivity[k-1];
         }
+        for(int i=0;i<kState;++i) {
+            S(i,2*k)+=stage.B[i][0];
+            S(i,2*k+1)+=stage.B[i][1];
+        }
+        if(!S.allFinite())return false;
     }
     // The sparse assembly is canonical row ordered. Include both the
     // source-through-state derivatives and direct original-control terms.
@@ -116,7 +123,7 @@ bool source_exact_constrained_qp_direction(
            src.type!=NonlinearRowType::PhysicalCommandBox &&
            src.type!=NonlinearRowType::TerminalSpeedViability)
             continue;
-        PhysicalRow row(n);
+        PhysicalRow row;
         row.type=src.type;
         row.margin=src.value;
         row.original_margin=src.value;
@@ -248,8 +255,14 @@ bool source_exact_constrained_qp_direction(
                     feature(j)=slope*input_scale[j%2];
                 }
                 if(!add(feature,slip_weight))return false;
-                peak_gauss_newton.noalias()+=2.*slip_weight*feature*feature.transpose();
-                peak_gradient.noalias()+=2.*slip_weight*stage.source_peak_slip[wheel]*feature;
+                // Peak-slip epigraph curvature/gradient are needed only
+                // when those explicit auxiliary variables are enabled.
+                // The live original-max objective already has the feature
+                // curvature in source_cost_hessian via add() above.
+                if(peak_epigraph) {
+                    peak_gauss_newton.noalias()+=2.*slip_weight*feature*feature.transpose();
+                    peak_gradient.noalias()+=2.*slip_weight*stage.source_peak_slip[wheel]*feature;
+                }
             }
 
             // Direct command and source-delayed command queues, with
@@ -274,8 +287,10 @@ bool source_exact_constrained_qp_direction(
         if(!source_cost_hessian.allFinite())return false;
     }
     const Matrix racing_hessian=source_cost_hessian-Matrix::Identity(n,n)*h;
-    const Matrix base_gauss_newton=racing_hessian-(peak_epigraph?peak_gauss_newton:Matrix::Zero(n,n));
-    const Vector base_gradient=g-(peak_epigraph?peak_gradient:Vector::Zero(n));
+    const Matrix base_gauss_newton=racing_hessian-
+        (peak_epigraph?peak_gauss_newton:Matrix::Zero(n,n));
+    const Vector base_gradient=g-
+        (peak_epigraph?peak_gradient:Vector::Zero(n));
     if(peak_epigraph)source_cost_hessian-=peak_gauss_newton;
     const auto slip_slope=[&](const SlipEpigraphJacobianRow &row) {
         Vector slope(n);
@@ -363,24 +378,6 @@ bool source_exact_constrained_qp_direction(
                 (*options.lagrangian_hessian_scaled)[i*n+j]+(i==j?h:0.);
         if(!source_cost_hessian.allFinite())return false;
     }
-    // Full-step source curvature calibration: the physical plant's
-    // actual nonlinear response is authoritative. A rejected full-step
-    // contributes one nonnegative rank-one secant in the original control
-    // coordinates. No sample of a scaled physical step is created here.
-    if(options.source_curvature_secants)
-        for(const auto &secant:*options.source_curvature_secants) {
-            if(!std::isfinite(secant.curvature) ||
-               secant.curvature<0. || secant.curvature>1.e9)
-                return false;
-            Eigen::Matrix<double,N,1> unit;
-            for(int j=0;j<N;++j)
-                unit(j)=secant.unit_direction[j];
-            if(!unit.allFinite() ||
-               std::abs(unit.squaredNorm()-1.)>1.e-5)
-                return false;
-            source_cost_hessian.noalias()+=
-                secant.curvature*unit*unit.transpose();
-        }
     if(options.capture_curvature_model) {
         output->racing_hessian_scaled.resize(n*n);
         output->stabilized_hessian_scaled.resize(n*n);
@@ -402,16 +399,19 @@ bool source_exact_constrained_qp_direction(
             std::chrono::steady_clock::now()-begin).count();
         return true;
     }
+    if(options.capture_curvature_model) {
+        Eigen::SelfAdjointEigenSolver<Matrix> eigen(source_cost_hessian,Eigen::EigenvaluesOnly);
+        if(eigen.info()!=Eigen::Success)return false;
+        output->hessian_min_eigenvalue=eigen.eigenvalues().minCoeff();
+        output->hessian_max_eigenvalue=eigen.eigenvalues().maxCoeff();
+    }
     SourceConvexQp problem;
     problem.hessian=source_cost_hessian;
     problem.gradient=base_gradient;
     int hard_count=0,elastic_count=0;
-    const bool elastic_globalization=options.infeasible_linearization_l1_weight>0.;
     for(const auto &row:rows) {
-        const bool recovery=elastic_globalization && row.type==NonlinearRowType::BodyCorner;
-        hard_count+=row.hard && !recovery;
-        elastic_count+=row.type==NonlinearRowType::BodyCorner || !row.hard;
-        elastic_count+=recovery;
+        hard_count+=row.hard;
+        elastic_count+=!row.hard;
     }
     problem.hard_jacobian.resize(hard_count,n);
     problem.hard_margin.resize(hard_count);
@@ -432,23 +432,14 @@ bool source_exact_constrained_qp_direction(
     problem.elastic_groups.resize(elastic_count+peak_rows.size());
     problem.elastic_weight=Vector::Ones(elastic_count+(peak_epigraph?4*kStages:0));
     problem.elastic_linear_cost=Vector::Zero(problem.elastic_weight.size());
-    std::vector<int> recovery_elastic_row(program.rows.size(),-1);
     int hi=0,ei=0;
     for(const auto &row:rows) {
-        const bool recovery=elastic_globalization && row.type==NonlinearRowType::BodyCorner;
-        if(row.hard && !recovery) {
+        if(row.hard) {
             problem.hard_jacobian.row(hi)=row.slope.transpose();
             problem.initial_hard_multipliers(hi)=row.multiplier;
             problem.hard_margin(hi++)=row.margin;
         }
-        if(recovery) {
-            recovery_elastic_row[row.row_index]=ei;
-            problem.elastic_jacobian.row(ei)=row.slope.transpose();
-            problem.elastic_margin(ei)=row.margin;
-            problem.elastic_weight(ei)=0.;
-            problem.elastic_linear_cost(ei++)=options.infeasible_linearization_l1_weight;
-        }
-        if(row.type==NonlinearRowType::BodyCorner || !row.hard) {
+        if(!row.hard) {
             const double reserve=row.type==NonlinearRowType::BodyCorner?
                 options.requested_corner_clearance_m:0.;
             problem.elastic_jacobian.row(ei)=row.slope.transpose();
@@ -495,7 +486,7 @@ bool source_exact_constrained_qp_direction(
     Vector current_lagrangian=g;
     for(const auto &row:rows) {
         if(row.hard)current_lagrangian.noalias()-=row.multiplier*row.slope;
-        if(row.type==NonlinearRowType::BodyCorner || !row.hard) {
+        if(!row.hard) {
             const double reserve=row.type==NonlinearRowType::BodyCorner?
                 options.requested_corner_clearance_m:0.;
             current_lagrangian.noalias()+=row.weight*
@@ -503,18 +494,116 @@ bool source_exact_constrained_qp_direction(
         }
     }
     output->tolerance_used=std::max(options.kkt_tolerance,
-        std::min(100.,.001*current_lagrangian.lpNorm<Eigen::Infinity>()));
+        std::min(.01,.0001*current_lagrangian.lpNorm<Eigen::Infinity>()));
     int total_qp_iterations=0;
     bool all_peak_rows_satisfied=!peak_epigraph;
     // Constraint generation solves ONE convex epigraph subproblem. Check every
     // original source-substep affine row after each solve; never certify a QP
     // from a selected maximum alone. No extra nonlinear trial or alpha grid.
     for(int round=0;round<8;++round) {
-        if(!solve_source_convex_qp(problem,options.maximum_qp_iterations,
-                                  output->tolerance_used,&solved,
-                                  options.absolute_deadline_monotonic_us))return false;
+        const bool hard_solved=solve_source_convex_qp(problem,options.maximum_qp_iterations,
+            output->tolerance_used,&solved,options.absolute_deadline_monotonic_us);
+        // A certified hard QP already supplies the constrained SQP step.
+        // Replacing it with an elastic solve can introduce nonzero normal
+        // residuals solely from normal-step regularization, relaxing an
+        // otherwise consistent hard linearization and corrupting its duals.
+        // Only a failed hard solve needs the internal normal/tangent pair.
+        // Its independently certified elastic optimum distinguishes affine
+        // inconsistency from failure of the hard-QP numerical algorithm.
+        if((!hard_solved || !solved.converged) && !solved.deadline_exceeded &&
+           !output->normal_step_computed) {
+            SourceConvexQp normal;
+            // Regularized affine normal step, in normalized controls.
+            // Its fixed small norm term chooses a bounded, stable normal;
+            // racing-step rejections must never increase this coefficient.
+            // At its exact optimum V_aff(n)+mu*||n||^2/2 <= V_aff(0),
+            // so every nonzero normal predicts physical violation descent.
+            constexpr double normal_norm_weight=1.e-6;
+            normal.hessian=normal_norm_weight*Matrix::Identity(n,n);
+            normal.gradient=Vector::Zero(n);
+            int boxes=0,physical=0;
+            for(const auto &row:rows) {
+                boxes+=row.type==NonlinearRowType::PhysicalCommandBox;
+                physical+=row.hard && row.type!=NonlinearRowType::PhysicalCommandBox;
+            }
+            normal.hard_jacobian.resize(boxes,n);normal.hard_margin.resize(boxes);
+            normal.elastic_jacobian.resize(physical,n);normal.elastic_margin.resize(physical);
+            normal.elastic_weight=Vector::Ones(physical);
+            int box=0,elastic=0;
+            for(const auto &row:rows) {
+                if(row.type==NonlinearRowType::PhysicalCommandBox) {
+                    normal.hard_jacobian.row(box)=row.slope.transpose();
+                    normal.hard_margin(box++)=row.margin;
+                } else if(row.hard) {
+                    normal.elastic_jacobian.row(elastic)=row.slope.transpose();
+                    normal.elastic_margin(elastic++)=row.margin;
+                }
+            }
+            SourceConvexQpResult normal_result;
+            if(!solve_source_convex_qp(normal,std::max(60,options.maximum_qp_iterations),1.e-9,
+                &normal_result,options.absolute_deadline_monotonic_us) || !normal_result.converged) {
+                output->iterations=total_qp_iterations+normal_result.iterations;
+                output->normal_primal_residual=normal_result.primal_inf;
+                output->normal_dual_residual=normal_result.dual_inf;
+                output->primal_residual=normal_result.primal_inf;
+                output->dual_residual=normal_result.dual_inf;
+                output->complementarity_residual=normal_result.complementarity_inf;
+                output->deadline_exceeded=normal_result.deadline_exceeded;
+                output->failure_reason="normal_affine_least_squares_qp_failed";
+                return false;
+            }
+            total_qp_iterations+=normal_result.iterations;
+            output->normal_step_computed=true;
+            output->normal_primal_residual=normal_result.primal_inf;
+            output->normal_dual_residual=normal_result.dual_inf;
+            int hard=0;
+            std::vector<const PhysicalRow *> normal_active;
+            for(const auto &row:rows) {
+                if(!row.hard)continue;
+                const double value=row.margin+row.slope.dot(normal_result.step);
+                const double relaxation=row.type==NonlinearRowType::PhysicalCommandBox?0.:std::min(0.,value);
+                output->normal_linearized_violation+=.5*relaxation*relaxation;
+                problem.hard_margin(hard++)=row.margin-relaxation;
+                if(relaxation<-1.e-8)normal_active.push_back(&row);
+
+            }
+            // Preserve the active normal residual in an exact tangent
+            // nullspace. Keeping these as inequalities creates a feasible
+            // set with no strict interior and destroys barrier conditioning.
+            problem.equality_jacobian.resize(normal_active.size(),n);
+            problem.equality_rhs.resize(normal_active.size());
+            for(size_t i=0;i<normal_active.size();++i) {
+                problem.equality_jacobian.row(i)=normal_active[i]->slope.transpose();
+                problem.equality_rhs(i)=normal_active[i]->slope.dot(normal_result.step);
+            }
+            for(int j=0;j<n;++j)output->normal_direction[j/2][j%2]=
+                normal_result.step(j)*input_scale[j%2];
+            problem.initial_hard_multipliers=Vector::Zero(hard_count);
+            const bool tangent_valid=solve_source_convex_qp(problem,std::max(60,options.maximum_qp_iterations),
+                output->tolerance_used,&solved,options.absolute_deadline_monotonic_us);
+            if(!tangent_valid || !solved.converged) {
+                // An accurate normal step remains useful when the objective
+                // correction is uncertified. Keep the failed tangential
+                // residuals/flag; never relabel it as a converged hard QP.
+                output->normal_only_step=true;
+                solved.converged=false;
+                solved.step=normal_result.step;
+                solved.hard_multipliers=Vector::Zero(hard_count);
+                solved.elastic_multipliers=Vector::Zero(problem.elastic_margin.size());
+                solved.elastic_values=Vector::Zero(problem.elastic_weight.size());
+                for(int i=0;i<problem.elastic_margin.size();++i) {
+                    const int group=problem.elastic_groups.size()?problem.elastic_groups(i):i;
+                    solved.elastic_values(group)=std::max(solved.elastic_values(group),
+                        -problem.elastic_margin(i)-problem.elastic_jacobian.row(i).dot(solved.step));
+                }
+                if(!tangent_valid) {
+                    solved.primal_inf=std::numeric_limits<double>::infinity();
+                    solved.dual_inf=std::numeric_limits<double>::infinity();
+                }
+            }
+        } else if(!hard_solved)return false;
         total_qp_iterations+=solved.iterations;
-        if(!peak_epigraph || solved.deadline_exceeded)break;
+        if(!peak_epigraph || solved.deadline_exceeded || output->normal_only_step)break;
         std::array<Eigen::Matrix<double,kState,1>,kStages> state_delta;
         for(int k=0;k<kStages;++k) {
             Vector physical=solved.step;
@@ -550,16 +639,31 @@ bool source_exact_constrained_qp_direction(
     output->primal_residual=solved.primal_inf;
     output->dual_residual=solved.dual_inf;
     output->complementarity_residual=solved.complementarity_inf;
-    Vector stationarity=problem.gradient;
+    for(const auto &row:rows)if(row.hard)
+        output->linearized_physical_violation_inf=std::max(output->linearized_physical_violation_inf,
+            std::max(0.,-row.margin-row.slope.dot(x)));
+    // A small residual obtained by cancellation of huge dual terms is not
+    // a trustworthy original-NLP multiplier estimate. Bound accumulation
+    // roundoff in the actual, unscaled stationarity equation.
+    Vector magnitude=problem.gradient.cwiseAbs()+problem.hessian.cwiseAbs()*x.cwiseAbs();
+    magnitude.noalias()+=problem.hard_jacobian.cwiseAbs().transpose()*solved.hard_multipliers.cwiseAbs();
+    magnitude.noalias()+=problem.elastic_jacobian.cwiseAbs().transpose()*solved.elastic_multipliers.cwiseAbs();
+    const double roundoff_bound=(n+hard_count+problem.elastic_margin.size()+2)*
+        std::numeric_limits<double>::epsilon()*magnitude.lpNorm<Eigen::Infinity>();
+    output->original_duals_trustworthy=std::isfinite(roundoff_bound) && roundoff_bound<=options.kkt_tolerance &&
+        output->converged &&
+        output->linearized_physical_violation_inf<=1.e-8 && problem.equality_rhs.size()==0;
+    // The original NLP stationarity must NEVER use the infeasible-start
+    // squared-violation restoration gradient from the convex subproblem.
+    Vector stationarity=base_gradient;
     Vector curvature_gradient=base_gradient;
     output->curvature_multipliers.assign(program.rows.size(),0.);
     hi=0;
     for(const auto &row:rows) {
         output->predicted_constraint_margins[row.row_index]=row.margin+row.slope.dot(x);
         if(row.hard) {
-            const int recovery_index=recovery_elastic_row[row.row_index];
-            const double lambda=recovery_index>=0?solved.elastic_multipliers(recovery_index):
-                solved.hard_multipliers(hi++);
+            const double estimate=solved.hard_multipliers(hi++);
+            const double lambda=output->original_duals_trustworthy?estimate:0.;
             output->inequality_multipliers[row.row_index]=lambda;
             output->curvature_multipliers[row.row_index]=lambda;
             stationarity.noalias()-=lambda*row.slope;
@@ -570,13 +674,16 @@ bool source_exact_constrained_qp_direction(
             output->original_nlp_complementarity_inf=std::max(
                 output->original_nlp_complementarity_inf,std::abs(lambda*row.original_margin));
         }
-        if(row.type==NonlinearRowType::BodyCorner || !row.hard) {
+        if(!row.hard) {
             const double reserve=row.type==NonlinearRowType::BodyCorner?
                 options.requested_corner_clearance_m:0.;
             const double before=std::min(0.,row.original_margin-reserve);
             const double after=std::min(0.,row.margin+row.slope.dot(x)-reserve);
             output->curvature_multipliers[row.row_index]-=row.weight*after;
-            stationarity.noalias()+=row.weight*before*row.slope;
+            // Preferred 3 cm reserve is an internal numerical penalty,
+            // not part of the frozen original racing objective J. It must
+            // never appear in an original-NLP KKT certificate.
+            if(!row.hard)stationarity.noalias()+=row.weight*before*row.slope;
             if(row.type==NonlinearRowType::TerminalSpeedViability) {
                 output->predicted_terminal_speed_violation_before=std::max(
                     output->predicted_terminal_speed_violation_before,.5*before*before);
@@ -586,7 +693,7 @@ bool source_exact_constrained_qp_direction(
                 output->predicted_linearized_violation_before+=.5*before*before;
                 output->predicted_linearized_violation_after+=.5*after*after;
             }
-        } else if(row.type==NonlinearRowType::PhysicalCommandRate) {
+        } else if(row.hard) {
             const double before=std::min(0.,row.margin);
             const double after=std::min(0.,row.margin+row.slope.dot(x));
             output->predicted_linearized_violation_before+=.5*before*before;
@@ -598,7 +705,7 @@ bool source_exact_constrained_qp_direction(
         Vector peak_dual=Vector::Zero(4*kStages);
         for(int i=0;i<static_cast<int>(peak_rows.size());++i) {
             const auto &row=*peak_rows[i];
-            const double lambda=solved.elastic_multipliers(base_elastic+i);
+            const double lambda=output->original_duals_trustworthy?solved.elastic_multipliers(base_elastic+i):0.;
             stationarity.noalias()-=lambda*problem.elastic_jacobian.row(base_elastic+i).transpose();
             curvature_gradient.noalias()-=lambda*problem.elastic_jacobian.row(base_elastic+i).transpose();
             if(lambda>1.e-8)output->slip_curvature_multipliers.push_back({
@@ -620,10 +727,9 @@ bool source_exact_constrained_qp_direction(
                     value>0.?std::abs(residual):std::max(0.,-residual));
             }
     }
-    // Return stationarity in physical command coordinates, not hidden scaled
-    // variables. QP multipliers are estimates at this ORIGINAL nonlinear
-    // iterate; residuals are never relabeled as the QP's own convergence.
-    for(int j=0;j<n;++j)stationarity(j)/=input_scale[j%2];
+    // D_u * grad_U L is stationarity in normalized physical coordinates:
+    // one unit is 0.15 rad steering / 0.25 throttle. Multipliers and
+    // complementarity remain in original row and racing-cost units.
     for(int j=0;j<n;++j)output->lagrangian_gradient_at_qp_duals[j]=curvature_gradient(j);
     output->original_nlp_stationarity_inf=std::max(output->original_nlp_stationarity_inf,
         stationarity.lpNorm<Eigen::Infinity>());
@@ -667,6 +773,7 @@ bool source_exact_constrained_qp_direction(
         std::chrono::steady_clock::now()-begin).count();
     output->valid=finite(x) &&
         std::isfinite(output->predicted_original_objective_change);
+    if(output->valid)output->failure_reason="none";
     return output->valid;
 }
 } // namespace sdu_apex::source_nlp

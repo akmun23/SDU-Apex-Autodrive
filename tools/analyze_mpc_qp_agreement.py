@@ -57,6 +57,7 @@ def report(path: pathlib.Path, *, wall_threshold_m2: float=1.e-5,
     worst_bad_streak=0
     cycles=0
     telemetry_cycles=0
+    iteration_timing=collections.defaultdict(list)
     traces=[]
     with path.open(encoding="utf-8") as stream:
         for lineno,line in enumerate(stream,1):
@@ -92,6 +93,34 @@ def report(path: pathlib.Path, *, wall_threshold_m2: float=1.e-5,
             progress=number(row.get("progress_m"))
             agreement=solver.get("native_source_sqp_full_step_model_agreement")
             full_cost_recorded=False
+            iterations=solver.get("source_iterations")
+            if isinstance(iterations,list) and iterations:
+                telemetry_cycles+=1
+                for idx,step in enumerate(iterations):
+                    if not isinstance(step,dict):
+                        continue
+                    for key in ("linearization_ms","qp_ms","source_rollout_ms","total_ms"):
+                        value=number(step.get(key))
+                        if value is not None and value>=0.:
+                            iteration_timing[key].append(value)
+                    if step.get("full_step_evaluated") is not True:
+                        continue
+                    before=number(step.get("original_cost_before"))
+                    after=number(step.get("full_step_original_cost"))
+                    predicted=number(step.get("qp_predicted_cost_change"))
+                    if before is None or after is None or predicted is None:
+                        continue
+                    actual=after-before
+                    event=dict(line=lineno,stamp_ns=stamp,progress_m=progress,
+                               pass_index=idx,predicted_delta=predicted,
+                               actual_delta=actual,error=actual-predicted)
+                    cost.append(event)
+                    full_cost_recorded=True
+                    # A corrected/backtracked acceptance is a different
+                    # control trajectory. Never compare its cost with the
+                    # full direction's quadratic prediction.
+                    if step.get("full_step_accepted") is True:
+                        accepted_cost.append(event)
             if isinstance(agreement,list):
                 telemetry_cycles+=1
                 for idx,step in enumerate(agreement[:2]):
@@ -197,6 +226,7 @@ def report(path: pathlib.Path, *, wall_threshold_m2: float=1.e-5,
         longest_nonpublication_streak=worst_bad_streak,
         telemetry_cycles=telemetry_cycles,
         model_agreement_instrumented=telemetry_cycles>0,
+        iteration_timing={key:summary(values) for key,values in iteration_timing.items()},
         per_pass={f"SQP_{i+1}":aggregate(stages[i]) for i in stages},
         cost_model=dict(samples=len(cost),
             absolute_cost_error=summary([abs(e["error"]) for e in cost]),
@@ -210,7 +240,8 @@ def report(path: pathlib.Path, *, wall_threshold_m2: float=1.e-5,
             additional_us=summary([e["extra_us"] for e in init
                                   if e["extra_us"] is not None])),
         worst_disagreement_epochs=traces[:20],
-        interpretation="QP-predicted safe is NOT independent source/Unity safety certification",
+        interpretation="QP cost versus exact nonlinear SOURCE cost; not measured Unity cost. "
+                       "QP-predicted safe is NOT independent source/Unity safety certification",
     )
 
 def accepted_cost_precision_gate(

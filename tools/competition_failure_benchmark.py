@@ -9,6 +9,7 @@ recorded primals. An unsuccessful witness search never proves infeasibility.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import gzip
 import hashlib
 import json
@@ -201,7 +202,22 @@ def extract(run: Path, output: Path, start: float, stop: float):
     return {"epochs": len(epochs), "roles": roles, "output": str(output)}
 
 
-def replay(bundle: Path, output: Path, tools: Path, iterations: str, repeat: int):
+def solver_environment(parameters: dict, controls_only_trace: bool = False) -> dict:
+    """Frozen numerical settings, with all optional research modes disabled."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("MPC_SOURCE_NLP_")}
+    env.update(MPC_SOURCE_NLP_QP_REGULARIZATION=str(parameters["source_exact_nlp_qp_regularization"]),
+               MPC_SOURCE_NLP_QP_SOFT_WEIGHT=str(parameters["source_exact_nlp_qp_soft_weight"]),
+               MPC_SOURCE_NLP_MIN_CLEARANCE_M=str(float32(parameters["source_exact_nlp_extra_clearance_m"])),
+               MPC_SOURCE_NLP_RECORD_PRIMAL_TRACE="1")
+    if controls_only_trace:
+        env["MPC_SOURCE_NLP_TRACE_CONTROLS_ONLY"] = "1"
+    return env
+
+
+def replay(bundle: Path, output: Path, tools: Path, iterations: str, repeat: int,
+           solver_timeout: float | None = 60, controls_only_trace: bool = False, jobs: int = 1):
+    if jobs < 1:
+        raise ValueError("replay jobs must be positive")
     manifest = read_json(bundle/"manifest.json")
     for name, expected in manifest["bundle_sha256"].items():
         if sha(bundle/name) != expected:
@@ -216,13 +232,8 @@ def replay(bundle: Path, output: Path, tools: Path, iterations: str, repeat: int
     (output/"raceline.csv").write_bytes(gzip.decompress((bundle/"raceline.csv.gz").read_bytes()))
     write_json(output/"params.json", sequence["parameters"])
     params = sequence["parameters"]
-    env = {k: v for k, v in os.environ.items() if not k.startswith("MPC_SOURCE_NLP_")}
-    env.update(MPC_SOURCE_NLP_QP_REGULARIZATION=str(params["source_exact_nlp_qp_regularization"]),
-               MPC_SOURCE_NLP_QP_SOFT_WEIGHT=str(params["source_exact_nlp_qp_soft_weight"]),
-               MPC_SOURCE_NLP_MIN_CLEARANCE_M=str(float32(params["source_exact_nlp_extra_clearance_m"])),
-               MPC_SOURCE_NLP_RECORD_PRIMAL_TRACE="1")
-    reports = []
-    for epoch in sequence["epochs"]:
+    env = solver_environment(params, controls_only_trace)
+    def replay_epoch(epoch):
         d = dict(epoch["diagnostic"])
         if baseline:
             # Optimizer comparisons must use the frozen original problem,
@@ -241,7 +252,7 @@ def replay(bundle: Path, output: Path, tools: Path, iterations: str, repeat: int
         for _ in range(repeat):
             proc = subprocess.run([str(tools/"mpc_source_exact_offline_optimize"), str(case), "-", str(attempts),
                                    str(case/"final.controls")], env=env, check=True,
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, text=True, timeout=solver_timeout)
             samples.append(json.loads(proc.stdout))
         deterministic = all(stable_result(s) == stable_result(samples[0]) for s in samples[1:])
         result = samples[0]
@@ -271,7 +282,7 @@ def replay(bundle: Path, output: Path, tools: Path, iterations: str, repeat: int
         historical_deltas = {"cost": result["final_cost"]-solver["source_exact_nlp_original_cost_final"],
             "clearance_m": result["final_corridor_margin_m"]-solver["source_exact_nlp_original_minimum_corner_margin_m"],
             "elastic_violation": result["final_constraint_violation"]-solver["source_exact_nlp_original_constraint_violation"]}
-        reports.append({"record_index": epoch["record_index"], "progress_m": d["progress_m"],
+        return {"record_index": epoch["record_index"], "progress_m": d["progress_m"],
             "recorded_status": d["status"], "observed_causes": epoch["observed_causes"],
             "oracle_parity": check, "deterministic": deterministic,
             "optimizer_primal_parity": final_parity,
@@ -282,7 +293,11 @@ def replay(bundle: Path, output: Path, tools: Path, iterations: str, repeat: int
             "historical_reconstruction_deltas": historical_deltas,
             "regressed_feasibility": bool(solver["source_exact_nlp_final_source_feasible"] and
                                          not result["source_feasible_final"]),
-            "timing_qualification": "offline iterations; no integrated deadline qualification"})
+            "timing_qualification": "offline iterations; no integrated deadline qualification"}
+    # Cases are independent native processes. Preserve corpus order and all
+    # deterministic-repeat/original-source checks when running concurrently.
+    with ThreadPoolExecutor(max_workers=jobs) as workers:
+        reports = list(workers.map(replay_epoch, sequence["epochs"]))
     report = {"schema": "competition-source-benchmark-result/v1", "epochs": reports,
         "roles": sequence["roles"], "iterations": iterations, "repeat": repeat,
         "passed": all(r["oracle_parity"]["passed"] and r["optimizer_primal_parity"]["passed"] and

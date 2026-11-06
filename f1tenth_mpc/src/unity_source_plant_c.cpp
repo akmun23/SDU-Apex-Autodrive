@@ -165,7 +165,21 @@ extern "C" int unity_source_plant_step_one_sided_directional_c(
     UnitySourcePlantDirectionalCurvatureC *out,
     UnitySourceDirectionalBranchReportC *report)
 {
-    if(!input||!direction_state||!direction_control||!out||!report)
+    if(!report)return 0;
+    const double second_state[UNITY_SOURCE_PLANT_STATE_SIZE]{};
+    return unity_source_plant_step_path_curvature_c(input,duration_s,
+        direction_state,second_state,direction_control,out,report);
+}
+
+extern "C" int unity_source_plant_step_path_curvature_c(
+    const UnitySourcePlantInputC *input,double duration_s,
+    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double second_state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double direction_control[2],
+    UnitySourcePlantDirectionalCurvatureC *out,
+    UnitySourceDirectionalBranchReportC *report)
+{
+    if(!input||!direction_state||!second_state||!direction_control||!out)
         return 0;
     auto physical=from_c(input->state,
         input->suspension_history_initialized);
@@ -174,13 +188,15 @@ extern "C" int unity_source_plant_step_one_sided_directional_c(
     const f1tenth_mpc::UnitySourcePlantInput command{
         input->steering_target_rad,input->throttle_normalized};
     std::array<double,UNITY_SOURCE_PLANT_STATE_SIZE> ds{};
+    std::array<double,UNITY_SOURCE_PLANT_STATE_SIZE> dds{};
     std::array<double,2> du{};
     std::copy_n(direction_state,ds.size(),ds.begin());
+    std::copy_n(second_state,dds.size(),dds.begin());
     std::copy_n(direction_control,du.size(),du.begin());
     f1tenth_mpc::UnitySourcePlantDirectionalCurvature curvature{};
     f1tenth_mpc::UnitySourceDirectionalBranchReport source_report{};
-    if(!f1tenth_mpc::unity_source_plant_step_one_sided_directional(
-        physical,command,duration_s,ds,du,&curvature,&source_report))
+    if(!f1tenth_mpc::unity_source_plant_step_path_curvature(
+        physical,command,duration_s,ds,dds,du,&curvature,report?&source_report:nullptr))
         return 0;
     std::copy(curvature.first_state.begin(),
         curvature.first_state.end(),out->first_state);
@@ -194,6 +210,7 @@ extern "C" int unity_source_plant_step_one_sided_directional_c(
         curvature.first_slip_excess.end(),out->first_slip_excess);
     std::copy(curvature.second_slip_excess.begin(),
         curvature.second_slip_excess.end(),out->second_slip_excess);
+    if(report) {
     report->exact_physical_switch_ties=source_report.exact_physical_switch_ties;
     report->derivative_selected_switch_ties=
         source_report.derivative_selected_switch_ties;
@@ -204,6 +221,7 @@ extern "C" int unity_source_plant_step_one_sided_directional_c(
         source_report.discrete_substep_schedule_switches;
     report->valid_one_sided_directional=
         source_report.valid_one_sided_directional;
+    }
     return 1;
 }
 
