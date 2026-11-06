@@ -20,6 +20,27 @@ if [[ "${SDU_APEX_BUILD_MOUNTED_SOURCE:-0}" == "1" ]]; then
       exit 2
       ;;
   esac
+  source_mpc_lto=false
+  case "${SDU_APEX_MPC_LTO:-false}" in
+    true)
+      echo "MPC link-time source optimization enabled (same source model)"
+      source_mpc_lto=true
+      ;;
+    false) ;;
+    *) echo "SDU_APEX_MPC_LTO must be true or false" >&2; exit 2 ;;
+  esac
+  parallel_source_sensitivities=false
+  case "${SDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES:-false}" in
+    true)
+      echo "MPC exact-source sensitivity batch parallelism enabled"
+      parallel_source_sensitivities=true
+      ;;
+    false) ;;
+    *)
+      echo "SDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES must be true or false" >&2
+      exit 2
+      ;;
+  esac
   # The reusable dev image may carry generated artifacts from an older
   # sdu_apex_autodrive source tree. In particular, setuptools can retain
   # deleted config/launch files in SOURCES.txt and then fail while copying
@@ -32,12 +53,18 @@ if [[ "${SDU_APEX_BUILD_MOUNTED_SOURCE:-0}" == "1" ]]; then
     /workspace/install/share/colcon-core/packages/sdu_apex_autodrive \
     /workspace/install/share/sdu_apex_autodrive
   cd /workspace
+  # Discover only the five current runtime packages. Host analysis/vendor
+  # trees can contain setup.py files and are never ROS package candidates.
   MAKEFLAGS=-j4 CMAKE_BUILD_PARALLEL_LEVEL=4 colcon build \
-    --packages-up-to sdu_apex_autodrive f1tenth_mpc \
+    --base-paths src/sdu_apex_autodrive src/f1tenth_mpc \
+      src/f1tenth_localization src/sdu_apex_msgs src/f1tenth_planning \
+    --packages-up-to sdu_apex_autodrive f1tenth_mpc f1tenth_localization \
     --parallel-workers 4 \
     --merge-install --symlink-install \
     --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
-      "-DSDU_APEX_MPC_NATIVE_TUNING=${native_tuning}"
+      "-DSDU_APEX_MPC_NATIVE_TUNING=${native_tuning}" \
+      "-DSDU_APEX_MPC_LTO=${source_mpc_lto}" \
+      "-DSDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES=${parallel_source_sensitivities}"
   source /workspace/install/setup.bash
 else
   source /workspace/install/setup.bash
@@ -97,5 +124,21 @@ if [[ -n "${SDU_APEX_ODOM_PARAMETER_OVERLAY:-}" ]]; then
   launch_args+=(
     "odom_parameter_overlay:=${SDU_APEX_ODOM_PARAMETER_OVERLAY}"
   )
+fi
+if [[ -n "${SDU_APEX_AMCL_PARAMETER_OVERLAY:-}" ]]; then
+  launch_args+=("amcl_parameter_overlay:=${SDU_APEX_AMCL_PARAMETER_OVERLAY}")
+fi
+# Development-only opt-in process affinity. Docker's cpuset argument may be
+# ignored by some container relays; taskset here pins the actual ROS launch
+# process and all child worker threads, including the OpenMP Jacobian team.
+# Leave this unset for the normal (portable) controller.
+if [[ -n "${SDU_APEX_MPC_RUNTIME_AFFINITY_CPUS:-}" ]]; then
+  if [[ ! "${SDU_APEX_MPC_RUNTIME_AFFINITY_CPUS}" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then
+    echo 'Invalid SDU_APEX_MPC_RUNTIME_AFFINITY_CPUS' >&2
+    exit 2
+  fi
+  echo "Running ROS on CPUs ${SDU_APEX_MPC_RUNTIME_AFFINITY_CPUS}"
+  exec taskset --cpu-list "${SDU_APEX_MPC_RUNTIME_AFFINITY_CPUS}" \
+    ros2 launch sdu_apex_autodrive controller.launch.py "${launch_args[@]}"
 fi
 exec ros2 launch sdu_apex_autodrive controller.launch.py "${launch_args[@]}"

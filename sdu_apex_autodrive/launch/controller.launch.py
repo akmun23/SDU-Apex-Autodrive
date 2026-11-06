@@ -18,13 +18,12 @@ from launch.event_handlers import OnProcessStart
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import ComposableNodeContainer, LifecycleNode, Node
 from launch_ros.descriptions import ComposableNode
-from launch_ros.parameter_descriptions import ParameterValue
 
 
 MAP_NAME = "autodrive_practice_20260924_b.yaml"
 RACELINE_PATH = os.path.join(
     "autodrive_practice_20260924_b",
-    "autodrive_practice_20260924_b_mintime_raceline.csv")
+    "source_command_4p800.csv")
 
 
 def _bool(value: str) -> bool:
@@ -34,6 +33,31 @@ def _bool(value: str) -> bool:
     if value in ("0", "false", "no", "off"):
         return False
     raise RuntimeError(f"expected boolean, got {value!r}")
+
+
+def _mpc_parameter_files(mpc_share: str, map_path: str, overlay: str) -> list[str]:
+    # Mutually exclusive profiles: never layer competition weights beneath
+    # the frozen, five-race-qualified practice configuration.
+    profile = ('mpc_practice.yaml' if os.path.basename(map_path) == MAP_NAME
+               else 'mpc_competition.yaml')
+    parameters = [os.path.join(mpc_share, 'config', profile)]
+    if overlay:
+        parameters.append(overlay)  # Explicit experimental A/B only.
+    return parameters
+
+
+def _optional_controller_speed(value: str) -> dict[str, float]:
+    # Launch CLI speed is an explicit override. If omitted, keep YAML's value.
+    requested = value.strip()
+    if not requested:
+        return {}
+    try:
+        speed = float(requested)
+    except ValueError as exc:
+        raise RuntimeError("controller_max_speed must be numeric") from exc
+    if not math.isfinite(speed) or not 0.0 < speed <= 16.0:
+        raise RuntimeError("controller_max_speed must be finite and in (0,16]")
+    return {"max_speed_mps": speed}
 
 
 def _reject_existing_runtime_nodes(expected_names: set[str]) -> None:
@@ -74,6 +98,8 @@ def _setup(context):
         raise RuntimeError("the selected map/raceline pair is incomplete")
 
     overlays = {
+        "amcl_parameter_overlay": LaunchConfiguration(
+            "amcl_parameter_overlay").perform(context).strip(),
         "mpc_parameter_overlay": LaunchConfiguration(
             "mpc_parameter_overlay").perform(context).strip(),
         "odom_parameter_overlay": LaunchConfiguration(
@@ -111,7 +137,8 @@ def _setup(context):
 
     bridge = Node(
         package="sdu_apex_autodrive", executable="autodrive_bridge_40hz",
-        name="autodrive_bridge", output="screen", emulate_tty=True)
+        name="autodrive_bridge", output="screen", emulate_tty=True,
+        additional_env={"SDU_APEX_DEV_PACKET_DIAGNOSTICS_ENABLED": "1"})
     odometry = Node(
         package="f1tenth_localization", executable="sensor_odometry_node",
         name="sensor_odometry", output="screen",
@@ -137,6 +164,8 @@ def _setup(context):
         name="gpu_amcl_cpp", output="screen",
         parameters=[
             os.path.join(localization, "config", "gpu_amcl_cpp_params.yaml"),
+            *([overlays["amcl_parameter_overlay"]]
+              if overlays["amcl_parameter_overlay"] else []),
             {
                 "global_heading_trajectory_file": trajectory,
                 "odom_topic": "/ekf_odom",
@@ -146,9 +175,11 @@ def _setup(context):
             },
         ], remappings=[("/tf", "/sdu/tf"), ("/tf_static", "/sdu/tf_static")])
 
-    mpc_parameters = [os.path.join(mpc, "config", "mpc_competition.yaml")]
-    if overlays["mpc_parameter_overlay"]:
-        mpc_parameters.append(overlays["mpc_parameter_overlay"])
+    mpc_parameters = _mpc_parameter_files(mpc, map_path, overlays['mpc_parameter_overlay'])
+    # An explicit CLI override has higher precedence than YAML, but the
+    # implicit default must NOT silently replace max_speed_mps from an overlay.
+    mpc_speed_override = _optional_controller_speed(
+        LaunchConfiguration("controller_max_speed").perform(context))
     diagnostics = _bool(
         LaunchConfiguration("mpc_publish_diagnostics").perform(context))
     mpc_node = ComposableNode(
@@ -156,8 +187,7 @@ def _setup(context):
         name="mpc_controller_node",
         parameters=mpc_parameters + [{
             "trajectory_file": trajectory,
-            "max_speed_mps": ParameterValue(
-                LaunchConfiguration("controller_max_speed"), value_type=float),
+            **mpc_speed_override,
             "publish_diagnostics": diagnostics,
             "diagnostics_topic": "/mpc/diagnostics",
         }], remappings=[
@@ -172,6 +202,11 @@ def _setup(context):
     actuator_parameters.append({
         "development_timing_topic":
             "/autodrive/roboracer_1/development_actuator_timing"})
+    if csv_command_file and not enable_mpc:
+        # The development path follower uses Unity's q=0 full-brake mode.
+        # MPC remains bounded to positive drive throttle and competition uses
+        # the default actuator minimum of 0.001.
+        actuator_parameters.append({"minimum_throttle_normalized": 0.0})
     if overlays["actuator_parameter_overlay"]:
         actuator_parameters.append(overlays["actuator_parameter_overlay"])
     actuator = Node(
@@ -181,15 +216,19 @@ def _setup(context):
 
     actions = [
         SetEnvironmentVariable("AUTODRIVE_BRIDGE_RATE_HZ", "40"),
-        bridge, odometry, ekf, map_server, map_lifecycle, amcl, actuator,
+        LogInfo(msg='MPC parameter files (last overrides first): '+', '.join(mpc_parameters)),
+        bridge, odometry, ekf, map_server, map_lifecycle,
     ]
     if enable_mpc:
+        # Register before adding AMCL to the launch graph; otherwise AMCL can
+        # start before this handler is active and the delayed MPC never starts.
         actions.append(RegisterEventHandler(OnProcessStart(
             target_action=amcl,
             on_start=[TimerAction(period=start_delay, actions=[
                 LogInfo(msg=f"Starting MPC after {start_delay:.2f}s AMCL warm-up"),
                 controller,
             ])])))
+    actions.extend([amcl, actuator])
     if csv_command_file:
         actions.append(Node(
             package="sdu_apex_autodrive", executable="csv_command_replay",
@@ -222,11 +261,12 @@ def generate_launch_description():
         DeclareLaunchArgument("csv_path_repeats", default_value="3"),
         DeclareLaunchArgument("csv_lookahead_speed_gain_s", default_value="0.12"),
         DeclareLaunchArgument("csv_native_control_delay_s", default_value="0.05"),
-        DeclareLaunchArgument("controller_max_speed", default_value="16.0"),
+        DeclareLaunchArgument("controller_max_speed", default_value=""),
         DeclareLaunchArgument("mpc_publish_diagnostics", default_value="false"),
         DeclareLaunchArgument("mpc_start_delay_sec", default_value="2.0"),
         DeclareLaunchArgument("mpc_parameter_overlay", default_value=""),
         DeclareLaunchArgument("actuator_parameter_overlay", default_value=""),
         DeclareLaunchArgument("odom_parameter_overlay", default_value=""),
+        DeclareLaunchArgument("amcl_parameter_overlay", default_value=""),
         OpaqueFunction(function=_setup),
     ])

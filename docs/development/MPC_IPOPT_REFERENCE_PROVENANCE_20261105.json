@@ -1,0 +1,16 @@
+{
+  "casadi_version": "3.7.2",
+  "ipopt_version": "3.14.11",
+  "mumps_version": "5.4.1",
+  "numerical_library_sha256": {
+    "libcasadi.so": "106e2af1cabc576cdc86db3d1e844f0be6ed3a2beeb45a85565039a0253b010f",
+    "libcasadi_nlpsol_ipopt.so": "d3f6edba9f238e41c0bf73b363d408fdddfa74d217970832b77c2d278196c18d",
+    "libcoinmumps.so": "d334646f4f00745fc543013e8928fe9a71193089abb773bae91717b8a9d4b75a",
+    "libipopt.so": "2cbc643d9d2717cb084321394cc886fb67d4dbcddd3e88a36bee9f4f02d7cc97"
+  },
+  "python_source_sha256": {
+    "competition_failure_benchmark.py": "88d105f8ad5d6a391d8c2848978cc3448b2ba22480595307d4f75182e54079e9",
+    "qualify_mpc_source_phase1.py": "a27a82bf65860911216da19cfd2bd1b8cc72b23233b87f970203b71b4492eab6",
+    "reference_mpc_source_ipopt.py": "991d57a2d10fc5189346345dd1a0f923983ab008eee75a7a002c4674fc26d0a9"
+  }
+}

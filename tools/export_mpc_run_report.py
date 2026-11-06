@@ -9,6 +9,7 @@ at which a command was applied from arrival time.
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import hashlib
 import json
@@ -21,14 +22,20 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-import evaluate_mpc_bag as evaluator
+try:
+    from tools import evaluate_mpc_bag as evaluator
+except ModuleNotFoundError:
+    # Preserve the established `python tools/export_mpc_run_report.py ...`
+    # invocation where the script directory, rather than the repo root, is
+    # sys.path[0].
+    import evaluate_mpc_bag as evaluator
 
 
-REPORT_SCHEMA = "sdu_apex_mpc_run_report/v3"
+REPORT_SCHEMA = "sdu_apex_mpc_run_report/v4"
 COMMAND_FLOAT_MATCH_TOL = 5.0e-8
 ACCEPTED_STATUSES = {
     "accepted_optimal", "accepted_feasible", "accepted_line_search",
-    "accepted_candidate_prefix", "accepted_prior_plan",
+    "accepted_candidate_prefix", "accepted_prior_plan", "accepted_viability_recovery",
 }
 
 
@@ -202,8 +209,38 @@ def _first_unpublished_rejection_time(
 
 def _distinct_lap_times(
     rows: list[dict[str, Any]], cutoff_s: float | None = None,
+    lap_count_rows: list[dict[str, Any]] | None = None,
 ) -> list[float]:
     """Return lap-completion events, not one repeated topic sample per tick."""
+    if lap_count_rows:
+        # Consecutive laps can have exactly equal quantized durations. A value
+        # change is not a completion event: use the independent lap counter.
+        # These headerless topics are separate DDS publications. Select the
+        # first last-lap sample at/after the counter change (at most 3 ticks),
+        # never an old duration from the preceding lap or after a fault cutoff.
+        samples = sorted((float(row["bag_time"]), value)
+                         for row in rows
+                         if (value := _finite_number(row.get("value"))) is not None
+                         and value > 0.0 and "bag_time" in row
+                         and (cutoff_s is None or row["bag_time"] <= cutoff_s))
+        times = [sample[0] for sample in samples]
+        result = []
+        previous_count = None
+        for row in sorted(lap_count_rows,
+                          key=lambda item: float(item.get("bag_time", 0.0))):
+            stamp = _finite_number(row.get("bag_time"))
+            count = _finite_number(row.get("value"))
+            if stamp is None or count is None or count < 0:
+                continue
+            if cutoff_s is not None and stamp > cutoff_s:
+                break
+            if previous_count is not None and count > previous_count:
+                index = bisect.bisect_left(times, stamp)
+                if index < len(samples) and times[index] - stamp <= 0.075:
+                    result.append(samples[index][1])
+            previous_count = count
+        return result
+
     result: list[float] = []
     previous: float | None = None
     for row in sorted(rows, key=lambda item: float(item.get("bag_time", 0.0))):
@@ -216,6 +253,53 @@ def _distinct_lap_times(
         if previous is None or abs(value - previous) > 1.0e-4:
             result.append(value)
         previous = value
+    return result
+
+
+def _per_lap_tracking(
+    lap_rows: list[dict[str, Any]], cycles: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Per-official-lap MPC diagnostics delimited by ROS bag lap-count epochs.
+
+    Uses the same bag receipt clock for lap counter and MPC diagnostics, not
+    inferred Unity applied-command epochs. The lap duration is taken separately
+    from the official last_lap_time publication, not these receipt deltas.
+    """
+    transitions: list[tuple[int, float]] = []
+    last_count = None
+    for row in sorted(lap_rows, key=lambda r: r.get("bag_time", 0.0)):
+        count = _finite_number(row.get("value"))
+        epoch = _finite_number(row.get("bag_time"))
+        if count is None or epoch is None or count < 0:
+            continue
+        count = int(count)
+        if last_count is None or count > last_count:
+            transitions.append((count, epoch))
+            last_count = count
+    result: list[dict[str, Any]] = []
+    if not transitions:
+        return result
+    # A lap starts at the first observed baseline count; each +1 is one
+    # observed completion. Missing counter transitions are never invented.
+    for (previous, started), (current, ended) in zip(transitions, transitions[1:]):
+        if current != previous + 1 or ended <= started:
+            continue
+        sample = [row for row in cycles if row.get("score_eligible") and
+                  started <= (row.get("bag_receipt_epoch_s") or -1) < ended]
+        cross = [float(row["e_y_m"]) for row in sample if row.get("e_y_m") is not None]
+        heading = [float(row["e_psi_rad"]) for row in sample if row.get("e_psi_rad") is not None]
+        speed = [float(row["speed_error_mps"]) for row in sample if row.get("speed_error_mps") is not None]
+        gate = [float(row["callback_to_gate_ms"]) for row in sample if row.get("callback_to_gate_ms") is not None]
+        result.append(dict(official_lap_index=current - transitions[0][0],
+                           lap_counter_value=current,
+                           bag_receipt_start_s=started, bag_receipt_end_s=ended,
+                           diagnostic_cycles=len(sample),
+                           cross_track_rmse_m=_rmse(cross),
+                           cross_track_max_abs_m=max(map(abs, cross), default=None),
+                           heading_rmse_rad=_rmse(heading),
+                           speed_error_rmse_mps=_rmse(speed),
+                           callback_to_gate_ms=_distribution(gate),
+                           status_counts=dict(Counter(row.get("status") for row in sample))))
     return result
 
 
@@ -362,6 +446,18 @@ def _cycle_row(
     previous_diag = previous_diag if isinstance(previous_diag, dict) else {}
     async_publisher = payload.get("diagnostic_async_publisher")
     async_publisher = async_publisher if isinstance(async_publisher, dict) else {}
+    candidate_prefix = payload.get("candidate_prefix_revalidation")
+    candidate_prefix = candidate_prefix if isinstance(candidate_prefix, dict) else {}
+    prior_plan = payload.get("prior_plan_revalidation")
+    prior_plan = prior_plan if isinstance(prior_plan, dict) else {}
+    full_prior_suffix = payload.get("full_prior_plan_suffix_revalidation")
+    full_prior_suffix = (full_prior_suffix
+                         if isinstance(full_prior_suffix, dict) else {})
+    quality_prefix = payload.get("quality_aware_prefix_selection")
+    quality_prefix = quality_prefix if isinstance(quality_prefix, dict) else {}
+    quality_candidate_controls = quality_prefix.get(
+        "candidate_prefix_controls")
+    quality_prior_controls = quality_prefix.get("prior_prefix_controls")
     return {
         "bag_receipt_epoch_s": bag_receipt_epoch_s,
         "bag_time_from_start_s": bag_receipt_epoch_s - bag_time_origin_epoch_s,
@@ -386,6 +482,17 @@ def _cycle_row(
             _finite_number(published_throttle) is not None else None),
         "actual_unity_effect_epoch": None,
         "status": payload.get("status"),
+        "cycle_reason": payload.get("reason"),
+        "input_failure_reason": payload.get("input_failure_reason"),
+        "nominal_build_failure_stage": payload.get(
+            "nominal_build_failure_stage"),
+        "nominal_build_failure_constraint": payload.get(
+            "nominal_build_failure_constraint"),
+        "nominal_build_failure_index": payload.get(
+            "nominal_build_failure_index"),
+        "nonlinear_failure_reason": payload.get("nonlinear_failure_reason"),
+        "nonlinear_failure_stage": payload.get("nonlinear_failure_stage"),
+        "nonlinear_failure_detail": payload.get("nonlinear_failure"),
         "action_source": payload.get("action_source"),
         "command_published": payload.get("command_published"),
         "solver_skipped_for_deadline": payload.get(
@@ -430,6 +537,24 @@ def _cycle_row(
             "converged" if solver.get("admm_status") == 0 else
             "not_run_or_unknown")),
         "iterations": solver.get("iterations"),
+        "sqp_iterations_attempted": solver.get("sqp_iterations_attempted"),
+        "sqp_iterations_completed": solver.get("sqp_iterations_completed"),
+        "sqp_iterations_accepted": solver.get("sqp_iterations_accepted"),
+        "line_search_selected_alpha": _finite_number(solver.get("line_search_selected_alpha")),
+        "line_search_merit_triggered": solver.get("line_search_merit_triggered"),
+        "line_search_trials": solver.get("line_search_trials"),
+        "line_search_us": _finite_number(solver.get("line_search_us")),
+        "refinement_full_horizon_selected_pass": solver.get(
+            "refinement_full_horizon_selected_pass"),
+        "refinement_nominal_build_us": _finite_number(
+            solver.get("refinement_nominal_build_us")),
+        "refinement_prefix_selected_pass": solver.get("refinement_prefix_selected_pass"),
+        "refinement_first_prefix_objective": _finite_number(
+            solver.get("refinement_first_prefix_objective")),
+        "refinement_second_prefix_objective": _finite_number(
+            solver.get("refinement_second_prefix_objective")),
+        "refinement_prefix_validation_us": _finite_number(
+            solver.get("refinement_prefix_validation_us")),
         "primal_residual": _finite_number(solver.get("primal_residual")),
         "dual_residual": _finite_number(solver.get("dual_residual")),
         "state_primal_residual": _finite_number(
@@ -487,10 +612,65 @@ def _cycle_row(
         "nominal_vs_candidate_right_bound_error_max_m": _finite_number(
             payload.get("nominal_vs_candidate_right_bound_error_max_m")),
         "full_horizon_failure_stage": payload.get("nonlinear_failure_stage"),
-        "prefix_validation_horizon": payload.get(
-            "candidate_prefix_revalidation", {}).get("validation_horizon")
-            if isinstance(payload.get("candidate_prefix_revalidation"), dict)
-            else None,
+        "candidate_prefix_validation_attempted": candidate_prefix.get(
+            "attempted"),
+        "candidate_prefix_exact_valid": candidate_prefix.get("exact_valid"),
+        "candidate_prefix_failure_stage": candidate_prefix.get(
+            "failure_stage"),
+        "candidate_prefix_validation_status": candidate_prefix.get(
+            "validation_status"),
+        "candidate_prefix_validation_horizon": candidate_prefix.get(
+            "validation_horizon"),
+        "candidate_prefix_timing_rejected": candidate_prefix.get(
+            "timing_rejected"),
+        "candidate_prefix_solver_converged": candidate_prefix.get(
+            "solver_converged"),
+        "candidate_prefix_solver_iteration_limited": candidate_prefix.get(
+            "solver_iteration_limited"),
+        "prior_plan_validation_attempted": prior_plan.get("attempted"),
+        "prior_plan_exact_valid": prior_plan.get("exact_valid"),
+        "prior_plan_failure_stage": prior_plan.get("failure_stage"),
+        "prior_plan_validation_status": prior_plan.get("validation_status"),
+        "prior_plan_validation_horizon": prior_plan.get(
+            "validation_horizon"),
+        "prior_plan_timing_rejected": prior_plan.get("timing_rejected"),
+        "full_prior_suffix_attempted": full_prior_suffix.get("attempted"),
+        "full_prior_suffix_exact_valid": full_prior_suffix.get("exact_valid"),
+        "full_prior_suffix_failure_stage": full_prior_suffix.get(
+            "failure_stage"),
+        "full_prior_suffix_validation_status": full_prior_suffix.get(
+            "validation_status"),
+        "full_prior_suffix_validation_horizon": full_prior_suffix.get(
+            "validation_horizon"),
+        "full_prior_suffix_timing_rejected": full_prior_suffix.get(
+            "timing_rejected"),
+        "full_prior_suffix_validation_us": _finite_number(
+            full_prior_suffix.get("validation_us")),
+        "quality_prefix_policy_enabled": payload.get(
+            "quality_aware_prefix_selection_on_rejection"),
+        "quality_prefix_attempted": quality_prefix.get("attempted"),
+        "quality_prefix_choice": quality_prefix.get("choice"),
+        "quality_candidate_prefix_exact_valid": quality_prefix.get(
+            "candidate_valid"),
+        "quality_prior_prefix_exact_valid": quality_prefix.get("prior_valid"),
+        "quality_candidate_prefix_objective": _finite_number(
+            quality_prefix.get("candidate_objective")),
+        "quality_prior_prefix_objective": _finite_number(
+            quality_prefix.get("prior_objective")),
+        "quality_candidate_prefix_min_slack_m": _finite_number(
+            quality_prefix.get("candidate_minimum_corridor_slack_m")),
+        "quality_prior_prefix_min_slack_m": _finite_number(
+            quality_prefix.get("prior_minimum_corridor_slack_m")),
+        "quality_prefix_validation_us": _finite_number(
+            quality_prefix.get("validation_us")),
+        "quality_candidate_prefix_controls_json": (
+            json.dumps(quality_candidate_controls, separators=(",", ":"))
+            if isinstance(quality_candidate_controls, list) else None),
+        "quality_prior_prefix_controls_json": (
+            json.dumps(quality_prior_controls, separators=(",", ":"))
+            if isinstance(quality_prior_controls, list) else None),
+        "prefix_validation_horizon": candidate_prefix.get(
+            "validation_horizon"),
         "corridor_slack_m": _finite_number(
             solver.get("minimum_predicted_corridor_slack_m",
                        payload.get("minimum_predicted_corridor_slack_m"))),
@@ -498,6 +678,8 @@ def _cycle_row(
         "callback_to_gate_ms": gate,
         "callback_to_publish_return_ms": _finite_number(
             payload.get("end_to_end_control_ms")),
+        "middleware_publish_us": _finite_number(payload.get("middleware_publish_us")),
+        "command_history_us": _finite_number(payload.get("command_history_us")),
         "budget_ms": budget,
         "publication_gate_budget_violation": gate_violation,
         "prior_plan_published_while_over_budget": (
@@ -621,7 +803,7 @@ def _progress_bins(
                                            for row in group)),
             "full_horizon_exact_accepts": sum(
                 row.get("status") in {"accepted_optimal", "accepted_feasible",
-                                      "accepted_line_search"} for row in group),
+                                      "accepted_line_search", "accepted_viability_recovery"} for row in group),
             "short_prefix_accepts": sum(
                 row.get("status") == "accepted_candidate_prefix" for row in group),
             "gate_ms_p50": evaluator.percentile(gates, 0.50) if gates else None,
@@ -757,6 +939,24 @@ def make_report(
     scored = [row for row in cycles if row["score_eligible"]]
 
     status_counts = Counter(row.get("status", "unknown") for row in scored)
+    cycle_reason_counts = Counter(
+        str(row["cycle_reason"]) for row in scored
+        if isinstance(row.get("cycle_reason"), str) and row["cycle_reason"])
+    nonlinear_failure_counts = Counter(
+        str(row["nonlinear_failure_reason"]) for row in scored
+        if isinstance(row.get("nonlinear_failure_reason"), str) and
+        row["nonlinear_failure_reason"] not in ("", "none", "not_applicable"))
+    candidate_prefix_failure_stage_counts = Counter(
+        str(row["candidate_prefix_failure_stage"]) for row in scored
+        if row.get("candidate_prefix_validation_attempted") is True and
+        row.get("candidate_prefix_exact_valid") is False and
+        isinstance(row.get("candidate_prefix_failure_stage"), (int, float)) and
+        row["candidate_prefix_failure_stage"] >= 0)
+    quality_prefix_rows = [row for row in scored
+                           if row.get("quality_prefix_attempted") is True]
+    quality_prefix_choice_counts = Counter(
+        str(row.get("quality_prefix_choice") or "unknown")
+        for row in quality_prefix_rows)
     gate_values = [row["callback_to_gate_ms"] for row in scored
                    if row.get("callback_to_gate_ms") is not None]
     errors = {
@@ -785,7 +985,8 @@ def make_report(
                 if row.get("callback_to_gate_ms") is not None]),
         }
     raw_lap_time_samples = data.get(evaluator.LAST_LAP, [])
-    lap_times = _distinct_lap_times(raw_lap_time_samples, cutoff)
+    lap_times = _distinct_lap_times(
+        raw_lap_time_samples, cutoff, data.get(evaluator.LAP))
     lap_counts = [_finite_number(row.get("value"))
                   for row in data.get(evaluator.LAP, [])
                   if cutoff is None or float(row.get("bag_time", 0.0)) <= cutoff]
@@ -815,18 +1016,40 @@ def make_report(
             if controller_fault_time is not None else None),
         "cycles_scored": len(scored),
         "status_counts": dict(status_counts),
+        "cycle_reason_counts": dict(cycle_reason_counts),
+        "nonlinear_failure_reason_counts": dict(nonlinear_failure_counts),
+        "candidate_prefix_failure_stage_counts": dict(
+            candidate_prefix_failure_stage_counts),
+        "quality_prefix_policy_enabled": any(
+            row.get("quality_prefix_policy_enabled") is True for row in scored),
+        "quality_prefix_attempt_count": len(quality_prefix_rows),
+        "quality_prefix_choice_counts": dict(quality_prefix_choice_counts),
+        "quality_prefix_both_exact_valid_count": sum(
+            row.get("quality_candidate_prefix_exact_valid") is True and
+            row.get("quality_prior_prefix_exact_valid") is True
+            for row in quality_prefix_rows),
+        "quality_prefix_validation_us": _distribution([
+            float(row["quality_prefix_validation_us"])
+            for row in quality_prefix_rows
+            if row.get("quality_prefix_validation_us") is not None]),
         "status_percentages": {
             status: 100.0 * count / len(scored)
             for status, count in status_counts.items()} if scored else {},
         "full_horizon_exact_accepts": sum(
             row.get("status") in {"accepted_optimal", "accepted_feasible",
-                                  "accepted_line_search"} for row in scored),
+                                  "accepted_line_search", "accepted_viability_recovery"} for row in scored),
         "short_prefix_accepts": sum(
             row.get("status") == "accepted_candidate_prefix" for row in scored),
         "prior_plan_accepts": sum(
             row.get("status") == "accepted_prior_plan" for row in scored),
         "published_commands": sum(row.get("command_published") is True
                                    for row in scored),
+        "middleware_publish_us": _distribution([
+            row["middleware_publish_us"] for row in scored
+            if row.get("middleware_publish_us") is not None]),
+        "command_history_us": _distribution([
+            row["command_history_us"] for row in scored
+            if row.get("command_history_us") is not None]),
         "gate_ms": ({
             "count": len(gate_values),
             "p50": evaluator.percentile(gate_values, 0.50),
@@ -997,6 +1220,9 @@ def make_report(
         "lap_count_max": max(lap_counts) if lap_counts else None,
         "lap_time_topic_samples": len(raw_lap_time_samples),
         "recorded_lap_times_s": lap_times,
+        "lap_time_event_source": ("lap_counter_transition"
+                                  if data.get(evaluator.LAP)
+                                  else "duration_value_change_only"),
         "recorded_lap_time_s": _distribution(lap_times),
     }
     report = {
@@ -1004,6 +1230,7 @@ def make_report(
         "experiment_regime": experiment_regime,
         "metadata": build_metadata(root, bag, trajectory, supplied_metadata),
         "summary": summary,
+        "per_official_lap_tracking": _per_lap_tracking(data.get(evaluator.LAP, []), cycles),
         "progress_bin_width_m": progress_bin_m,
         "per_progress_bin": _progress_bins(scored, progress_bin_m),
         "cycle_detail_format": "companion CSV; one row per MPC diagnostic cycle",
@@ -1031,7 +1258,11 @@ def write_cycle_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "published_steering_message_matches_candidate",
         "published_throttle_message_matches_candidate",
         "scheduled_bridge_request_sequence",
-        "actual_unity_effect_epoch", "status", "action_source", "command_published",
+        "actual_unity_effect_epoch", "status", "cycle_reason",
+        "input_failure_reason", "nominal_build_failure_stage",
+        "nominal_build_failure_constraint", "nominal_build_failure_index",
+        "nonlinear_failure_reason", "nonlinear_failure_stage",
+        "nonlinear_failure_detail", "action_source", "command_published",
         "solver_skipped_for_deadline",
         "progress_m", "e_y_m", "e_psi_rad", "u_mps", "v_mps", "r_radps",
         "actual_steering_rad", "target_u_mps", "curvature_inv_m",
@@ -1041,11 +1272,43 @@ def write_cycle_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "steering_command_delta_rad", "throttle_command_delta",
         "candidate_prefix_chain_length", "prior_plan_chain_length", "solver_status",
         "solver_stop_reason", "iterations", "primal_residual", "dual_residual",
+        "sqp_iterations_attempted", "sqp_iterations_completed", "sqp_iterations_accepted",
+        "line_search_selected_alpha", "line_search_merit_triggered",
+        "line_search_trials", "line_search_us",
+        "refinement_full_horizon_selected_pass", "refinement_nominal_build_us",
+        "refinement_prefix_selected_pass", "refinement_first_prefix_objective",
+        "refinement_second_prefix_objective", "refinement_prefix_validation_us",
         "state_primal_residual", "state_primal_stage", "state_primal_coordinate",
         "state_dual_residual", "state_dual_stage", "state_dual_coordinate",
         "input_primal_residual", "input_primal_stage", "input_primal_coordinate",
         "input_dual_residual", "input_dual_stage", "input_dual_coordinate",
-        "objective", "full_horizon_failure_stage", "prefix_validation_horizon",
+        "objective", "full_horizon_failure_stage",
+        "candidate_prefix_validation_attempted",
+        "candidate_prefix_exact_valid", "candidate_prefix_failure_stage",
+        "candidate_prefix_validation_status",
+        "candidate_prefix_validation_horizon",
+        "candidate_prefix_timing_rejected",
+        "candidate_prefix_solver_converged",
+        "candidate_prefix_solver_iteration_limited",
+        "prior_plan_validation_attempted", "prior_plan_exact_valid",
+        "prior_plan_failure_stage", "prior_plan_validation_status",
+        "prior_plan_validation_horizon", "prior_plan_timing_rejected",
+        "full_prior_suffix_attempted", "full_prior_suffix_exact_valid",
+        "full_prior_suffix_failure_stage",
+        "full_prior_suffix_validation_status",
+        "full_prior_suffix_validation_horizon",
+        "full_prior_suffix_timing_rejected",
+        "full_prior_suffix_validation_us",
+        "quality_prefix_policy_enabled", "quality_prefix_attempted",
+        "quality_prefix_choice", "quality_candidate_prefix_exact_valid",
+        "quality_prior_prefix_exact_valid",
+        "quality_candidate_prefix_objective",
+        "quality_prior_prefix_objective",
+        "quality_candidate_prefix_min_slack_m",
+        "quality_prior_prefix_min_slack_m", "quality_prefix_validation_us",
+        "quality_candidate_prefix_controls_json",
+        "quality_prior_prefix_controls_json",
+        "prefix_validation_horizon",
         "nominal_candidate_control_delta_inf", "rho_change_count", "rho_start",
         "rho_final", "rho_u_start", "rho_u_final", "factorization_count",
         "regularization_count", "max_regularization",
@@ -1054,7 +1317,8 @@ def write_cycle_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "nominal_vs_candidate_left_bound_error_max_m",
         "nominal_vs_candidate_right_bound_error_max_m",
         "corridor_slack_m", "source_age_s", "callback_to_gate_ms",
-        "callback_to_publish_return_ms", "budget_ms", "publication_gate_budget_violation",
+        "callback_to_publish_return_ms", "middleware_publish_us", "command_history_us",
+        "budget_ms", "publication_gate_budget_violation",
         "prior_plan_published_while_over_budget", "command_start_lateness_ms",
         "qp_build_ms", "node_solve_ms", "nominal_build_ms", "jacobian_wall_ms",
         "jacobian_worker_cpu_sum_ms", "admm_ms", "nonlinear_validation_ms",
@@ -1099,6 +1363,64 @@ def write_cycle_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             })
 
 
+def write_diagnostic_sequence_sidecar(
+        path: Path, rows: list[dict[str, Any]]) -> int:
+    """Preserve complete decoded MPC diagnostics for offline branch replay.
+
+    The cycle CSV is intentionally a compact scalar summary. This JSONL keeps
+    the full per-cycle payload, including candidate/nominal controls and any
+    certified-plan snapshot, so later analysis does not reconstruct a missing
+    branch from published commands.
+    """
+    ordered = sorted(rows, key=lambda row: float(row.get("bag_time", 0.0)))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as stream:
+        for row in ordered:
+            payload = row.get("json")
+            if not isinstance(payload, dict) or "_decode_error" in payload:
+                continue
+            record = {
+                "bag_receipt_epoch_s": float(row.get("bag_time", 0.0)),
+                "source_stamp_ns": payload.get("source_stamp_ns"),
+                "control_ros_stamp_ns": payload.get("control_ros_stamp_ns"),
+                "candidate_command_stamp_ns": payload.get(
+                    "candidate_command_stamp_ns"),
+                "issued_command_stamp_ns": payload.get("issued_command_stamp_ns"),
+                "status": payload.get("status"),
+                "action_source": payload.get("action_source"),
+                "command_published": payload.get("command_published"),
+                "payload": payload,
+            }
+            stream.write(json.dumps(record, separators=(",", ":"),
+                                  allow_nan=False) + "\n")
+    return sum(
+        isinstance(row.get("json"), dict) and
+        "_decode_error" not in row["json"] for row in ordered)
+
+
+def summarize_fixed_command_rollout(windows):
+    """Retrospective dynamics check, never unexecuted-plan tracking accuracy."""
+    valid = [row for row in windows if isinstance(row.get('xy_m'), (int, float))
+             and math.isfinite(row['xy_m'])]
+    if not valid:
+        return dict(status='unavailable', windows=0, error='No aligned pre-fault 750 ms windows')
+    worst = max(valid, key=lambda row: row['path_max_xy_m'])
+    return dict(status='scored', windows=len(valid), horizon_ms=750,
+        endpoint_xy_rmse_m=_rmse([row['xy_m'] for row in valid]),
+        endpoint_xy_max_m=max(row['xy_m'] for row in valid),
+        full_path_xy_max_m=max(row['path_max_xy_m'] for row in valid),
+        paths_over_5cm=sum(row['path_max_xy_m'] > .05 for row in valid),
+        forward_speed_rmse_mps=_rmse([row['end_u_error_mps'] for row in valid]),
+        lateral_speed_rmse_mps=_rmse([row['end_v_error_mps'] for row in valid]),
+        yaw_rate_rmse_radps=_rmse([row['end_r_error_radps'] for row in valid]),
+        worst_window={key: (worst.get(key) if isinstance(worst.get(key), (int, float))
+                           and math.isfinite(worst[key]) else None) for key in (
+            'start_stamp_ns', 'start_bag_time_s', 'start_speed_mps',
+            'start_steering_rad', 'progress_m', 'path_max_xy_m', 'path_max_step')},
+        interpretation='Logged start plus actual issued commands; no future state corrections. '
+                       'Overlapping windows are not independent trials. Not an unexecuted MPC-plan test.')
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bag", type=Path)
@@ -1115,6 +1437,11 @@ def main() -> int:
         help="explicitly set live_closed_loop only when MPC commands controlled the run")
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--output-csv", type=Path, required=True)
+    parser.add_argument('--source-plant-library', type=Path,
+                        help='also score fixed-issued-command 750 ms replay against truth')
+    parser.add_argument(
+        "--output-diagnostics-jsonl", type=Path,
+        help="full per-cycle diagnostic payload sidecar (default: sibling of output CSV)")
     args = parser.parse_args()
     if args.progress_bin_m <= 0.0:
         parser.error("--progress-bin-m must be positive")
@@ -1124,13 +1451,43 @@ def main() -> int:
         args.trajectory.resolve() if args.trajectory else None,
         args.run_metadata.resolve() if args.run_metadata else None,
         args.progress_bin_m, args.experiment_regime)
+    if args.source_plant_library:
+        try:
+            cutoff = report['summary'].get('scored_through_first_fault_epoch_s')
+            before_fault = lambda topic: [row for row in data.get(topic, [])
+                                         if cutoff is None or row.get('bag_time', math.inf) <= cutoff]
+            result = evaluator.report_source_plant_rollout(
+                before_fault(evaluator.GT), before_fault(evaluator.PLANT),
+                before_fault(evaluator.ODOM_DIAGNOSTICS), args.source_plant_library,
+                before_fault(evaluator.IMU), before_fault(evaluator.LEFT_ENCODER),
+                before_fault(evaluator.RIGHT_ENCODER))
+            windows = (result or {}).get('valid_750ms_windows', [])
+            report['summary']['fixed_command_rollout'] = summarize_fixed_command_rollout(windows)
+            report['summary']['fixed_command_rollout']['library_sha256'] = sha256_file(args.source_plant_library)
+        except (OSError, ValueError, RuntimeError) as error:
+            report['summary']['fixed_command_rollout'] = dict(status='unavailable', error=str(error))
     report["cycle_detail_csv"] = str(args.output_csv.resolve())
+    diag_topic = (evaluator.CANDIDATE_DIAGNOSTICS
+                  if data.get(evaluator.CANDIDATE_DIAGNOSTICS)
+                  else evaluator.DIAGNOSTICS)
+    diagnostic_sidecar = args.output_diagnostics_jsonl or args.output_csv.with_name(
+        f"{args.output_csv.stem}_diagnostics.jsonl")
+    sidecar_count = write_diagnostic_sequence_sidecar(
+        diagnostic_sidecar, data.get(diag_topic, []))
+    report["diagnostic_sequence_sidecar"] = {
+        "path": str(diagnostic_sidecar.resolve()),
+        "format": "JSONL; one record per decoded MPC diagnostic with full payload",
+        "records": sidecar_count,
+    }
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(
         json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     write_cycle_csv(args.output_csv, cycles)
     print(json.dumps(report["summary"], indent=2, allow_nan=False))
-    print(f"wrote schema={REPORT_SCHEMA} JSON={args.output_json} CSV={args.output_csv}")
+    print(
+        f"wrote schema={REPORT_SCHEMA} JSON={args.output_json} "
+        f"CSV={args.output_csv} diagnostics={diagnostic_sidecar} "
+        f"({sidecar_count} records)")
     return 0
 
 

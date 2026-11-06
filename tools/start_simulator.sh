@@ -15,8 +15,12 @@ case "${track}" in
     image="autodriveecosystem/autodrive_roboracer_sim:2026-icra-compete"
     container="${SDU_APEX_SIM_CONTAINER:-sdu_apex_sim_compete}"
     ;;
+  iros)
+    image="autodriveecosystem/autodrive_roboracer_sim@sha256:749fbef07942109d18497cbcf6ffe9452e06ae487f2bfc915e92440bc4b4663d"
+    container="${SDU_APEX_SIM_CONTAINER:-sdu_apex_sim_iros}"
+    ;;
   *)
-    echo "SDU_APEX_SIM_TRACK must be practice or compete." >&2
+    echo "SDU_APEX_SIM_TRACK must be practice, compete, or iros." >&2
     exit 2
     ;;
 esac
@@ -27,13 +31,25 @@ fi
 
 container_player_binary="./AutoDRIVE Simulator.x86_64"
 simulator_log_file="${SDU_APEX_SIM_LOG_FILE:--}"
+# Docker --cpuset-cpus is silently discarded on some user hosts.
+# This opt-in Linux process affinity applies to the Unity executable
+# itself, keeping PhysX workers off the six P-cores used by source MPC.
+simulator_affinity=""
+if [[ -n "${SDU_APEX_SIM_RUNTIME_AFFINITY_CPUS:-}" ]]; then
+  if [[ ! "${SDU_APEX_SIM_RUNTIME_AFFINITY_CPUS}" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then
+    echo 'Invalid SDU_APEX_SIM_RUNTIME_AFFINITY_CPUS' >&2
+    exit 2
+  fi
+  simulator_affinity="taskset --cpu-list ${SDU_APEX_SIM_RUNTIME_AFFINITY_CPUS} "
+  echo "Running Unity/PhysX on CPUs ${SDU_APEX_SIM_RUNTIME_AFFINITY_CPUS}"
+fi
 case "${mode}" in
   gui)
-    simulator_command="exec \"${container_player_binary}\" -ip 127.0.0.1 -port 4567 -logFile \"${simulator_log_file}\""
+    simulator_command="exec ${simulator_affinity}\"${container_player_binary}\" -ip 127.0.0.1 -port 4567 -logFile \"${simulator_log_file}\""
     tty_args=(-it)
     ;;
   batchmode)
-    simulator_command="Xvfb :123 -screen 0 1920x1080x24 -ac >/dev/null 2>&1 & xvfb_pid=\$!; export DISPLAY=:123; for attempt in \$(seq 1 50); do [[ -S /tmp/.X11-unix/X123 ]] && break; sleep 0.1; done; kill -0 \"\$xvfb_pid\"; exec \"${container_player_binary}\" -batchmode -ip 127.0.0.1 -port 4567 -logFile \"${simulator_log_file}\""
+    simulator_command="Xvfb :123 -screen 0 1920x1080x24 -ac >/dev/null 2>&1 & xvfb_pid=\$!; export DISPLAY=:123; for attempt in \$(seq 1 50); do [[ -S /tmp/.X11-unix/X123 ]] && break; sleep 0.1; done; kill -0 \"\$xvfb_pid\"; exec ${simulator_affinity}\"${container_player_binary}\" -batchmode -ip 127.0.0.1 -port 4567 -logFile \"${simulator_log_file}\""
     tty_args=()
     ;;
   *)
@@ -78,6 +94,42 @@ if [[ -n "${SDU_APEX_SIM_PLAYER_DIR:-}" ]]; then
   echo "Using workspace development player: ${player_directory}"
 fi
 
+trace_args=()
+if [[ -n "${SDU_APEX_SIM_TRACE_DIR:-}" ]]; then
+  if [[ "${track}" != "practice" ]]; then
+    echo "Development fixed-step tracing is restricted to the practice simulator." >&2
+    exit 2
+  fi
+  requested_trace_directory="${SDU_APEX_SIM_TRACE_DIR}"
+  if [[ "${requested_trace_directory}" != /* ]]; then
+    requested_trace_directory="${repo_root}/${requested_trace_directory}"
+  fi
+  mkdir -p -- "${requested_trace_directory}"
+  trace_directory="$(realpath -- "${requested_trace_directory}")"
+  case "${trace_directory}" in
+    "${repo_root}"/*) ;;
+    *) echo "SDU_APEX_SIM_TRACE_DIR must be inside ${repo_root}." >&2; exit 2 ;;
+  esac
+  trace_max_steps="${SDU_APEX_SIM_TRACE_MAX_STEPS:-60000}"
+  if [[ ! "${trace_max_steps}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "SDU_APEX_SIM_TRACE_MAX_STEPS must be a positive integer." >&2
+    exit 2
+  fi
+  trace_args=(-e "SDU_APEX_PHYSICS_TRACE_PATH=/sdu_apex_trace/unity_fixedstep.csv"
+    -e "SDU_APEX_PHYSICS_TRACE_MAX_STEPS=${trace_max_steps}"
+    -v "${trace_directory}:/sdu_apex_trace:rw")
+  echo "Development fixed-step trace: ${trace_directory}/unity_fixedstep.csv (max ${trace_max_steps} steps)"
+fi
+
+simulator_cpuset_args=()
+if [[ -n "${SDU_APEX_SIM_CPUSET_CPUS:-}" ]]; then
+  if [[ ! "${SDU_APEX_SIM_CPUSET_CPUS}" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then
+    echo "SDU_APEX_SIM_CPUSET_CPUS must be a comma-separated list/range such as 12-15." >&2
+    exit 2
+  fi
+  simulator_cpuset_args=(--cpuset-cpus "${SDU_APEX_SIM_CPUSET_CPUS}")
+fi
+
 if ! docker image inspect "${image}" >/dev/null 2>&1; then
   docker pull "${image}"
 fi
@@ -89,6 +141,7 @@ fi
 echo "Starting ${track} simulator image in ${mode} mode: ${image}"
 echo "Unity log destination: ${simulator_log_file}"
 exec docker run --rm --name "${container}" "${tty_args[@]}" \
+  "${simulator_cpuset_args[@]}" \
   --log-opt max-size=10m --log-opt max-file=3 \
   --ulimit core=0 \
   --network=host --ipc=host --privileged --gpus all \
@@ -96,6 +149,7 @@ exec docker run --rm --name "${container}" "${tty_args[@]}" \
   ${DISPLAY:+-e DISPLAY} \
   "${xauthority_args[@]}" \
   "${player_args[@]}" \
+  "${trace_args[@]}" \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
   --entrypoint /bin/bash \
   "${image}" -lc "${simulator_command}"

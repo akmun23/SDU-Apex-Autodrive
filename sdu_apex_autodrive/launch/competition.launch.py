@@ -28,10 +28,10 @@ def generate_launch_description():
 
     map_relative_path = os.environ.get(
         "SDU_APEX_MAP_REL",
-        "maps/autodrive_track_ftg_commit_20260909_025m.yaml")
+        "maps/autodrive_iros_2026_compete.yaml")
     trajectory_relative_path = os.environ.get(
         "SDU_APEX_TRAJECTORY_REL",
-        "trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv")
+        "trajectories/autodrive_iros_2026_compete/ipopt_best_6p925_source_witness.csv")
     if (os.path.isabs(map_relative_path) or ".." in map_relative_path.split(os.sep) or
             os.path.isabs(trajectory_relative_path) or
             ".." in trajectory_relative_path.split(os.sep)):
@@ -67,7 +67,10 @@ def generate_launch_description():
         name="autodrive_bridge",
         output="screen",
         emulate_tty=True,
-        additional_env={"SDU_APEX_DEV_SIM_RESET_ENABLED": "0"},
+        additional_env={
+            "SDU_APEX_DEV_SIM_RESET_ENABLED": "0",
+            "SDU_APEX_DEV_PACKET_DIAGNOSTICS_ENABLED": "0",
+        },
     )
 
     sensor_odom = Node(

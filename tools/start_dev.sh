@@ -31,6 +31,7 @@ if [[ -n "${SDU_APEX_MPC_PARAMETER_OVERLAY:-}" ]]; then
     exit 1
   fi
   overlay_host_path="$(realpath -- "${SDU_APEX_MPC_PARAMETER_OVERLAY}")"
+  python3 -c 'from pathlib import Path; import sys; from tools.seal_mpc_run_manifest import validate_mpc_overlay; validate_mpc_overlay(Path(sys.argv[1]))' "$overlay_host_path"
   case "${overlay_host_path}" in
     "${repo_root}"/*)
       mpc_parameter_overlay="/workspace/src/${overlay_host_path#"${repo_root}"/}"
@@ -78,9 +79,49 @@ if [[ -n "${SDU_APEX_ODOM_PARAMETER_OVERLAY:-}" ]]; then
   esac
 fi
 
+amcl_parameter_overlay=""
+if [[ -n "${SDU_APEX_AMCL_PARAMETER_OVERLAY:-}" ]]; then
+  [[ -f "$SDU_APEX_AMCL_PARAMETER_OVERLAY" ]] || {
+    echo 'AMCL parameter overlay does not exist' >&2; exit 1;
+  }
+  overlay_host_path="$(realpath -- "$SDU_APEX_AMCL_PARAMETER_OVERLAY")"
+  python3 -c 'from pathlib import Path; import sys; from tools.seal_mpc_run_manifest import validate_node_overlay; validate_node_overlay(Path(sys.argv[1]), "gpu_amcl_cpp")' "$overlay_host_path"
+  case "$overlay_host_path" in
+    "$repo_root"/*) amcl_parameter_overlay="/workspace/src/${overlay_host_path#"$repo_root"/}" ;;
+    *) echo 'AMCL parameter overlay must be inside the repository bind mount' >&2; exit 1 ;;
+  esac
+fi
+
 ros_domain_args=()
 if [[ -n "${ROS_DOMAIN_ID:-}" ]]; then
   ros_domain_args+=(-e "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}")
+fi
+openmp_wait_args=()
+if [[ -n "${GOMP_SPINCOUNT:-}" ]]; then
+  [[ "${GOMP_SPINCOUNT}" =~ ^[0-9]+$ ]] || {
+    echo 'GOMP_SPINCOUNT must be a nonnegative integer' >&2
+    exit 2
+  }
+  # Explicit timing experiment only; preserve libgomp defaults when unset.
+  openmp_wait_args+=(-e "GOMP_SPINCOUNT=${GOMP_SPINCOUNT}")
+fi
+
+# Explicit native-source timing experiments can bind the three OpenMP
+# source sensitivity workers to distinct P cores without constraining ROS
+# executor/AMCL/odometry threads. Preserve ordinary environment defaults.
+for omp_var in OMP_NUM_THREADS OMP_PROC_BIND OMP_PLACES; do
+  if [[ -n "${!omp_var:-}" ]]; then
+    openmp_wait_args+=(-e "${omp_var}=${!omp_var}")
+  fi
+done
+
+controller_cpuset_args=()
+if [[ -n "${SDU_APEX_CPUSET_CPUS:-}" ]]; then
+  if [[ ! "${SDU_APEX_CPUSET_CPUS}" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then
+    echo "SDU_APEX_CPUSET_CPUS must be a comma-separated list/range such as 0-7." >&2
+    exit 2
+  fi
+  controller_cpuset_args=(--cpuset-cpus "${SDU_APEX_CPUSET_CPUS}")
 fi
 
 map_yaml_override=""
@@ -128,12 +169,17 @@ elif ! docker image inspect "${image}" >/dev/null 2>&1; then
 fi
 
 exec docker run --rm --name "${container}" \
+  "${controller_cpuset_args[@]}" \
   --network=host --ipc=host --privileged --gpus all \
   --log-opt max-size=10m --log-opt max-file=3 \
   "${ros_domain_args[@]}" \
+  "${openmp_wait_args[@]}" \
   -e SDU_APEX_AUTOSTART=1 \
   -e SDU_APEX_WITH_RVIZ="${SDU_APEX_WITH_RVIZ:-false}" \
   -e SDU_APEX_MPC_NATIVE_TUNING="${SDU_APEX_MPC_NATIVE_TUNING:-false}" \
+  -e SDU_APEX_MPC_LTO="${SDU_APEX_MPC_LTO:-false}" \
+  -e SDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES="${SDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES:-false}" \
+  -e "SDU_APEX_MPC_RUNTIME_AFFINITY_CPUS=${SDU_APEX_MPC_RUNTIME_AFFINITY_CPUS:-}" \
   -e SDU_APEX_MPC_PUBLISH_DIAGNOSTICS="${SDU_APEX_MPC_PUBLISH_DIAGNOSTICS:-false}" \
   -e "SDU_APEX_MPC_START_DELAY_SEC=${SDU_APEX_MPC_START_DELAY_SEC:-2.0}" \
   -e "SDU_APEX_CONTROLLER_MAX_SPEED=${SDU_APEX_CONTROLLER_MAX_SPEED:-}" \
@@ -141,6 +187,7 @@ exec docker run --rm --name "${container}" \
   -e "SDU_APEX_MPC_PARAMETER_OVERLAY=${mpc_parameter_overlay}" \
   -e "SDU_APEX_ACTUATOR_PARAMETER_OVERLAY=${actuator_parameter_overlay}" \
   -e "SDU_APEX_ODOM_PARAMETER_OVERLAY=${odom_parameter_overlay}" \
+  -e "SDU_APEX_AMCL_PARAMETER_OVERLAY=${amcl_parameter_overlay}" \
   -e "SDU_APEX_MAP_YAML=${map_yaml_override}" \
   -e "SDU_APEX_TRAJECTORY_FILE=${trajectory_file_override}" \
   -e "SDU_APEX_CSV_COMMAND_FILE=${csv_command_file_override}" \

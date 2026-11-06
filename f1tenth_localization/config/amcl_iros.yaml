@@ -1,0 +1,11 @@
+gpu_amcl_cpp:
+  ros__parameters:
+    # Mapping uses the sensor-odometry rear-axle origin. The initial yaw is
+    # the first permitted IMU orientation, not a simulator world-pose input.
+    global_start_anchor_x_m: 0.0
+    global_start_anchor_y_m: 0.0
+    global_start_anchor_yaw_rad: -1.5707407163
+    initial_pose_x: 0.0
+    initial_pose_y: 0.0
+    initial_pose_a: -1.5707407163
+    global_heading_trajectory_rel_path: trajectories/autodrive_iros_2026_compete/initial_raceline.csv

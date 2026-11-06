@@ -1,0 +1,57 @@
+# mpc_practice.yaml: single original-source full-step nonlinear SQP.
+# Development only: repeated Unity race/feasibility qualification pending.
+/**:
+  ros__parameters:
+    enabled: true
+    odom_topic: /odom
+    pose_topic: /current_map_pose
+    diagnostics_topic: /mpc/diagnostics
+    publish_diagnostics: false
+    path_frame: map
+    command_frame: base_link
+    trajectory_file: ''
+    max_speed_mps: 16.0
+    startup_speed_mps: 1.5
+    startup_ramp_laps: 0.0
+    state_extrapolation_max_s: 0.12
+    state_stale_fault_grace_s: 0.5
+    maximum_command_publication_lead_s: 0.5
+    command_actuation_delay_s: 0.0
+    end_to_end_cycle_budget_ms: 22.0
+    max_command_start_lateness_ms: 2.0
+    initial_command_publication_lead_ms: 15.0
+    unity_plant_state_topic: /odom/unity_plant_state
+    drive_command_topic: /mpc/drive_command
+    pose_odom_max_skew_s: 0.12
+    source_dt_min_s: 0.001
+    source_dt_max_s: 0.25
+    startup_path_max_distance_m: 0.8
+    startup_path_heading_tolerance_rad: 0.75
+    weight_e_y: 4500.0
+    weight_e_psi: 1450.0
+    weight_u: 45.0
+    weight_u_overspeed: 20.0
+    overspeed_curvature_gain_m: 0.5
+    underspeed_curvature_gain_m: 0.6
+    weight_longitudinal_slip: 5.0
+    weight_v: 5.0
+    weight_r: 7.8125
+    weight_steering_command: 4.5
+    weight_steering_target: 5.0
+    weight_throttle_command: 0.1
+    weight_steering_slew: 1500.0
+    weight_throttle_slew: 50.0
+    startup_nominal_throttle_seed: 0.25
+    terminal_multiplier: 3.0
+    max_steering_rad: 0.5235987756
+    corridor_margin_m: 0.02
+    first_prediction_corridor_margin_m: 0.02
+    corridor_preview_halfwidth_m: 0.1
+    nonlinear_corridor_tolerance_m: 0.0
+    rti_cycle_budget_ms: 22.0
+    jacobian_threads: 6
+    reference_clearance_reserve_m: 0.0
+    source_exact_nlp_iterations: 3
+    source_exact_nlp_qp_soft_weight: 1000000.0
+    source_exact_nlp_qp_regularization: 1000.0
+    source_exact_nlp_extra_clearance_m: 0.03

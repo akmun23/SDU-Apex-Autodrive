@@ -4,3 +4,4 @@ autodrive_actuator_interface:
     steering_topic: /autodrive/roboracer_1/steering_command
     throttle_topic: /autodrive/roboracer_1/throttle_command
     max_steering_angle_rad: 0.5235987756
+    minimum_throttle_normalized: 0.001

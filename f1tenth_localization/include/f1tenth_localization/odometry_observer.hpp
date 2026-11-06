@@ -108,16 +108,16 @@ private:
   bool initialized_{false};
   double previous_stamp_s_{0.0};
   double previous_yaw_rad_{0.0};
-  double previous_yaw_rate_radps_{0.0};
   double previous_encoder_left_angle_rad_{0.0};
   double previous_encoder_right_angle_rad_{0.0};
   std::array<double, 4> previous_physx_wheel_encoder_angle_prediction_rad_{};
   double physx_pose_origin_x_m_{0.0};
   double physx_pose_origin_y_m_{0.0};
-  bool physx_pose_origin_initialized_{false};
   double body_u_mps_{0.0};
   double body_v_com_mps_{0.0};
   double body_v_mps_{0.0};
+  double horizontal_u_mps_{0.0};
+  double horizontal_v_mps_{0.0};
   double x_m_{0.0};
   double y_m_{0.0};
   OdometryEstimate last_{};

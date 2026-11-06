@@ -46,9 +46,9 @@ struct PredictedPlantState
 
 // In-process, source-derived 1 kHz vehicle plant used by production odometry.
 // It has no subprocess or PhysX-library dependency. Each sensor packet
-// advances 25 Unity 1 ms steps. Measured actuator feedback, when available,
-// supplies the torque that acted over the just-completed packet interval;
-// request commands remain queued for future MPC stages.
+// advances 25 Unity 1 ms steps. Queued request commands drive that completed
+// interval; endpoint actuator feedback corrects the next interval's rack
+// state and is never backdated through already-completed physics steps.
 class SourceDerivedOdomRuntime
 {
 public:

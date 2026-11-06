@@ -16,6 +16,7 @@ import argparse
 import bisect
 import csv
 import ctypes
+import hashlib
 import json
 import math
 import struct
@@ -31,6 +32,11 @@ from rosidl_runtime_py.utilities import get_message
 
 
 GT = "/autodrive/roboracer_1/odom"
+
+# MPC lateral velocity is represented at the rear axle, while Unity's odometry
+# twist is reported at the rigid-body COM. Keep this geometry aligned with
+# vehicle_model.cpp and unity_source_odom_runtime.hpp.
+MPC_REAR_AXLE_FROM_COM_M = 0.15532
 ODOM = "/odom"
 EKF = "/ekf_odom"
 EKF_POSE = "/ekf_pose"
@@ -45,7 +51,6 @@ AMCL_GPU_TIMING = "/amcl_gpu_timing"
 PLANT = "/odom/unity_plant_state"
 DIAGNOSTICS = "/mpc/diagnostics"
 CANDIDATE_DIAGNOSTICS = "/mpc/candidate_diagnostics"
-OPEN_LOOP_TEST = "/mpc/open_loop_test"
 IMU = "/autodrive/roboracer_1/imu"
 LAP = "/autodrive/roboracer_1/lap_count"
 COLLISION = "/autodrive/roboracer_1/collision_count"
@@ -69,7 +74,321 @@ WHEEL_RADIUS_M = 0.059
 REAR_HALF_TRACK_M = 0.118
 ENCODER_SAMPLE_PERIOD_S = 0.025
 MAX_STEERING_RAD = math.pi / 6.0
+UNITY_STEERING_RATE_DEG_PER_S = 183.345993
+UNITY_STEERING_LIMIT_DEG = 30.0
+UNITY_FIXED_STEP_S = 0.001
+UNITY_REQUEST_EPOCH_S = 0.025
 UNITY_SOURCE_PLANT_STATE_SIZE = 26
+# A 25 ms truth pose/twist closure outlier above the project's 5 cm path
+# tolerance makes that interval unsuitable for attributing source-model error.
+# This is an analysis validity threshold, not a physics parameter or runtime gate.
+SOURCE_ROLLOUT_TRUTH_CLOSURE_VALIDITY_M = 0.05
+
+
+def _sha256_path(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    if path.is_file():
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    files = sorted(path.rglob("*.db3")) + sorted(path.rglob("*.mcap"))
+    if not files:
+        return None
+    for item in files:
+        digest.update(item.name.encode("utf-8"))
+        with item.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    return digest.hexdigest()
+
+
+def _throttle_transition_class(delta: float) -> str:
+    if delta > 0.10:
+        return "rising_gt_0p10"
+    if delta < -0.10:
+        return "falling_lt_minus_0p10"
+    return "stable_abs_le_0p10"
+
+
+def _unity_vehicle_steering_angle_after(
+    physical_angle_rad: float, command_norm: float, duration_s: float,
+) -> float:
+    """Apply the exact autonomous ``VehicleController.Steer`` branch.
+
+    This deliberately preserves the source's direction test and target clamp;
+    it is not a symmetric rate-limited servo. The source can snap to the
+    target when its selected branch finds the target already crossed.
+    ``physical_angle_rad`` is the sign-flipped ``CurrentSteeringAngle`` value.
+    """
+    if not all(math.isfinite(value) for value in
+               (physical_angle_rad, command_norm, duration_s)):
+        raise ValueError("Unity steering inputs must be finite")
+    if duration_s <= 0.0:
+        raise ValueError("Unity steering duration must be positive")
+    command = max(-1.0, min(1.0, command_norm))
+    steps = max(1, int(round(duration_s / UNITY_FIXED_STEP_S)))
+    internal_angle_deg = -physical_angle_rad * (180.0 / math.pi)
+    increment_deg = UNITY_STEERING_RATE_DEG_PER_S * UNITY_FIXED_STEP_S
+    target_deg = -command * UNITY_STEERING_LIMIT_DEG
+    for _ in range(steps):
+        threshold = internal_angle_deg / UNITY_STEERING_LIMIT_DEG
+        if command > threshold:
+            internal_angle_deg -= increment_deg
+            if internal_angle_deg <= target_deg:
+                internal_angle_deg = target_deg
+        else:
+            internal_angle_deg += increment_deg
+            if internal_angle_deg >= target_deg:
+                internal_angle_deg = target_deg
+    return -internal_angle_deg * (math.pi / 180.0)
+
+
+def _build_source_rollout_case_index(
+    windows: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    extra_control_windows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Index >5 cm rollout paths and feature-matched non-failure windows.
+
+    Matching is descriptive only. Adjacent windows overlap by up to 725 ms,
+    so matched rows are not independent statistical replicates.
+    """
+    finite = lambda value: isinstance(value, (int, float)) and math.isfinite(float(value))
+    closure_threshold_m = SOURCE_ROLLOUT_TRUTH_CLOSURE_VALIDITY_M
+    closure_clean = [row for row in windows
+                     if float(row.get("truth_pose_twist_closure_max_m", 0.0))
+                     <= closure_threshold_m]
+    failures = [row for row in closure_clean
+                if float(row.get("path_max_xy_m", 0.0)) > 0.05]
+    passed = [row for row in closure_clean
+              if float(row.get("path_max_xy_m", 0.0)) <= 0.05]
+    # Separate disagreement with the actual Unity pose from disagreement
+    # with displacement independently integrated from the same-epoch Unity
+    # velocity/yaw samples. This endpoint attribution does NOT replace the
+    # strict maximum-full-path clearance gate above: it identifies whether
+    # a >5cm endpoint is predominantly a source dynamics or a reference-pose
+    # coherence problem, using only logged signals. Overlapping windows are
+    # NOT statistically independent observations.
+    def endpoint_attribution(row: dict[str, Any]) -> dict[str, Any] | None:
+        keys = (
+            "plant_vs_twist_world_x", "plant_vs_twist_world_y",
+            "truth_twist_world_x", "truth_twist_world_y",
+        )
+        if not all(finite(row.get(key)) for key in keys):
+            return None
+        source_vs_unity_twist = math.hypot(
+            float(row["plant_vs_twist_world_x"]),
+            float(row["plant_vs_twist_world_y"]))
+        unity_twist_vs_pose = math.hypot(
+            float(row["truth_twist_world_x"]),
+            float(row["truth_twist_world_y"]))
+        source_vs_unity_pose = float(row.get("xy_m", 0.0))
+        if source_vs_unity_pose > 0.05:
+            if source_vs_unity_twist <= 0.05 and unity_twist_vs_pose > 0.05:
+                kind = "reference_pose_dominated"
+            elif source_vs_unity_twist > 0.05 and unity_twist_vs_pose <= 0.05:
+                kind = "source_motion_dominated"
+            else:
+                kind = "mixed_or_underdetermined"
+        else:
+            kind = "within_5cm"
+        return {
+            "start_stamp_ns": int(row["start_stamp_ns"]),
+            "progress_m": row.get("progress_m"),
+            "source_vs_unity_pose_m": source_vs_unity_pose,
+            "source_vs_unity_twist_integral_m": source_vs_unity_twist,
+            "unity_twist_integral_vs_pose_m": unity_twist_vs_pose,
+            "classification": kind,
+        }
+
+    endpoint_diagnostics = [v for row in closure_clean
+                            if (v := endpoint_attribution(row)) is not None]
+    available = list(passed) + list(extra_control_windows or [])
+    control_pool_source = list(available)
+    pairs: list[dict[str, Any]] = []
+    unmatched: list[int] = []
+    for failure in sorted(failures,
+                          key=lambda row: float(row["path_max_xy_m"]),
+                          reverse=True):
+        f_progress = failure.get("progress_m")
+        f_delta = float(failure.get("start_queue_throttle_delta", 0.0))
+        f_transition = _throttle_transition_class(f_delta)
+        candidates: list[tuple[float, int, dict[str, Any], str]] = []
+        for index, candidate in enumerate(available):
+            speed_delta = abs(float(candidate["start_speed_mps"]) -
+                              float(failure["start_speed_mps"]))
+            steer_delta = abs(float(candidate["start_steering_rad"]) -
+                              float(failure["start_steering_rad"]))
+            c_progress = candidate.get("progress_m")
+            progress_delta = (abs(float(c_progress) - float(f_progress))
+                              if finite(c_progress) and finite(f_progress)
+                              else math.nan)
+            c_transition = _throttle_transition_class(float(
+                candidate.get("start_queue_throttle_delta", 0.0)))
+            if c_transition != f_transition:
+                continue
+            strict = (speed_delta <= 0.5 and steer_delta <= 0.05 and
+                      (not finite(progress_delta) or progress_delta <= 5.0))
+            same_regime = speed_delta <= 0.5 and steer_delta <= 0.05
+            relaxed = speed_delta <= 1.0 and steer_delta <= 0.10
+            if not same_regime and not relaxed:
+                continue
+            score = speed_delta / 0.5 + steer_delta / 0.05
+            if finite(progress_delta):
+                score += float(progress_delta) / 5.0
+            match_class = ("strict" if strict else
+                           "same_regime_different_progress" if same_regime else
+                           "relaxed_state_regime")
+            candidates.append((score, index, candidate,
+                               match_class))
+        if not candidates:
+            unmatched.append(int(failure["start_stamp_ns"]))
+            continue
+        score, index, control, match_class = min(candidates,
+                                                  key=lambda item: item[0])
+        available.pop(index)
+        pairs.append({
+            "match_class": match_class,
+            "normalized_feature_distance": score,
+            "failure_start_stamp_ns": int(failure["start_stamp_ns"]),
+            "control_start_stamp_ns": int(control["start_stamp_ns"]),
+            "feature_delta": {
+                "speed_mps": (float(control["start_speed_mps"]) -
+                              float(failure["start_speed_mps"])),
+                "abs_steering_rad": (float(control["start_steering_rad"]) -
+                                     float(failure["start_steering_rad"])),
+                "progress_m": (
+                    float(control["progress_m"]) - float(failure["progress_m"])
+                    if finite(control.get("progress_m")) and
+                    finite(failure.get("progress_m")) else None),
+                "throttle_transition": f_transition,
+            },
+            "failure": failure,
+            "nonfailure_control": control,
+        })
+
+    source_path = Path(__file__).resolve().parents[1] / \
+        "f1tenth_mpc/src/unity_source_plant.cpp"
+    artifact_hashes = {}
+    for name, value in metadata.items():
+        if name.endswith("_path") and value:
+            artifact_hashes[name.removesuffix("_path") + "_sha256"] = \
+                _sha256_path(Path(value))
+    artifact_hashes["plant_source_sha256"] = _sha256_path(source_path)
+    control_pool = []
+    for row in control_pool_source:
+        compact = {
+            key: row.get(key) for key in (
+                "start_stamp_ns", "start_bag_time_s", "progress_m",
+                "progress_source", "start_speed_mps", "start_gt_u_mps",
+                "start_gt_v_com_mps", "start_gt_yaw_rate_radps",
+                "start_steering_rad", "start_queue_steering_slot_1_rad",
+                "start_queue_steering_slot_2_rad", "start_queue_throttle_slot_1",
+                "start_queue_throttle_slot_2", "start_queue_throttle_delta",
+                "start_source_plant_state", "start_wheel_omega_radps",
+                "start_wheel_body_speed_mismatch_proxy_mps", "xy_m",
+                "path_max_xy_m", "path_max_step", "end_u_error_mps",
+                "end_v_error_mps", "end_r_error_radps",
+                "truth_pose_twist_closure_max_m",
+                "truth_pose_twist_bad_interval_count", "command_epoch_source")
+        }
+        compact["command_trace"] = [
+            {key: step.get(key) for key in (
+                "stamp_ns", "step", "rollout_throttle_input",
+                "rollout_steering_target_rad", "predicted_u_mps",
+                "actual_u_mps", "speed_error_mps", "xy_error_m",
+                "yaw_rate_error_radps")}
+            for step in row.get("command_trace", [])]
+        if row.get("control_source_index"):
+            compact["control_source_index"] = row["control_source_index"]
+        control_pool.append(compact)
+
+    return {
+        "schema": "sdu_apex_source_plant_rollout_case_index/v1",
+        "metadata": metadata,
+        "artifact_hashes": artifact_hashes,
+        "summary": {
+            "valid_750ms_windows": len(windows),
+            "truth_pose_twist_closure_invalid_windows":
+                len(windows) - len(closure_clean),
+            "truth_pose_twist_closure_threshold_m_per_25ms":
+                closure_threshold_m,
+            "raw_full_path_over_5cm": sum(
+                float(row.get("path_max_xy_m", 0.0)) > 0.05 for row in windows),
+            "clean_full_path_over_5cm": len(failures),
+            "full_path_over_5cm": len(failures),
+            "matched_distinct_nonfailure_controls": len(pairs),
+            "strict_matches": sum(pair["match_class"] == "strict"
+                                   for pair in pairs),
+            "same_regime_different_progress_matches": sum(
+                pair["match_class"] == "same_regime_different_progress"
+                for pair in pairs),
+            "relaxed_state_regime_matches": sum(
+                pair["match_class"] == "relaxed_state_regime"
+                                    for pair in pairs),
+            "unmatched_failure_start_stamps_ns": unmatched,
+            "available_clean_control_windows": len(control_pool),
+            "endpoint_truth_attribution_count": len(endpoint_diagnostics),
+            "endpoint_source_vs_unity_twist_over_5cm": sum(
+                d["source_vs_unity_twist_integral_m"] > 0.05
+                for d in endpoint_diagnostics),
+            "endpoint_unity_twist_vs_pose_over_5cm": sum(
+                d["unity_twist_integral_vs_pose_m"] > 0.05
+                for d in endpoint_diagnostics),
+            "endpoint_reference_pose_dominated": sum(
+                d["classification"] == "reference_pose_dominated"
+                for d in endpoint_diagnostics),
+            "endpoint_source_motion_dominated": sum(
+                d["classification"] == "source_motion_dominated"
+                for d in endpoint_diagnostics),
+            "endpoint_mixed_or_underdetermined": sum(
+                d["classification"] == "mixed_or_underdetermined"
+                for d in endpoint_diagnostics),
+            "matching_dimensions": [
+                "start speed", "absolute physical steering",
+                "start queued throttle transition", "unwrapped progress when available"],
+            "match_policy": (
+                "Prefer same transition class and <=0.5m/s, <=0.05rad, "
+                "<=5m progress; if sparse, retain the state/throttle regime "
+                "and report progress difference rather than dropping all controls."),
+            "overlapping_windows_are_independent": False,
+        },
+        "pairs": pairs,
+        "clean_control_pool": control_pool,
+        # Keep these strictly additive: existing model failure classification
+        # and pair/control matching retain their original semantics.
+        "endpoint_truth_attribution": [
+            d for d in endpoint_diagnostics
+            if d["classification"] != "within_5cm"],
+        "unmatched_failures": [
+            row for row in failures
+            if int(row["start_stamp_ns"]) in set(unmatched)],
+        # Do not silently hide telemetry pose/twist inconsistencies behind
+        # the scoring-validity filter. Save exact epochs and closure amplitudes
+        # separately, never misclassify them as physics-model successes.
+        "invalid_truth_closure_windows": [
+            {key: row.get(key) for key in (
+                "start_stamp_ns", "progress_m", "start_speed_mps",
+                "path_max_xy_m", "truth_pose_twist_closure_max_m",
+                "truth_pose_twist_bad_interval_count",
+                "end_u_error_mps", "end_v_error_mps", "end_r_error_radps")}
+            for row in windows
+            if float(row.get("truth_pose_twist_closure_max_m", 0.0))
+               > closure_threshold_m],
+    }
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 class UnitySourcePlantInputC(ctypes.Structure):
@@ -145,7 +464,7 @@ TOPICS = {
     AMCL_HEALTH, AMCL_SCAN_ALIGNMENT, AMCL_PARTICLE_COUNT,
     AMCL_KLD_DIAGNOSTICS, AMCL_TIMING, AMCL_GPU_TIMING,
     PLANT, DIAGNOSTICS, CANDIDATE_DIAGNOSTICS,
-    OPEN_LOOP_TEST, IMU, LAP, COLLISION, LAST_LAP,
+    IMU, LAP, COLLISION, LAST_LAP,
     BEST_LAP, THROTTLE, THROTTLE_COMMAND, STEERING, STEERING_COMMAND,
     BRIDGE_FAULT, BRIDGE_TIMING, DEVELOPMENT_ACTUATOR_TIMING,
     DRIVE_COMMAND, LEFT_ENCODER, RIGHT_ENCODER,
@@ -155,6 +474,12 @@ TOPICS = {
 
 def stamp(message: Any) -> float:
     return message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
+
+
+def stamp_nanoseconds(message: Any) -> int:
+    """Return the exact ROS header epoch without a float64 round trip."""
+    return (int(message.header.stamp.sec) * 1_000_000_000 +
+            int(message.header.stamp.nanosec))
 
 
 def yaw_from_quaternion(q: Any) -> float:
@@ -270,6 +595,7 @@ def decode_plant_cdr(
     return {
         "bag_time": bag_time_ns * 1.0e-9,
         "stamp": sec + nanosec * 1.0e-9,
+        "stamp_ns": sec * 1_000_000_000 + nanosec,
         "frame": frame_id,
         "schema": schema,
         "state_origin": state_origin,
@@ -478,6 +804,7 @@ def read_bag(uri: Path) -> dict[str, list[dict[str, Any]]]:
                 message.pose.pose.orientation)
             row.update(
                 stamp=stamp(message),
+                stamp_ns=stamp_nanoseconds(message),
                 frame=message.header.frame_id,
                 child=message.child_frame_id,
                 x=message.pose.pose.position.x,
@@ -494,6 +821,7 @@ def read_bag(uri: Path) -> dict[str, list[dict[str, Any]]]:
             pose = message.pose.pose
             row.update(
                 stamp=stamp(message),
+                stamp_ns=stamp_nanoseconds(message),
                 frame=message.header.frame_id,
                 x=pose.position.x,
                 y=pose.position.y,
@@ -506,6 +834,7 @@ def read_bag(uri: Path) -> dict[str, list[dict[str, Any]]]:
         elif topic == PLANT:
             row.update(
                 stamp=stamp(message),
+                stamp_ns=stamp_nanoseconds(message),
                 schema=message.state_schema_version,
                 u=message.longitudinal_velocity_mps,
                 v_com=message.lateral_velocity_com_mps,
@@ -546,13 +875,20 @@ def read_bag(uri: Path) -> dict[str, list[dict[str, Any]]]:
                 yaw_accel=message.yaw_acceleration_radps2,
             )
         elif topic in (
-            DIAGNOSTICS, CANDIDATE_DIAGNOSTICS, OPEN_LOOP_TEST, BRIDGE_TIMING,
+            DIAGNOSTICS, CANDIDATE_DIAGNOSTICS, BRIDGE_TIMING,
             DEVELOPMENT_ACTUATOR_TIMING, CSV_REPLAY,
         ):
             row["json"] = decode_json_payload(message.data)
         elif topic == IMU:
+            orientation = message.orientation
+            orientation_norm_sq = (
+                orientation.x * orientation.x + orientation.y * orientation.y +
+                orientation.z * orientation.z + orientation.w * orientation.w)
             row.update(
                 stamp=stamp(message),
+                stamp_ns=stamp_nanoseconds(message),
+                orientation_yaw=(yaw_from_quaternion(orientation)
+                                 if orientation_norm_sq > 1.0e-12 else math.nan),
                 ax=message.linear_acceleration.x,
                 ay=message.linear_acceleration.y,
                 az=message.linear_acceleration.z,
@@ -563,6 +899,7 @@ def read_bag(uri: Path) -> dict[str, list[dict[str, Any]]]:
         elif topic == DRIVE_COMMAND:
             row.update(
                 stamp=stamp(message),
+                stamp_ns=stamp_nanoseconds(message),
                 steering=message.steering_angle_rad,
                 throttle=message.throttle_normalized,
             )
@@ -1015,7 +1352,6 @@ def report_admm_convergence(
         ("cold-start command-queue seed", "cold_start_queue_seed_us", 1.0e-3),
         ("nominal rollout A", "nominal_rollout_a_us", 1.0e-3),
         ("progress/reference resampling", "progress_reference_resampling_us", 1.0e-3),
-        ("nominal rollout B", "nominal_rollout_b_us", 1.0e-3),
         ("QP build", "qp_build_us", 1.0e-3),
         ("Jacobian wall", "jacobian_wall_us", 1.0e-3),
         ("Jacobian worker CPU", "jacobian_thread_cpu_us", 1.0e-3),
@@ -1118,403 +1454,6 @@ def report_state_errors(
     )
 
 
-def report_open_loop_horizon_test(
-    truth: list[dict[str, Any]], events: list[dict[str, Any]],
-    collision_events: list[dict[str, Any]] | None = None,
-    steering_command_samples: list[dict[str, Any]] | None = None,
-    throttle_command_samples: list[dict[str, Any]] | None = None,
-) -> None:
-    event_rows = [(row, row.get("json", {})) for row in events
-                  if row.get("json")]
-    plans = [(row, payload) for row, payload in event_rows
-             if payload.get("event") == "plan"]
-    if not plans:
-        print("MPC frozen-horizon test: no latched plan was recorded")
-        return
-    plan_event, plan = plans[-1]
-    plan_id = plan.get("plan_id")
-    payloads = [payload for _, payload in event_rows
-                if payload.get("plan_id") == plan_id]
-    samples = [row for row in payloads if row.get("event") == "sample"]
-    output_events = [(row, payload) for row, payload in event_rows
-                     if payload.get("event") == "output" and
-                     payload.get("plan_id") == plan_id]
-    output_events.sort(key=lambda item: item[1].get("stage", -1))
-    outputs = [payload for _, payload in output_events]
-    completions = [row for row in payloads if row.get("event") == "complete"]
-    aborts = [row for row in payloads if row.get("event") == "abort"]
-    observation_gaps = [row for row in payloads
-                        if row.get("event") == "observation_gap"]
-    controls = plan.get("controls", [])
-    expected_horizon = int(plan.get("horizon", len(controls)))
-    output_rows = sorted(outputs, key=lambda row: row.get("stage", -1))
-    expected_stages = list(range(min(len(output_rows), len(controls))))
-    observed_stages = [row.get("stage") for row in output_rows]
-    stage_sequence_ok = observed_stages == expected_stages
-    control_deltas = []
-    for row in output_rows:
-        stage = row.get("stage", -1)
-        actual = row.get("control", [])
-        if (not isinstance(stage, int) or stage < 0 or stage >= len(controls) or
-                len(actual) != 2 or len(controls[stage]) != 2):
-            control_deltas.append(math.inf)
-            continue
-        control_deltas.extend(
-            abs(float(actual[index]) - float(controls[stage][index]))
-            for index in range(2)
-        )
-    max_control_delta = max(control_deltas, default=math.inf)
-    plan_commands_match = (stage_sequence_ok and
-                           max_control_delta <= 1.0e-6)
-    full_plan_emitted = (plan_commands_match and
-                         len(output_rows) == len(controls) == expected_horizon)
-    step_samples = sorted(samples, key=lambda row: row.get("stage", -1))
-    sample_times = [row["control_stamp_ns"] * 1e-9
-                    for row in step_samples if row.get("control_stamp_ns")]
-    print("\nMPC frozen-plan execution:")
-    print(
-        f"  plan_id={plan_id} speed_at_latch="
-        f"{plan.get('trigger_speed_mps', math.nan):.3f}m/s "
-        f"steps={len(controls)} declared_horizon={expected_horizon} "
-        f"dt={plan.get('step_s', math.nan)*1000:.2f}ms "
-        f"completed={bool(completions)} aborted={bool(aborts)}"
-    )
-    if observation_gaps:
-        missing = sorted({int(row.get("stage", -1)) for row in observation_gaps})
-        print(f"  missing-state observations={len(observation_gaps)} stages={missing}")
-    completion = completions[-1] if completions else {}
-    print(
-        f"  emitted plan commands={len(output_rows)}/{len(controls)} "
-        f"stages_contiguous={stage_sequence_ok} "
-        f"controls_match_plan={plan_commands_match} "
-        f"max_control_delta={max_control_delta:.3g} "
-        f"full_plan_emitted={full_plan_emitted} "
-        f"terminal_state_observed={completion.get('terminal_state_observed', False)}"
-    )
-
-    def compare_actuator_topic(
-        label: str, topic_rows: list[dict[str, Any]] | None,
-        control_index: int, scale: float,
-    ) -> None:
-        if topic_rows is None:
-            return
-        unused = set(range(len(topic_rows)))
-        time_errors = []
-        value_errors = []
-        matched_stages = 0
-        for event_row, output in output_events:
-            stamp = event_row.get("bag_time")
-            stage = output.get("stage", -1)
-            if (stamp is None or not isinstance(stage, int) or
-                    stage < 0 or stage >= len(controls)):
-                continue
-            nearby = [
-                (abs(topic_rows[index].get("bag_time", math.inf) - stamp), index)
-                for index in unused
-                if abs(topic_rows[index].get("bag_time", math.inf) - stamp) <= 0.020
-            ]
-            if not nearby:
-                continue
-            delta_t, index = min(nearby)
-            unused.remove(index)
-            target = float(controls[stage][control_index]) * scale
-            if control_index == 0:
-                target = max(-1.0, min(1.0, target))
-            else:
-                target = max(0.0, min(1.0, target))
-            time_errors.append(delta_t)
-            value_errors.append(abs(float(topic_rows[index]["value"]) - target))
-            matched_stages += 1
-        all_matched = bool(output_events) and matched_stages == len(output_events)
-        exact_values = bool(value_errors) and max(value_errors) <= 1.0e-5
-        print(
-            f"  {label} actuator-interface topic: matched={matched_stages}/"
-            f"{len(output_events)} all_matched={all_matched} "
-            f"values_match_plan={exact_values} "
-            f"max_abs_error={max(value_errors, default=math.inf):.3g} "
-            f"max_time_offset_ms={max(time_errors, default=math.inf)*1000:.2f}"
-        )
-
-    compare_actuator_topic(
-        "steering", steering_command_samples, 0, 1.0 / MAX_STEERING_RAD)
-    compare_actuator_topic("throttle", throttle_command_samples, 1, 1.0)
-    output_times = sorted(
-        int(row["steady_stamp_ns"]) * 1.0e-9
-        for row in outputs if row.get("steady_stamp_ns")
-    )
-    output_intervals = [b - a for a, b in zip(output_times, output_times[1:])
-                        if b > a]
-    if output_intervals:
-        print(
-            f"  output interval: median={statistics.median(output_intervals)*1000:.2f}ms "
-            f"p95={percentile(output_intervals, 0.95)*1000:.2f}ms "
-            f"max={max(output_intervals)*1000:.2f}ms"
-        )
-
-    plan_bag_time = float(plan_event.get("bag_time", math.nan))
-    step_s = float(plan.get("step_s", math.nan))
-    horizon_end_bag_time = plan_bag_time + expected_horizon * step_s
-    collisions = collision_events or []
-    prior_collision_counts = [
-        float(row.get("value", 0.0)) for row in collisions
-        if row.get("bag_time", math.inf) <= plan_bag_time
-    ]
-    collision_baseline = max(prior_collision_counts, default=0.0)
-    collision_during_plan = any(
-        float(row.get("value", 0.0)) > collision_baseline and
-        plan_bag_time < row.get("bag_time", -math.inf) <= horizon_end_bag_time
-        for row in collisions
-    )
-    if collisions:
-        print(f"  new collision during frozen horizon={collision_during_plan}")
-    else:
-        print("  new collision during frozen horizon=unverified (no collision stream)")
-    if sample_times:
-        intervals = [b - a for a, b in zip(sample_times, sample_times[1:])
-                     if b > a]
-        if intervals:
-            print(
-                f"  observed sample interval: median="
-                f"{statistics.median(intervals)*1000:.2f}ms "
-                f"p95={percentile(intervals, 0.95)*1000:.2f}ms "
-                f"samples={len(sample_times)}"
-            )
-
-    truth = sorted((row for row in truth if math.isfinite(row.get("stamp", math.nan))),
-                   key=lambda row: row["stamp"])
-    truth_times = [row["stamp"] for row in truth]
-
-    def truth_at(timestamp: float) -> dict[str, float] | None:
-        index = bisect.bisect_left(truth_times, timestamp)
-        if index < len(truth_times) and abs(truth_times[index] - timestamp) < 1e-6:
-            return truth[index]
-        if index == 0 or index >= len(truth_times):
-            return None
-        before, after = truth[index - 1], truth[index]
-        gap = after["stamp"] - before["stamp"]
-        if gap <= 0.0 or gap > 0.10:
-            return None
-        fraction = (timestamp - before["stamp"]) / gap
-        result = {}
-        for key in ("x", "y", "u", "v", "r"):
-            result[key] = before[key] + fraction * (after[key] - before[key])
-        result["yaw"] = before["yaw"] + fraction * normalized_angle(
-            after["yaw"] - before["yaw"])
-        return result
-
-    errors: dict[str, list[float]] = {
-        key: [] for key in ("position", "yaw", "u", "v_rear", "r")
-    }
-    hidden_errors = [[] for _ in range(4)]
-    speeds: list[float] = []
-    scored_times_s: list[float] = []
-    scored_stages: list[int] = []
-    scored_pose_pairs: list[
-        tuple[tuple[float, float, float], dict[str, float]]
-    ] = []
-    scored_state_pairs: list[
-        tuple[list[float], dict[str, float]]
-    ] = []
-    full_plan = [row for row in plan.get("predictions", []) if row]
-    scored_rows: list[
-        tuple[int, float, list[float], list[float], dict[str, Any] | None]
-    ] = []
-    if full_plan and plan.get("stamp_ns"):
-        plan_stamp = int(plan["stamp_ns"]) * 1e-9
-        for prediction in full_plan:
-            timestamp = plan_stamp + float(prediction.get("time_s", 0.0))
-            scored_rows.append((int(prediction.get("stage", -1)), timestamp,
-                                prediction.get("pose", []),
-                                prediction.get("state", []), None))
-        print("  accuracy source: complete frozen-plan states vs Unity ground truth")
-    else:
-        for row in step_samples:
-            if row.get("control_stamp_ns"):
-                scored_rows.append((int(row.get("stage", -1)),
-                    row["control_stamp_ns"] * 1e-9,
-                    row.get("predicted_pose", []), row.get("predicted_state", []), row))
-        print("  accuracy source: sparse frozen-plan states vs Unity ground truth")
-
-    worst_yaw_rate_rows: list[tuple[float, int, float, float, float, float]] = []
-    for stage, timestamp, predicted_pose, predicted_state, source_row in scored_rows:
-        measured = truth_at(timestamp)
-        if measured is None or len(predicted_pose or []) != 3 or len(predicted_state or []) < 6:
-            continue
-        scored_times_s.append(timestamp - int(plan["stamp_ns"]) * 1.0e-9)
-        scored_stages.append(stage)
-        px, py, pyaw = predicted_pose
-        scored_pose_pairs.append(((px, py, pyaw), measured))
-        scored_state_pairs.append((predicted_state, measured))
-        errors["position"].append(math.hypot(px - measured["x"], py - measured["y"]))
-        errors["yaw"].append(abs(normalized_angle(pyaw - measured["yaw"])))
-        errors["u"].append(predicted_state[2] - measured["u"])
-        # The plant's MPC lateral velocity is at the rear axle; simulator
-        # odometry reports the rigid-body/COM velocity.
-        measured_v_rear = measured["v"] - measured["r"] * COM_TO_REAR_AXLE_M
-        errors["v_rear"].append(predicted_state[3] - measured_v_rear)
-        errors["r"].append(predicted_state[4] - measured["r"])
-        prior_control = controls[stage - 1] if 0 < stage <= len(controls) else None
-        worst_yaw_rate_rows.append((
-            abs(predicted_state[4] - measured["r"]), stage,
-            predicted_state[4], measured["r"], measured["u"],
-            math.nan if prior_control is None else float(prior_control[0]),
-        ))
-        speeds.append(math.hypot(measured["u"], measured_v_rear))
-
-    for row in step_samples:
-        predicted_state = row.get("predicted_state", [])
-        actual_state = row.get("actual_state", [])
-        if len(actual_state) >= 10 and len(predicted_state) >= 10:
-            for wheel in range(4):
-                hidden_errors[wheel].append(
-                    predicted_state[6 + wheel] - actual_state[6 + wheel]
-                )
-
-    if not errors["position"]:
-        print("  no samples could be aligned to simulator truth")
-    else:
-        available_prediction_count = len(full_plan) if full_plan else len(step_samples)
-        print(
-            f"  truth-aligned prediction coverage: n={len(scored_times_s)}/"
-            f"{available_prediction_count} time_s="
-            f"{min(scored_times_s):.3f}..{max(scored_times_s):.3f}"
-        )
-        for key, label, unit in (
-            ("position", "position", "m"), ("yaw", "yaw", "rad"),
-            ("u", "forward speed", "m/s"),
-            ("v_rear", "rear lateral speed", "m/s"),
-            ("r", "yaw rate", "rad/s"),
-        ):
-            values = errors[key]
-            absolute = [abs(value) for value in values]
-            print(
-                f"  {label}: n={len(values)} RMSE="
-                f"{math.sqrt(statistics.mean(value*value for value in values)):.5f}{unit} "
-                f"p95_abs={percentile(absolute, 0.95):.5f}{unit} "
-                f"max_abs={max(absolute):.5f}{unit}"
-            )
-        predicted_start_pose, measured_start = scored_pose_pairs[0]
-        predicted_start_state, _ = scored_state_pairs[0]
-        start_position_error = math.hypot(
-            predicted_start_pose[0] - measured_start["x"],
-            predicted_start_pose[1] - measured_start["y"],
-        )
-        start_yaw_error = normalized_angle(
-            predicted_start_pose[2] - measured_start["yaw"])
-        start_v_rear = measured_start["v"] - measured_start["r"] * COM_TO_REAR_AXLE_M
-        print(
-            f"  initial estimate-vs-truth: xy={start_position_error:.5f}m "
-            f"yaw={start_yaw_error:.5f}rad "
-            f"u={predicted_start_state[2] - measured_start['u']:+.5f}m/s "
-            f"v_rear={predicted_start_state[3] - start_v_rear:+.5f}m/s "
-            f"r={predicted_start_state[4] - measured_start['r']:+.5f}rad/s"
-        )
-
-        # Remove only the initial rigid pose offset to separate rollout drift
-        # from localization/coordinate-origin error. This is an offline score
-        # decomposition, never a correction applied to the model or controller.
-        yaw_alignment = normalized_angle(
-            measured_start["yaw"] - predicted_start_pose[2])
-        c_align, s_align = math.cos(yaw_alignment), math.sin(yaw_alignment)
-        relative_position_errors = []
-        relative_yaw_errors = []
-        for predicted_pose, measured in scored_pose_pairs:
-            dx = predicted_pose[0] - predicted_start_pose[0]
-            dy = predicted_pose[1] - predicted_start_pose[1]
-            aligned_x = measured_start["x"] + c_align * dx - s_align * dy
-            aligned_y = measured_start["y"] + s_align * dx + c_align * dy
-            relative_position_errors.append(math.hypot(
-                aligned_x - measured["x"], aligned_y - measured["y"]))
-            relative_yaw_errors.append(normalized_angle(
-                (predicted_pose[2] - predicted_start_pose[2]) -
-                (measured["yaw"] - measured_start["yaw"])))
-        print(
-            f"  rollout-only after initial pose alignment: XY RMSE="
-            f"{math.sqrt(statistics.mean(x*x for x in relative_position_errors)):.5f}m "
-            f"p95/max={percentile(relative_position_errors, 0.95):.5f}/"
-            f"{max(relative_position_errors):.5f}m; relative yaw RMSE="
-            f"{math.sqrt(statistics.mean(x*x for x in relative_yaw_errors)):.5f}rad "
-            f"max_abs={max(abs(x) for x in relative_yaw_errors):.5f}rad"
-        )
-        yaw_rate_pose_diagnostics = []
-        for index in range(1, len(scored_pose_pairs) - 1):
-            elapsed = scored_times_s[index + 1] - scored_times_s[index - 1]
-            if elapsed <= 0.0 or elapsed > 0.075:
-                continue
-            predicted_before = scored_pose_pairs[index - 1][0][2]
-            predicted_after = scored_pose_pairs[index + 1][0][2]
-            truth_before = scored_pose_pairs[index - 1][1]["yaw"]
-            truth_after = scored_pose_pairs[index + 1][1]["yaw"]
-            predicted_yaw_rate = normalized_angle(
-                predicted_after - predicted_before) / elapsed
-            truth_yaw_rate = normalized_angle(
-                truth_after - truth_before) / elapsed
-            predicted_state = scored_state_pairs[index][0]
-            truth_rate = scored_pose_pairs[index][1]["r"]
-            yaw_rate_pose_diagnostics.append((
-                abs(predicted_state[4] - truth_rate), scored_stages[index],
-                predicted_state[4], truth_rate, predicted_yaw_rate,
-                truth_yaw_rate,
-            ))
-        if yaw_rate_pose_diagnostics:
-            predicted_rate_residuals = [row[2] - row[4]
-                                        for row in yaw_rate_pose_diagnostics]
-            truth_rate_residuals = [row[3] - row[5]
-                                    for row in yaw_rate_pose_diagnostics]
-            print(
-                "  centered pose-yaw-rate check (25 ms samples): "
-                f"predicted r vs pose derivative RMSE="
-                f"{math.sqrt(statistics.mean(x*x for x in predicted_rate_residuals)):.4f}rad/s; "
-                f"Unity r vs pose derivative RMSE="
-                f"{math.sqrt(statistics.mean(x*x for x in truth_rate_residuals)):.4f}rad/s"
-            )
-        print(
-            f"  truth speed during scored horizon: "
-            f"{min(speeds):.3f}-{max(speeds):.3f}m/s"
-        )
-        if controls:
-            steering = [float(control[0]) for control in controls]
-            throttle = [float(control[1]) for control in controls]
-            max_steering_step = max(
-                (abs(right - left) for left, right in zip(steering, steering[1:])),
-                default=0.0,
-            )
-            print(
-                f"  latched controls: steering={min(steering):+.4f}.."
-                f"{max(steering):+.4f}rad max_step={max_steering_step:.4f}rad; "
-                f"throttle={min(throttle):.4f}..{max(throttle):.4f} "
-                f"all_drive={min(throttle) > 0.0}"
-            )
-        yaw_pose_by_stage = {row[1]: row for row in yaw_rate_pose_diagnostics}
-        for absolute_error, stage, predicted_r, measured_r, measured_u, prior_steer in sorted(
-                worst_yaw_rate_rows, reverse=True)[:5]:
-            next_steer = (
-                float(controls[stage][0])
-                if 0 <= stage < len(controls) else math.nan
-            )
-            pose_rates = yaw_pose_by_stage.get(stage)
-            pose_rate_text = (
-                "" if pose_rates is None else
-                f" pred/GT pose_yawdot={pose_rates[4]:+.3f}/{pose_rates[5]:+.3f}rad/s"
-            )
-            print(
-                f"  yaw-rate tail: stage={stage} t={stage * plan.get('step_s', 0.0):.3f}s "
-                f"pred={predicted_r:+.4f} truth={measured_r:+.4f} "
-                f"abs_error={absolute_error:.4f}rad/s GT_u={measured_u:.3f}m/s "
-                f"steer_prev/next={prior_steer:+.4f}/{next_steer:+.4f}rad"
-                f"{pose_rate_text}"
-            )
-    if any(hidden_errors):
-        print("  predicted-vs-reanchored odom wheel-rate RMSE (not independent wheel truth):")
-        for wheel, label in enumerate(("FL", "FR", "RL", "RR")):
-            values = hidden_errors[wheel]
-            rmse = (math.sqrt(statistics.mean(v*v for v in values))
-                    if values else math.nan)
-            print(f"    {label}: n={len(values)} RMSE={rmse:.5f}rad/s")
-    if aborts:
-        print(f"  abort detail: {aborts[-1]}")
-
-
 def nearest_by_stamp(rows: list[dict[str, Any]], target: float) -> dict[str, Any] | None:
     if not rows:
         return None
@@ -1532,8 +1471,14 @@ def report_localization_diagnostics(
     pose_topics = (
         (AMCL_POSE, "AMCL scan pose"),
         (CURRENT_MAP_POSE, "AMCL control map pose"),
-        (EKF_POSE, "EKF pose"),
     )
+    if data.get(EKF_POSE):
+        # This is the local odom frame, not the world/map frame. Comparing
+        # its raw XY/yaw to Unity printed a spurious ~8 m localization error.
+        # report_state_errors already scores EKF odom with SE(2) origin
+        # alignment and separately compares its body velocities.
+        print("EKF pose: local odom frame; absolute world error not scored "
+              "(see aligned EKF odom relative_pose below)")
     for topic, label in pose_topics:
         errors_xy = []
         errors_yaw = []
@@ -1589,7 +1534,7 @@ def report_localization_diagnostics(
     health_rows = [row for row in data.get(AMCL_HEALTH, [])
                    if len(row.get("values", [])) >= 10]
     scan_rows = [row for row in data.get(AMCL_SCAN_ALIGNMENT, [])
-                 if len(row.get("values", [])) >= 14]
+                 if len(row.get("values", [])) >= 11]
     if health_rows or scan_rows:
         applied_xy = [row["values"][8] for row in health_rows]
         applied_yaw = [abs(row["values"][9]) for row in health_rows]
@@ -1603,6 +1548,13 @@ def report_localization_diagnostics(
             f"{max(applied_xy) if applied_xy else math.nan:.3f}m, "
             f"yaw max={max(applied_yaw) if applied_yaw else math.nan:.3f}rad"
         )
+    timing_values = [row["value"] for row in data.get(AMCL_TIMING, [])
+                     if math.isfinite(row["value"])]
+    if timing_values:
+        print(f"AMCL PF wall ms: n={len(timing_values)} "
+              f"median={statistics.median(timing_values):.3f} "
+              f"p95={percentile(timing_values, 0.95):.3f} "
+              f"max={max(timing_values):.3f} (startup included)")
 
 
 def report_csv_path_follow(
@@ -2356,8 +2308,12 @@ def report_encoder_slip(
                       f"bias={statistics.mean(residuals):+.3f} "
                       f"RMSE={math.sqrt(statistics.mean(x*x for x in residuals)):.3f}")
     summarize("all", rows)
-    summarize("zero-throttle/brake command", [x for x in rows if x["throttle"] < 0.01])
-    summarize("positive throttle", [x for x in rows if x["throttle"] >= 0.01])
+    # Unity selects its distinct full-brake branch only at exactly zero.
+    # Positive values below 0.01 are valid motor-torque commands (the live
+    # bridge transmits them in 0.001 increments) and must not be labeled brake.
+    summarize("zero-throttle/full-brake command", [
+        x for x in rows if x["throttle"] == 0.0])
+    summarize("positive throttle", [x for x in rows if x["throttle"] > 0.0])
     summarize("wheel/body speed mismatch >0.5 m/s", [
         x for x in rows if max(abs(x["left_surface_minus_body"]),
                                abs(x["right_surface_minus_body"])) > 0.5])
@@ -2633,7 +2589,17 @@ def load_trajectory(path: Path | None) -> tuple[list[dict[str, float]], float] |
     if path is None:
         return None
     with path.open(newline="", encoding="utf-8") as stream:
-        rows = list(csv.DictReader(stream))
+        def csv_lines():
+            for line in stream:
+                text=line.lstrip()
+                if text.startswith('#'):
+                    text=text[1:].lstrip()
+                    if not text.startswith('s_m,'):
+                        continue
+                    yield text
+                elif text.strip():
+                    yield text
+        rows = list(csv.DictReader(csv_lines()))
     if not rows:
         raise ValueError(f"empty trajectory: {path}")
     first = rows[0]
@@ -2671,43 +2637,63 @@ def report_horizon_errors(
     trajectory: tuple[list[dict[str, float]], float] | None,
 ) -> None:
     print(
-        "horizon comparison note: closed-loop logs replan controls every 25 ms; "
-        "beyond already-queued commands these errors are not fixed-input plant accuracy."
+        "horizon comparison note: prediction starts at candidate command-start time "
+        "when recorded (otherwise control ROS time); closed-loop logs replan controls "
+        "every 25 ms, so later horizons are not fixed-input plant accuracy."
     )
     truth_times = [row["stamp"] for row in truth]
+
+    def truth_at(stamp: float) -> tuple[dict[str, float], float] | None:
+        """Interpolate truth onto the controller epoch; never extrapolate."""
+        index = bisect.bisect_left(truth_times, stamp)
+        if index < len(truth_times) and truth_times[index] == stamp:
+            return truth[index], 0.0
+        if index == 0 or index == len(truth_times):
+            return None
+        before, after = truth[index - 1], truth[index]
+        span = truth_times[index] - truth_times[index - 1]
+        if span <= 0.0 or span > 0.050:
+            return None
+        ratio = (stamp - truth_times[index - 1]) / span
+        sample = {"stamp": stamp}
+        for field in ("x", "y", "u", "v", "r"):
+            sample[field] = before[field] + ratio * (after[field] - before[field])
+        sample["yaw"] = before["yaw"] + ratio * normalized_angle(
+            after["yaw"] - before["yaw"]
+        )
+        return sample, min(stamp - truth_times[index - 1], truth_times[index] - stamp)
+
     errors: dict[int, list[dict[str, float]]] = {}
     for row in diagnostics:
         diag = row.get("json", {})
+        candidate_ns = diag.get("candidate_command_stamp_ns")
         control_ns = diag.get("control_ros_stamp_ns")
-        if not isinstance(control_ns, int):
+        start_ns = candidate_ns if isinstance(candidate_ns, int) and candidate_ns > 0 else control_ns
+        if not isinstance(start_ns, int):
             continue
-        start_time = control_ns * 1e-9
+        start_time = start_ns * 1e-9
         control_prediction = diag.get("control_time_prediction", {})
         map_start = control_prediction.get("predicted_map_pose")
-        start_index = bisect.bisect_left(truth_times, start_time)
-        candidates = [i for i in (start_index - 1, start_index) if 0 <= i < len(truth)]
-        if not candidates:
+        start_truth_result = truth_at(start_time)
+        if start_truth_result is None:
             continue
-        start_truth = min(candidates, key=lambda i: abs(truth_times[i] - start_time))
-        actual_start = truth[start_truth]
+        actual_start, start_alignment_dt = start_truth_result
         for prediction in diag.get("predictions", []):
             n = prediction.get("n")
             state = prediction.get("state")
             if not isinstance(n, int) or not isinstance(state, list) or len(state) < 5:
                 continue
             target_time = start_time + n * 0.025
-            idx = bisect.bisect_left(truth_times, target_time)
-            candidates = [i for i in (idx - 1, idx) if 0 <= i < len(truth)]
-            if not candidates:
+            actual_result = truth_at(target_time)
+            if actual_result is None:
                 continue
-            target_index = min(candidates, key=lambda i: abs(truth_times[i] - target_time))
-            if abs(truth_times[target_index] - target_time) > 0.018:
-                continue
-            actual = truth[target_index]
+            actual, target_alignment_dt = actual_result
             item = {
-                "dt": abs(truth_times[target_index] - target_time),
+                "dt": max(start_alignment_dt, target_alignment_dt),
                 "u": state[2] - actual["u"],
-                "v": state[3] - actual["v"],
+                "v_rear": state[3] - (
+                    actual["v"] - actual["r"] * MPC_REAR_AXLE_FROM_COM_M
+                ),
                 "r": state[4] - actual["r"],
                 "start_speed": math.hypot(actual_start["u"], actual_start["v"]),
             }
@@ -2733,7 +2719,7 @@ def report_horizon_errors(
             f"horizon {n} ({n*25}ms): n={len(rows)} "
             f"time_align_p95={percentile([x['dt'] for x in rows], 0.95)*1000:.2f}ms"
         )
-        for field in ("u", "v", "r", "xy", "yaw"):
+        for field in ("u", "v_rear", "r", "xy", "yaw"):
             values = [row[field] for row in rows if field in row]
             if not values:
                 continue
@@ -2749,6 +2735,22 @@ def report_horizon_errors(
                 print(f"  speed_bin [{lower:g},{upper:g}): u_RMSE={rmse:.4f} n={len(subset)}")
 
 
+def apply_initial_motion_oracle(
+    state: list[float], truth: dict[str, float],
+    components: set[str],
+) -> list[float]:
+    """Replace selected start u/v/r only; offline attribution, never runtime."""
+    indices = {"u": 0, "v": 1, "r": 2}
+    unknown = components - indices.keys()
+    if unknown:
+        raise ValueError(
+            f"motion-state oracle supports only u/v/r, got {sorted(unknown)}")
+    result = list(state)
+    for name in components:
+        result[indices[name]] = float(truth[name])
+    return result
+
+
 def report_source_plant_rollout(
     truth: list[dict[str, Any]], plant: list[dict[str, Any]],
     odom_diagnostics: list[dict[str, Any]], library_path: Path,
@@ -2762,30 +2764,50 @@ def report_source_plant_rollout(
     extra_throttle_delay_packets: int = 0,
     oracle_steering_feedback: bool = False,
     oracle_throttle_feedback: bool = False,
+    causal_steering_boundary_correction: bool = False,
     reconstruct_command_queue_from_stamps: bool = False,
     reconstruct_command_queue_from_bridge: bool = False,
-    bridge_command_epoch_offset: int = 0,
+    bridge_command_epoch_offset: int = 1,
     steering_command_samples: list[dict[str, Any]] | None = None,
     throttle_command_samples: list[dict[str, Any]] | None = None,
     bridge_timing_samples: list[dict[str, Any]] | None = None,
     reconcile_suspension_jounce_at_start: bool = False,
-) -> None:
+    mpc_diagnostics_samples: list[dict[str, Any]] | None = None,
+    collision_samples: list[dict[str, Any]] | None = None,
+    bridge_fault_samples: list[dict[str, Any]] | None = None,
+    case_index_path: Path | None = None,
+    case_index_metadata: dict[str, Any] | None = None,
+    case_index_control_paths: list[Path] | None = None,
+    oracle_initial_motion_components: set[str] | None = None,
+    source_initial_rear_omega_from_prior_step: bool = False,
+) -> dict[str, Any] | None:
     """Replay only odom plant state and queued commands through the C++ MPC plant.
 
     Starts from a recorded UnityPlantState, then advances with the recorded
-    slot-1 actuator command sequence. It never reads future measured states
+    slot-2 actuator command sequence. It never reads future measured states
     during a rollout; simulator truth is used only to score each endpoint.
-    The optional oracle-motion diagnostic replaces only initial u/v/r with
-    same-epoch Unity truth. Hidden plant states and all future inputs remain
-    unchanged; this is diagnostic only and must never be used in production.
+    The optional causal steering-boundary correction reconstructs the current
+    post-Steer rack state from current feedback and the preceding applied
+    command. It does not feed future steering feedback into an open-loop
+    horizon.
+    The optional oracle-motion diagnostic replaces selected initial u/v/r
+    with same-epoch Unity truth. Hidden plant states and all future inputs
+    remain unchanged; this is diagnostic only and must never be used in
+    production.
     """
     if min(extra_steering_delay_packets, extra_throttle_delay_packets) < 0:
         raise ValueError("extra command delays must be nonnegative")
     if (reconstruct_command_queue_from_stamps and
             reconstruct_command_queue_from_bridge):
         raise ValueError("select only one command-queue reconstruction source")
-    if bridge_command_epoch_offset and not reconstruct_command_queue_from_bridge:
+    if (bridge_command_epoch_offset != 1 and
+            not reconstruct_command_queue_from_bridge):
         raise ValueError("bridge command epoch offset requires bridge reconstruction")
+    oracle_components = set(oracle_initial_motion_components or ())
+    if oracle_motion_initial_state:
+        oracle_components.update(("u", "v", "r"))
+    if oracle_components - {"u", "v", "r"}:
+        raise ValueError("initial motion oracle components must be selected from u/v/r")
     if not truth or not plant:
         print("source-plant rollout: requires both Unity truth and plant-state streams")
         return
@@ -2806,8 +2828,22 @@ def report_source_plant_rollout(
         ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int)]
     reconcile_jounce.restype = ctypes.c_int
 
-    truth_by_stamp = {round(row["stamp"], 6): row for row in truth}
-    plant_by_stamp = {round(row["stamp"], 6): row for row in plant}
+    truth_by_stamp_ns = {
+        int(row["stamp_ns"]): row for row in truth
+        if isinstance(row.get("stamp_ns"), int)
+    }
+    plant_by_stamp_ns = {
+        int(row["stamp_ns"]): row for row in plant
+        if isinstance(row.get("stamp_ns"), int)
+    }
+    # Intersect exact ROS header epochs first. Convert the exact integer stamp
+    # to float seconds only after pairing; rounding separately to microseconds
+    # could silently merge nonidentical sensor epochs.
+    epoch_stamps_ns = sorted(set(truth_by_stamp_ns) & set(plant_by_stamp_ns))
+    truth_by_stamp = {stamp_ns * 1.0e-9: truth_by_stamp_ns[stamp_ns]
+                      for stamp_ns in epoch_stamps_ns}
+    plant_by_stamp = {stamp_ns * 1.0e-9: plant_by_stamp_ns[stamp_ns]
+                      for stamp_ns in epoch_stamps_ns}
     # Float64MultiArray has no ROS header, so its first value is the local
     # observer clock (which starts at zero), not the bag/Unity epoch. Pair it
     # to the plant publication by recorder receive time; both are emitted in
@@ -2827,10 +2863,48 @@ def report_source_plant_rollout(
             if len(values) >= 24:
                 raw_rear_wheel_omega_by_stamp[stamp] = (
                     values[22], values[23])
-    times = sorted(set(truth_by_stamp) & set(plant_by_stamp))
+    times = [stamp_ns * 1.0e-9 for stamp_ns in epoch_stamps_ns]
+    cutoff_events = [
+        (float(row["bag_time"]), "collision_count")
+        for row in collision_samples or []
+        if float(row.get("value", 0.0)) > 0.0
+    ]
+    for row in bridge_fault_samples or []:
+        value = row.get("value", 0.0)
+        try:
+            active = float(value) != 0.0
+        except (TypeError, ValueError):
+            active = bool(str(value).strip()) and str(value).strip().lower() not in (
+                "0", "false", "none", "null", "ok")
+        if active:
+            cutoff_events.append((float(row["bag_time"]), "bridge_fault"))
+    cutoff_receipt_s, cutoff_reason = (
+        min(cutoff_events) if cutoff_events else (None, None))
+    if cutoff_receipt_s is not None:
+        # Collision/fault topics have no Unity header. Exclude the event
+        # interval and the preceding packet interval conservatively.
+        times = [stamp for stamp in times
+                 if truth_by_stamp[stamp]["bag_time"] < cutoff_receipt_s - 0.025]
     if len(times) < 31:
         print(f"source-plant rollout: only {len(times)} aligned epochs")
-        return
+        return None
+
+    progress_by_stamp: dict[int, tuple[float, str]] = {}
+    for diagnostic_row in mpc_diagnostics_samples or []:
+        payload = diagnostic_row.get("json") or {}
+        stamp_candidates = [
+            payload.get("gt_stamp_ns"), payload.get("source_stamp_ns"),
+            payload.get("odom_source_stamp_ns"),
+            (payload.get("control_time_prediction") or {}).get(
+                "plant_source_stamp_ns"),
+        ]
+        stamp_ns = next((int(value) for value in stamp_candidates
+                         if isinstance(value, int)), None)
+        progress_m = payload.get("progress_m")
+        if (stamp_ns is not None and
+                isinstance(progress_m, (int, float)) and
+                math.isfinite(float(progress_m))):
+            progress_by_stamp[stamp_ns] = (float(progress_m), "mpc_diagnostics")
 
     def sample_commands_at_epochs(
         samples: list[dict[str, Any]] | None,
@@ -2846,47 +2920,70 @@ def report_source_plant_rollout(
                 ordered[sample_index]["value"] if sample_index >= 0 else 0.0)
         return values
 
-    command_samples_from_bridge: tuple[list[dict[str, Any]],
-                                       list[dict[str, Any]]] | None = None
-    if reconstruct_command_queue_from_bridge:
-        bridge_steering_samples: list[dict[str, Any]] = []
-        bridge_throttle_samples: list[dict[str, Any]] = []
-        for row in bridge_timing_samples or []:
-            payload = row.get("json", {})
-            request_stamp_ns = payload.get("bridge_request_ros_stamp_ns")
-            steering_sent = payload.get("sent_steering_norm")
-            throttle_sent = payload.get("sent_throttle_norm")
-            if (request_stamp_ns is None or steering_sent is None or
-                    throttle_sent is None):
-                continue
-            try:
-                request_stamp = int(request_stamp_ns) * 1.0e-9
-                steering_value = float(steering_sent)
-                throttle_value = float(throttle_sent)
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if not (math.isfinite(request_stamp) and
-                    math.isfinite(steering_value) and
-                    math.isfinite(throttle_value)):
-                continue
-            bridge_steering_samples.append({
-                "bag_time": request_stamp, "value": steering_value})
-            bridge_throttle_samples.append({
-                "bag_time": request_stamp, "value": throttle_value})
-        command_samples_from_bridge = (
-            bridge_steering_samples, bridge_throttle_samples)
+    # Bridge request stamps and ROS message headers are the same epoch, but
+    # converting their nanoseconds independently to float seconds can leave a
+    # sub-microsecond difference. Matching by rounded float keys or selecting
+    # only samples <= the rounded header can then choose the previous request.
+    # Associate by nearest integer-nanosecond epoch instead. The 1 ms bound is
+    # far below the 25 ms packet period and rejects adjacent requests.
+    bridge_payload_by_epoch: list[dict[str, Any]] = [{} for _ in times]
+    bridge_epoch_valid = [False for _ in times]
+    bridge_request_events: list[tuple[int, dict[str, Any]]] = []
+    for event in bridge_timing_samples or []:
+        payload = event.get("json", {})
+        request_ns = payload.get("bridge_request_ros_stamp_ns")
+        if request_ns is None:
+            continue
+        try:
+            bridge_request_events.append((int(request_ns), payload))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    bridge_request_events.sort(key=lambda event: event[0])
+    bridge_request_stamps_ns = [event[0] for event in bridge_request_events]
+    for index, epoch in enumerate(times):
+        epoch_ns = round(epoch * 1.0e9)
+        insertion = bisect.bisect_left(bridge_request_stamps_ns, epoch_ns)
+        candidates = [candidate for candidate in (insertion - 1, insertion)
+                     if 0 <= candidate < len(bridge_request_events)]
+        if not candidates:
+            continue
+        nearest = min(candidates,
+                      key=lambda candidate:
+                      abs(bridge_request_stamps_ns[candidate] - epoch_ns))
+        request_ns, payload = bridge_request_events[nearest]
+        if abs(request_ns - epoch_ns) <= 1_000_000:
+            bridge_payload_by_epoch[index] = payload
+            bridge_epoch_valid[index] = True
 
-    steering_samples = (command_samples_from_bridge[0]
-                        if command_samples_from_bridge is not None
-                        else steering_command_samples)
-    throttle_samples = (command_samples_from_bridge[1]
-                        if command_samples_from_bridge is not None
-                        else throttle_command_samples)
+    if reconstruct_command_queue_from_bridge:
+        # A missing exact request epoch stays invalid for validation below;
+        # zero here is only a storage placeholder and is never scored as a
+        # reconstructed command.
+        steering_command_by_epoch = [
+            float(payload["sent_steering_norm"])
+            if valid and payload.get("sent_steering_norm") is not None else 0.0
+            for payload, valid in zip(bridge_payload_by_epoch,
+                                      bridge_epoch_valid)]
+        throttle_command_by_epoch = [
+            float(payload["sent_throttle_norm"])
+            if valid and payload.get("sent_throttle_norm") is not None else 0.0
+            for payload, valid in zip(bridge_payload_by_epoch,
+                                      bridge_epoch_valid)]
+        bridge_epoch_valid = [
+            valid and
+            payload.get("sent_steering_norm") is not None and
+            payload.get("sent_throttle_norm") is not None
+            for payload, valid in zip(bridge_payload_by_epoch,
+                                      bridge_epoch_valid)]
+    else:
+        steering_samples = steering_command_samples
+        throttle_samples = throttle_command_samples
+        steering_command_by_epoch = sample_commands_at_epochs(steering_samples)
+        throttle_command_by_epoch = sample_commands_at_epochs(throttle_samples)
+
     reconstruct_command_queue = (
         reconstruct_command_queue_from_stamps or
         reconstruct_command_queue_from_bridge)
-    steering_command_by_epoch = sample_commands_at_epochs(steering_samples)
-    throttle_command_by_epoch = sample_commands_at_epochs(throttle_samples)
     steering_feedback_phase_errors = {
         offset: [] for offset in range(-2, 4)
     }
@@ -2902,7 +2999,7 @@ def report_source_plant_rollout(
     ):
         print("source-plant rollout: command reconstruction requires both "
               "steering and throttle inputs")
-        return
+        return None
     if reconstruct_command_queue:
         # A replayed bag can contain old source header stamps while the bag's
         # receive clock is current. Those are different clock domains, so
@@ -2915,17 +3012,17 @@ def report_source_plant_rollout(
                 "source-plant rollout: timestamp command reconstruction is "
                 f"not valid for this capture (bag/header clock offset "
                 f"{clock_offset:+.3f}s); use a live request-stamped bag")
-            return
+            return None
         # Compare both serialized queue slots and actuator feedback against
-        # nearby Bridge request epochs. The slot names are relative to the
-        # observer's current publication, whereas the rollout offset is
-        # relative to the preceding request; comparing only slot 1 to that
-        # selected rollout epoch silently mixes those two conventions.
+        # nearby Bridge request epochs. Slot 2 is the newest command associated
+        # with the current epoch and is consumed over the following plant
+        # interval; slot 1 is only the preceding command.
         # Keep this diagnostic descriptive: Bridge request stamps do not
         # expose Unity FixedUpdate/application sequence numbers.
         def report_bridge_epoch_alignment(
             label: str, observed_values: list[float],
             reference_values: list[float], valid: list[bool] | None = None,
+            reference_valid: list[bool] | None = None,
         ) -> None:
             offsets = (-2, -1, 0, 1)
             print(f"  {label} vs Bridge sent command by request-epoch offset:")
@@ -2934,7 +3031,9 @@ def report_source_plant_rollout(
                     observed_values[index] - reference_values[index + offset]
                     for index in range(len(times))
                     if (0 <= index + offset < len(times) and
-                        (valid is None or valid[index]))
+                        (valid is None or valid[index]) and
+                        (reference_valid is None or
+                         reference_valid[index + offset]))
                 ]
                 if not errors:
                     continue
@@ -2949,19 +3048,23 @@ def report_source_plant_rollout(
         report_bridge_epoch_alignment(
             "published steering queue slot 1",
             [plant_by_stamp[timestamp]["delayed_steering_1"]
-             for timestamp in times], steering_command_by_epoch)
+             for timestamp in times], steering_command_by_epoch,
+            reference_valid=bridge_epoch_valid)
         report_bridge_epoch_alignment(
             "published steering queue slot 2",
             [plant_by_stamp[timestamp]["delayed_steering_2"]
-             for timestamp in times], steering_command_by_epoch)
+             for timestamp in times], steering_command_by_epoch,
+            reference_valid=bridge_epoch_valid)
         report_bridge_epoch_alignment(
             "published throttle queue slot 1",
             [plant_by_stamp[timestamp]["delayed_throttle_1"]
-             for timestamp in times], throttle_command_by_epoch)
+             for timestamp in times], throttle_command_by_epoch,
+            reference_valid=bridge_epoch_valid)
         report_bridge_epoch_alignment(
             "published throttle queue slot 2",
             [plant_by_stamp[timestamp]["delayed_throttle_2"]
-             for timestamp in times], throttle_command_by_epoch)
+             for timestamp in times], throttle_command_by_epoch,
+            reference_valid=bridge_epoch_valid)
         feedback_valid = [
             plant_by_stamp[timestamp]["actuator_feedback_valid"]
             for timestamp in times]
@@ -2969,26 +3072,12 @@ def report_source_plant_rollout(
             "reported throttle actuator feedback",
             [plant_by_stamp[timestamp]["throttle_feedback"]
              for timestamp in times], throttle_command_by_epoch,
-            feedback_valid)
+            feedback_valid, bridge_epoch_valid)
 
     # Response receive time is not a Unity physics clock. Keep it only as an
     # A/B diagnostic: headers are request-stamped although telemetry is
     # decoded on response. This tests epoch mismatch without changing model
     # parameters or the production 25 ms input contract.
-    bridge_by_request_stamp: dict[float, dict[str, Any]] = {}
-    for event in bridge_timing_samples or []:
-        payload = event.get("json", {})
-        request_ns = payload.get("bridge_request_ros_stamp_ns")
-        if request_ns is None:
-            continue
-        try:
-            key = round(int(request_ns) * 1.0e-9, 6)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        bridge_by_request_stamp[key] = payload
-    bridge_payload_by_epoch = [
-        bridge_by_request_stamp.get(timestamp, {}) for timestamp in times
-    ]
     bridge_receive_time_by_epoch: list[float | None] = []
     bridge_pipeline_depth_by_epoch: list[int | None] = []
     bridge_requests_monotonic: list[tuple[int, int]] = []
@@ -3077,6 +3166,18 @@ def report_source_plant_rollout(
         state[22:26] = row["low_side_speed_time_s"]
         return state
 
+    def reconstruct_feedback_aligned_rack(
+        row: dict[str, Any], command_norm: float | None = None,
+    ) -> float:
+        if not row.get("actuator_feedback_valid", False):
+            return float(row["physical_steering"])
+        # slot 1 closed the interval represented by this feedback sample;
+        # slot 2 is the queued target for the interval being predicted.
+        return _unity_vehicle_steering_angle_after(
+            float(row["steering_feedback"]),
+            float(row["delayed_steering_1"] if command_norm is None
+                  else command_norm), UNITY_FIXED_STEP_S)
+
     def make_input(state: list[float], angles: list[float],
                    queue: dict[str, Any], history_initialized: bool,
                    command_slot: int = 1,
@@ -3104,6 +3205,31 @@ def report_source_plant_rollout(
             raise RuntimeError("source plant rejected suspension-jounce reconciliation")
         return list(c_state), bool(c_history_initialized.value)
 
+    # A single source of truth for the pre-observer physical rear-wheel
+    # endpoint. The observer may change rear omega at the next request epoch,
+    # but that correction must not be mistaken for independent Unity physics.
+    # Reconstruct from the PREVIOUS published plant state and request slot 2,
+    # never the stale slot 1 or an unavailable future measurement.
+    prior_step_raw_rear_omega: dict[float, tuple[float, float]] = {}
+
+    def raw_rear_omega_before_observer(
+        previous_time: float, current_time: float,
+    ) -> tuple[float, float] | None:
+        if current_time in prior_step_raw_rear_omega:
+            return prior_step_raw_rear_omega[current_time]
+        if abs(current_time - previous_time - .025) > .004:
+            return None
+        previous = plant_by_stamp[previous_time]
+        value = make_input(
+            source_state(previous), list(previous["wheel_angle"]), previous,
+            previous["suspension_history_initialized"], command_slot=2)
+        result = UnitySourcePlantOutputC()
+        if not step(ctypes.byref(value), .025, ctypes.byref(result)):
+            return None
+        rear = (float(result.state[5]), float(result.state[6]))
+        prior_step_raw_rear_omega[current_time] = rear
+        return rear
+
     def report_encoder_rollout() -> None:
         """Compare real WheelEncoder.FixedUpdate with pre-solve plant RPM.
 
@@ -3125,36 +3251,15 @@ def report_source_plant_rollout(
             name: [] for name in ("queue_slot_1", "queue_slot_2",
                                   "throttle_feedback_start",
                                   "throttle_feedback_end",
-                                  "queue_slot_1_pre_observer_wheels")}
-        # The plant topic is published after the observer corrects wheel
-        # omega. Reconstruct the immediately-preceding raw endpoint from the
-        # prior logged corrected state and the command applied over that
-        # preceding 25 ms interval. This allows a direct causal comparison of
-        # the corrected and uncorrected boundary states even when a bag did
-        # not record /odom/diagnostics.
+                                  "queue_slot_2_pre_observer_wheels")}
+        # The plant topic reports post-observer rear omega. Reuse the exact
+        # prior-request source transition for raw pre-observer wheel values
+        # even when the /odom/diagnostics stream was disabled in the bag.
         raw_wheels_at: dict[float, tuple[float, float]] = {}
         for previous_time, current_time in zip(common, common[1:]):
-            if abs((current_time - previous_time) - 0.025) > 0.004:
-                continue
-            previous = plant_by_stamp[previous_time]
-            value = make_input(
-                source_state(previous), list(previous["wheel_angle"]),
-                previous, previous["suspension_history_initialized"])
-            value.throttle_normalized = previous["delayed_throttle_1"]
-            valid = True
-            for _ in range(25):
-                output = UnitySourcePlantOutputC()
-                if not step(ctypes.byref(value), 0.001,
-                            ctypes.byref(output)):
-                    valid = False
-                    break
-                value.state[:] = output.state[:]
-                value.wheel_rotation_angle_rad[:] = \
-                    output.wheel_rotation_angle_rad[:]
-                value.suspension_history_initialized = \
-                    output.suspension_history_initialized
-            if valid:
-                raw_wheels_at[current_time] = (value.state[5], value.state[6])
+            rear = raw_rear_omega_before_observer(previous_time, current_time)
+            if rear is not None:
+                raw_wheels_at[current_time] = rear
         for start_time, end_time in zip(common, common[1:]):
             if abs((end_time - start_time) - 0.025) > 0.004:
                 continue
@@ -3181,8 +3286,8 @@ def report_source_plant_rollout(
                 # Compare against the plant endpoint before that correction
                 # to determine whether the correction itself harms the next
                 # interval's initial condition.
-                "queue_slot_1_pre_observer_wheels": (
-                    start["delayed_throttle_1"], True),
+                "queue_slot_2_pre_observer_wheels": (
+                    start["delayed_throttle_2"], True),
             }
             measured_average_omega = [
                 measured_angles[side] / (end_time - start_time)
@@ -3238,7 +3343,7 @@ def report_source_plant_rollout(
                     predicted_average_omega = predicted_delta[side] / (
                         end_time - start_time)
                     errors[mode].append({
-                        "q": start["delayed_throttle_1"],
+                        "q": throttle,
                         "steer": start["physical_steering"],
                         "error": measured_angles[side] - predicted_delta[side],
                         "start_omega": start_omega[side],
@@ -3378,7 +3483,11 @@ def report_source_plant_rollout(
                 -err_x * math.sin(first["yaw"]) + err_y * math.cos(first["yaw"]),
                 math.hypot(err_x, err_y)))
 
-    horizons = (1, 4, 10, 20, 30)
+    # Include the handoff's early transition checkpoints as well as the
+    # established quarter/half/full-horizon checkpoints. All are sampled on
+    # the same 25 ms Unity epoch grid; the underlying plant still substeps at
+    # 1 ms between them.
+    horizons = (1, 2, 3, 4, 5, 10, 20, 30)
     errors = {horizon: {field: [] for field in ("u", "v", "r", "yaw", "xy")}
               for horizon in horizons}
     grouped_yaw: dict[int, list[tuple[float, float, float]]] = {
@@ -3408,6 +3517,14 @@ def report_source_plant_rollout(
         for phase in ("start_feedback", "end_feedback")
     }
     one_step_motion_details: list[dict[str, float]] = []
+    steering_chronology_errors = {
+        mode: {
+            group: {field: [] for field in ("u", "v", "r")}
+            for group in ("all", "high_steer", "steering_transition",
+                          "high_steer_transition")
+        }
+        for mode in ("causal_start_rack", "backdated_endpoint_reset")
+    }
     response_dt_one_step_errors = {
         field: [] for field in ("u", "v", "r", "steering")
     }
@@ -3421,7 +3538,7 @@ def report_source_plant_rollout(
     command_timing_ab = {
         group: {
             source: {field: [] for field in ("u", "v", "r")}
-            for source in ("published_head", "request_timestamp")
+            for source in ("published_queue_slot_2", "request_timestamp")
         }
         for group in ("queue_aligned", "queue_misaligned")
     }
@@ -3455,10 +3572,16 @@ def report_source_plant_rollout(
         start_time, next_time = times[index], times[index + 1]
         if abs((next_time - start_time) - 0.025) > 0.004:
             continue
+        command_epoch = (index - 1 + bridge_command_epoch_offset
+                         if reconstruct_command_queue else -1)
         if (reconstruct_command_queue and
-                index - 1 + bridge_command_epoch_offset < 0):
+                command_epoch < 0):
             # The request immediately before the capture is absent, so its
             # queued command cannot be reconstructed causally.
+            continue
+        if (reconstruct_command_queue_from_bridge and
+                (command_epoch >= len(bridge_epoch_valid) or
+                 not bridge_epoch_valid[command_epoch])):
             continue
         start_plant = plant_by_stamp[start_time]
         start_truth = truth_by_stamp[start_time]
@@ -3469,17 +3592,21 @@ def report_source_plant_rollout(
                 next_plant["actuator_feedback_valid"]):
             start_angle = start_plant["steering_feedback"]
             measured_next_angle = next_plant["steering_feedback"]
-            max_steering_move = math.radians(183.345993) * 0.025
+            # Request-indexed actuator samples represent successive 40 Hz
+            # simulation epochs. Transport/stamp jitter is not extra Unity
+            # FixedUpdate time: always replay the nominal 25 x 1 ms steps.
+            interval_duration_s = UNITY_REQUEST_EPOCH_S
             phase_residuals: list[tuple[float, int]] = []
             for offset in steering_feedback_phase_errors:
                 epoch = index + offset
-                if not 0 <= epoch < len(steering_command_by_epoch):
+                if (not 0 <= epoch < len(steering_command_by_epoch) or
+                        not bridge_epoch_valid[epoch]):
                     continue
                 target_angle = (
                     steering_command_by_epoch[epoch] * MAX_STEERING_RAD)
-                delta = target_angle - start_angle
-                predicted_angle = start_angle + max(
-                    -max_steering_move, min(max_steering_move, delta))
+                predicted_angle = _unity_vehicle_steering_angle_after(
+                    start_angle, steering_command_by_epoch[epoch],
+                    interval_duration_s)
                 residual = predicted_angle - measured_next_angle
                 steering_feedback_phase_errors[offset].append(residual)
                 phase_residuals.append((abs(residual), offset))
@@ -3504,21 +3631,21 @@ def report_source_plant_rollout(
                         OverflowError):
                     pass
         if reconstruct_command_queue:
-            command_epoch = index - 1 + bridge_command_epoch_offset
             reconstructed_steering = steering_command_by_epoch[command_epoch]
             reconstructed_throttle = throttle_command_by_epoch[command_epoch]
-            published_head_matches = (
-                abs(start_plant["delayed_steering_1"] -
+            published_queue_slot_2_matches = (
+                abs(start_plant["delayed_steering_2"] -
                     reconstructed_steering) <= 1.0e-3 and
-                abs(start_plant["delayed_throttle_1"] -
+                abs(start_plant["delayed_throttle_2"] -
                     reconstructed_throttle) <= 1.0e-3)
-            group = ("queue_aligned" if published_head_matches else
+            group = ("queue_aligned" if published_queue_slot_2_matches else
                      "queue_misaligned")
-            for source in ("published_head", "request_timestamp"):
+            for source in ("published_queue_slot_2", "request_timestamp"):
                 timing_input = make_input(
                     source_state(start_plant), list(start_plant["wheel_angle"]),
                     start_plant,
-                    start_plant["suspension_history_initialized"])
+                    start_plant["suspension_history_initialized"],
+                    command_slot=2)
                 if source == "request_timestamp":
                     timing_input.steering_target_rad = (
                         reconstructed_steering * MAX_STEERING_RAD)
@@ -3533,6 +3660,50 @@ def report_source_plant_rollout(
                         timing_output.state[2] - next_truth["r"])
         current_steering = start_plant["physical_steering"]
         next_steering = next_plant["physical_steering"]
+        if start_plant.get("actuator_feedback_valid", False):
+            current_steering = reconstruct_feedback_aligned_rack(start_plant)
+        if next_plant.get("actuator_feedback_valid", False):
+            next_steering = reconstruct_feedback_aligned_rack(next_plant)
+
+        # Direct A/B for the diagnosed chronology bug. The production-order
+        # candidate starts from the rack state known at this epoch. The old
+        # ordering substitutes the *next* epoch's CurrentSteeringAngle and
+        # advances it before simulating this completed interval. Future
+        # feedback is used only to reproduce that old implementation for
+        # diagnosis, never as a deployable input.
+        if (start_plant.get("actuator_feedback_valid", False) and
+                next_plant.get("actuator_feedback_valid", False)):
+            chronology_start_states = {
+                "causal_start_rack": source_state(start_plant),
+                "backdated_endpoint_reset": source_state(start_plant),
+            }
+            chronology_start_states["causal_start_rack"][13] = current_steering
+            chronology_start_states["backdated_endpoint_reset"][13] = (
+                reconstruct_feedback_aligned_rack(
+                    next_plant, start_plant["delayed_steering_2"]))
+            transition = abs(next_steering - current_steering) >= 0.05
+            selected_groups = ["all"]
+            high_steer = abs(current_steering) >= 0.35
+            if high_steer:
+                selected_groups.append("high_steer")
+            if transition:
+                selected_groups.append("steering_transition")
+            if high_steer and transition:
+                selected_groups.append("high_steer_transition")
+            for mode, state in chronology_start_states.items():
+                chronology_input = make_input(
+                    state, list(start_plant["wheel_angle"]), start_plant,
+                    start_plant["suspension_history_initialized"],
+                    command_slot=2)
+                chronology_output = UnitySourcePlantOutputC()
+                if not step(ctypes.byref(chronology_input), 0.025,
+                            ctypes.byref(chronology_output)):
+                    continue
+                for group in selected_groups:
+                    for field, state_index in (("u", 0), ("v", 1), ("r", 2)):
+                        truth_value = next_truth[field]
+                        steering_chronology_errors[mode][group][field].append(
+                            chronology_output.state[state_index] - truth_value)
         steering_delta_magnitude = abs(next_steering) - abs(current_steering)
         regimes = []
         if abs(current_steering) >= 0.10:
@@ -3542,18 +3713,17 @@ def report_source_plant_rollout(
                     regimes.append("high-steer-unwind")
                 elif steering_delta_magnitude > 0.003:
                     regimes.append("high-steer-turn-in")
-        initial_state = source_state(start_plant)
-        if oracle_motion_initial_state:
-            initial_state[0] = start_truth["u"]
-            initial_state[1] = start_truth["v"]
-            initial_state[2] = start_truth["r"]
+        initial_state = apply_initial_motion_oracle(
+            source_state(start_plant), start_truth, oracle_components)
+        if causal_steering_boundary_correction:
+            initial_state[13] = current_steering
         initial_state, initial_history_initialized = reconcile_start_state(
             initial_state, start_plant["suspension_history_initialized"])
         for slot in (1, 2):
             candidate_input = make_input(
                 initial_state, list(start_plant["wheel_angle"]), start_plant,
                 initial_history_initialized, slot)
-            if reconstruct_command_queue and slot == 1:
+            if reconstruct_command_queue and slot == 2:
                 command_epoch = index - 1 + bridge_command_epoch_offset
                 steering_value = steering_command_by_epoch[command_epoch]
                 throttle_value = throttle_command_by_epoch[command_epoch]
@@ -3564,7 +3734,7 @@ def report_source_plant_rollout(
             if not step(ctypes.byref(candidate_input), 0.025,
                         ctypes.byref(candidate_output)):
                 continue
-            if reconstruct_command_queue and slot == 1:
+            if reconstruct_command_queue and slot == 2:
                 reconstructed_one_step_errors["u"].append(
                     candidate_output.state[0] - next_truth["u"])
                 reconstructed_one_step_errors["v"].append(
@@ -3611,8 +3781,10 @@ def report_source_plant_rollout(
                 candidate_output.state[2] - next_truth["r"])
             command_slot_errors[slot]["steering"].append(
                 candidate_output.state[13] - next_steering)
-            if slot == 1:
+            if slot == 2:
                 next_state = source_state(next_plant)
+                if causal_steering_boundary_correction:
+                    next_state[13] = next_steering
                 for state_index, name in enumerate(plant_state_names):
                     one_step_plant_state_errors[name].append(
                         candidate_output.state[state_index] -
@@ -3787,16 +3959,33 @@ def report_source_plant_rollout(
         start_time = times[start]
         start_truth = truth_by_stamp[start_time]
         start_plant = plant_by_stamp[start_time]
+        # Experimental causal A/B: the odometry observer overwrites the rear
+        # wheel speeds with 2*(encoder-model rotation innovation)/packet_dt.
+        # The resulting rear speeds are then carried into the MPC's physical
+        # source state. Here recover the PRE-OBSERVER rear wheel speeds using
+        # only the immediately preceding already-published source state and
+        # that previous request's exact slot-2 actuator command. NO Unity
+        # truth or future packet is used to construct these initial states.
+        # This does NOT alter production odometry or source state and is not
+        # an empirical damping/correction rule.
         state = source_state(start_plant)
-        if oracle_motion_initial_state:
-            # Isolate whether a short-horizon yaw miss is caused by the
-            # observer's initial motion-state error, without granting the
-            # plant any future truth or changing its hidden PhysX states.
-            state[0] = start_truth["u"]
-            state[1] = start_truth["v"]
-            state[2] = start_truth["r"]
+        if source_initial_rear_omega_from_prior_step:
+            if start < 1 or abs(start_time - times[start-1] - .025) > .004:
+                skipped += 1
+                continue
+            raw_rear = raw_rear_omega_before_observer(
+                times[start-1], start_time)
+            if raw_rear is None:
+                skipped += 1
+                continue
+            state[5], state[6] = raw_rear
+        state = apply_initial_motion_oracle(
+            state, start_truth, oracle_components)
+        if causal_steering_boundary_correction:
+            state[13] = reconstruct_feedback_aligned_rack(start_plant)
         state, history_initialized = reconcile_start_state(
             state, start_plant["suspension_history_initialized"])
+        start_state = list(state)
         angles = list(start_plant["wheel_angle"])
         predicted_yaw = start_truth["yaw"]
         predicted_pose_x, predicted_pose_y = truth_pose_xy(start_truth)
@@ -3844,12 +4033,17 @@ def report_source_plant_rollout(
             command_step = start + horizon - 1
             if reconstruct_command_queue:
                 # Packet headers are stamped with the Bridge request epoch.
-                # The command callbacks are asynchronous and can deliver the
-                # next controller output before this response is processed.
-                # Reconstruct the two-entry queue using only command samples
-                # received by the request epoch; its head is the previous
-                # request's command, which is what advance() applies next.
+                # The request paired with this start state applies its command
+                # after the telemetry snapshot, over the following Unity
+                # physics interval. Offset +1 from the preceding request
+                # therefore selects this interval's command.
                 command_epoch = command_step - 1 + bridge_command_epoch_offset
+                if (reconstruct_command_queue_from_bridge and
+                        (command_epoch < 0 or
+                         command_epoch >= len(bridge_epoch_valid) or
+                         not bridge_epoch_valid[command_epoch])):
+                    valid = False
+                    break
                 steering_value = steering_command_by_epoch[command_epoch]
                 throttle_value = throttle_command_by_epoch[command_epoch]
                 steering_source = current
@@ -3866,14 +4060,15 @@ def report_source_plant_rollout(
                 break
             dt = 0.025
             input_value = make_input(
-                state, angles, steering_source, history_initialized)
+                state, angles, steering_source, history_initialized,
+                command_slot=2)
             if reconstruct_command_queue:
                 input_value.steering_target_rad = \
                     steering_value * MAX_STEERING_RAD
                 input_value.throttle_normalized = throttle_value
             else:
                 input_value.throttle_normalized = \
-                    throttle_source["delayed_throttle_1"]
+                    throttle_source["delayed_throttle_2"]
             if oracle_steering_feedback:
                 # Diagnostic only: use the next recorded actuator feedback as
                 # the steering target for this interval. This isolates the
@@ -4000,6 +4195,8 @@ def report_source_plant_rollout(
             window_yaw_rate_errors.append(state[2] - actual["r"])
             window_pose_trace.append({
                 "step": float(horizon),
+                "stamp_ns": int(plant_by_stamp[target_time].get(
+                    "stamp_ns", round(target_time * 1.0e9))),
                 "xy_error_m": position_error,
                 "step_error_forward_m": (
                     step_error_world_x * start_yaw_cos +
@@ -4032,12 +4229,23 @@ def report_source_plant_rollout(
                 "yaw_rate_error_radps": state[2] - actual["r"],
                 "speed_error_mps": state[0] - actual["u"],
                 "lateral_speed_error_mps": state[1] - actual["v"],
+                "predicted_u_mps": state[0],
+                "actual_u_mps": actual["u"],
+                "predicted_v_com_mps": state[1],
+                "actual_v_com_mps": actual["v"],
+                "predicted_yaw_rate_radps": state[2],
+                "actual_yaw_rate_radps": actual["r"],
                 "physical_steering_rad": state[13],
-                "queued_steering_rad":
-                (steering_value if reconstruct_command_queue else
-                     steering_source["delayed_steering_1"]) * MAX_STEERING_RAD,
-                "queued_throttle": (throttle_value if reconstruct_command_queue else
-                                    throttle_source["delayed_throttle_1"]),
+                "rollout_steering_target_rad": input_value.steering_target_rad,
+                "rollout_throttle_input": input_value.throttle_normalized,
+                "queued_steering_rad": input_value.steering_target_rad,
+                "queued_throttle": input_value.throttle_normalized,
+                "command_epoch_source": (
+                    "bridge_request_sequence" if
+                    reconstruct_command_queue_from_bridge else
+                    "command_topic_stamp" if
+                    reconstruct_command_queue_from_stamps else
+                    "production_published_queue_slot_2"),
             })
             window_max_abs_yaw_error = max(
                 window_max_abs_yaw_error,
@@ -4058,6 +4266,15 @@ def report_source_plant_rollout(
                 model_dy = predicted_pose_y - truth_integrated_pose_y
                 position_decomposition[horizon].append({
                     "start_epoch_s": start_time,
+                    "start_stamp_ns": int(start_plant.get(
+                        "stamp_ns", round(start_time * 1.0e9))),
+                    "start_bag_time_s": float(start_plant["bag_time"]),
+                    "progress_m": progress_by_stamp.get(
+                        int(start_plant.get("stamp_ns", round(start_time * 1.0e9))),
+                        (math.nan, ""))[0],
+                    "progress_source": progress_by_stamp.get(
+                        int(start_plant.get("stamp_ns", round(start_time * 1.0e9))),
+                        (math.nan, ""))[1],
                     "pred_world_x": pred_dx,
                     "pred_world_y": pred_dy,
                     "pred_forward": pred_dx * c0 + pred_dy * s0,
@@ -4072,7 +4289,33 @@ def report_source_plant_rollout(
                     "plant_vs_twist_lateral": -model_dx * s0 + model_dy * c0,
                     "xy_m": math.hypot(pred_dx, pred_dy),
                     "start_speed_mps": start_speed,
+                    "start_gt_u_mps": start_truth["u"],
+                    "start_gt_v_com_mps": start_truth["v"],
+                    "start_gt_yaw_rate_radps": start_truth["r"],
+                    "start_gt_yaw_rad": start_truth["yaw"],
                     "start_steering_rad": start_steering,
+                    "start_queue_steering_slot_1_rad": (
+                        start_plant["delayed_steering_1"] * MAX_STEERING_RAD),
+                    "start_queue_steering_slot_2_rad": (
+                        start_plant["delayed_steering_2"] * MAX_STEERING_RAD),
+                    "start_queue_throttle_slot_1":
+                        start_plant["delayed_throttle_1"],
+                    "start_queue_throttle_slot_2":
+                        start_plant["delayed_throttle_2"],
+                    "start_queue_throttle_delta": (
+                        start_plant["delayed_throttle_2"] -
+                        start_plant["delayed_throttle_1"]),
+                    "start_source_plant_state": start_state,
+                    "start_wheel_omega_radps": list(start_state[3:7]),
+                    "start_wheel_body_speed_mismatch_proxy_mps": (
+                        WHEEL_RADIUS_M * 0.5 *
+                        (start_state[5] + start_state[6]) - start_truth["u"]),
+                    "command_epoch_source": (
+                        "bridge_request_sequence" if
+                        reconstruct_command_queue_from_bridge else
+                        "command_topic_stamp" if
+                        reconstruct_command_queue_from_stamps else
+                        "production_published_queue_slot_2"),
                     "max_steering_rad": window_max_abs_steering,
                     "max_abs_yaw_error_rad": window_max_abs_yaw_error,
                     "end_abs_yaw_error_rad": abs(normalized_angle(
@@ -4117,9 +4360,8 @@ def report_source_plant_rollout(
                         "yaw_rate_predicted": state[2],
                         "yaw_rate_actual": actual["r"],
                         "yaw_rate_error": state[2] - actual["r"],
-                        "queued_throttle": current["delayed_throttle_1"],
-                        "queued_steering": current["delayed_steering_1"] *
-                            MAX_STEERING_RAD,
+                        "queued_throttle": input_value.throttle_normalized,
+                        "queued_steering": input_value.steering_target_rad,
                         "wheel_body_mismatch": statistics.mean(
                             abs(omega * WHEEL_RADIUS_M - start_truth["u"])
                             for omega in start_plant["wheel_omega"]),
@@ -4136,6 +4378,16 @@ def report_source_plant_rollout(
         path_row["path_max_xy_m"] = path_peak
         path_row["path_max_step"] = float(path_peak_index + 1)
         path_row["start_yaw_residual_radps"] = yaw_residual
+        truth_pose_twist_closure = [
+            math.hypot(trace_step["truth_twist_vs_pose_forward_m"],
+                       trace_step["truth_twist_vs_pose_lateral_m"])
+            for trace_step in window_pose_trace]
+        path_row["truth_pose_twist_closure_max_m"] = max(
+            truth_pose_twist_closure, default=0.0)
+        path_row["truth_pose_twist_bad_interval_count"] = sum(
+            closure > SOURCE_ROLLOUT_TRUTH_CLOSURE_VALIDITY_M
+            for closure in truth_pose_twist_closure)
+        path_row["command_trace"] = window_pose_trace
         if path_peak > 0.05:
             path_row["path_trace"] = window_pose_trace
         for horizon in horizons:
@@ -4143,9 +4395,11 @@ def report_source_plant_rollout(
                 errors[horizon][field].extend(window_errors[horizon][field])
             grouped_yaw[horizon].extend(window_grouped_yaw[horizon])
 
-    init_label = ("Unity-truth initial u/v/r + logged hidden UnityPlantState "
-                  "and slot-1 commands (diagnostic only)" if oracle_motion_initial_state
-                  else "logged UnityPlantState start + slot-1 commands")
+    init_label = (
+        f"Unity-truth initial {'/'.join(sorted(oracle_components))} + logged "
+        "hidden UnityPlantState and slot-2 commands (diagnostic only)"
+        if oracle_components else
+        "logged UnityPlantState start + slot-2 commands")
     if reconcile_suspension_jounce_at_start:
         init_label += "; geometric jounce reconciled at each independent start"
     print(f"\nSource-plant open-loop rollout ({init_label}; no future state correction):")
@@ -4154,6 +4408,28 @@ def report_source_plant_rollout(
           f"aligned={residual_valid_windows}, enabled={residual_enabled_windows}")
     print(f"  aligned_epochs={len(times)} start_windows={len(times)-max(horizons)} "
           f"skipped_windows={skipped} model_dt=25ms")
+    print("  steering feedback chronology A/B (future feedback used only to "
+          "recreate the prior backdated-reset behavior):")
+    for group in ("all", "high_steer", "steering_transition",
+                  "high_steer_transition"):
+        mode_counts = [len(steering_chronology_errors[mode][group]["r"])
+                       for mode in steering_chronology_errors]
+        if max(mode_counts, default=0) == 0:
+            continue
+        print(f"    {group}:")
+        for mode in ("causal_start_rack", "backdated_endpoint_reset"):
+            fields = steering_chronology_errors[mode][group]
+            print(f"      {mode}: n={len(fields['r'])}")
+            for field, unit in (("u", "m/s"), ("v", "m/s"),
+                                ("r", "rad/s")):
+                values = fields[field]
+                if not values:
+                    continue
+                print(f"        {field}: RMSE="
+                      f"{math.sqrt(statistics.mean(v*v for v in values)):.5f}"
+                      f"{unit} p95_abs="
+                      f"{percentile([abs(v) for v in values], 0.95):.5f}"
+                      f" max_abs={max(abs(v) for v in values):.5f}")
     print("  one-step command-queue phase A/B (same plant state; next Unity "
           "epoch used only for scoring; recorded queue-slot diagnostics):")
     for slot in (1, 2):
@@ -4177,7 +4453,7 @@ def report_source_plant_rollout(
             if not count:
                 continue
             print(f"    {group}: n={count}")
-            for source in ("published_head", "request_timestamp"):
+            for source in ("published_queue_slot_2", "request_timestamp"):
                 print(f"      {source}:")
                 for field, unit in (("u", "m/s"), ("v", "m/s"),
                                     ("r", "rad/s")):
@@ -4242,8 +4518,8 @@ def report_source_plant_rollout(
                   f"max_abs={max(absolute):.6g}rad")
     if one_step_motion_details:
         if reconstruct_command_queue_from_bridge:
-            print("  steering-actuator command-epoch diagnostic (rate-limited "
-                  "Unity steering equation; feedback-vs-feedback, not a "
+            print("  steering-actuator command-epoch diagnostic (exact "
+                  "VehicleController.Steer source branch; feedback-vs-feedback, not a "
                   "vehicle rollout):")
             for offset in sorted(steering_feedback_phase_errors):
                 residuals = steering_feedback_phase_errors[offset]
@@ -4510,6 +4786,19 @@ def report_source_plant_rollout(
               f"max-error RMSE={pathwise_rmse:.4f}m "
               f"p95={percentile(pathwise_position_maxima, 0.95):.4f}m "
               f"max={max(pathwise_position_maxima):.4f}m")
+        closure_clean_rows = [
+            row for row in endpoint_rows
+            if row.get("truth_pose_twist_closure_max_m", 0.0) <=
+            SOURCE_ROLLOUT_TRUTH_CLOSURE_VALIDITY_M]
+        closure_invalid_count = len(endpoint_rows) - len(closure_clean_rows)
+        closure_clean_failures = [
+            row for row in closure_clean_rows
+            if row.get("path_max_xy_m", 0.0) > 0.05]
+        print("  truth pose/twist closure validity screen (diagnostic only): "
+              f"excluded={closure_invalid_count}/{len(endpoint_rows)} windows "
+              f"at >{SOURCE_ROLLOUT_TRUTH_CLOSURE_VALIDITY_M:.2f}m per 25ms; "
+              f"clean-window failures={len(closure_clean_failures)}/"
+              f"{len(closure_clean_rows)}")
         for low, high in ((0.0, 0.10), (0.10, 0.20), (0.20, math.inf)):
             selected = [row for row in endpoint_rows
                         if low <= row["start_steering_rad"] < high]
@@ -4666,6 +4955,12 @@ def report_source_plant_rollout(
             "  steering target used next recorded actuator feedback; this is "
             "an offline oracle diagnostic, not a deployable rollout input."
         )
+    if causal_steering_boundary_correction:
+        print(
+            "  causal steering boundary correction: current feedback is "
+            "advanced one source Steer() step using the preceding applied "
+            "command; no future feedback enters the open-loop horizon."
+        )
     if reconstruct_command_queue:
         source_label = ("Bridge's recorded sent command per request" if
                         reconstruct_command_queue_from_bridge else
@@ -4679,6 +4974,7 @@ def report_source_plant_rollout(
         # identify which carried-state prediction drives recursive drift.
         # They are deliberately not valid controller inputs or model scores.
         modes = {
+            "no_reanchoring": (),
             "u_only": ("u",),
             "v_only": ("v",),
             "yaw_rate_only": ("yaw_rate",),
@@ -4717,9 +5013,24 @@ def report_source_plant_rollout(
                     current = plant_by_stamp[times[start + horizon - 1]]
                     target_time = times[start + horizon]
                     actual = truth_by_stamp[target_time]
+                    command_epoch = start + horizon - 2 + bridge_command_epoch_offset
+                    if reconstruct_command_queue:
+                        if (command_epoch < 0 or
+                                command_epoch >= len(times) or
+                                (reconstruct_command_queue_from_bridge and
+                                 not bridge_epoch_valid[command_epoch])):
+                            valid = False
+                            break
                     output = UnitySourcePlantOutputC()
                     input_value = make_input(
-                        state, angles, current, history_initialized)
+                        state, angles, current, history_initialized,
+                        command_slot=2)
+                    if reconstruct_command_queue:
+                        input_value.steering_target_rad = (
+                            steering_command_by_epoch[command_epoch] *
+                            MAX_STEERING_RAD)
+                        input_value.throttle_normalized = (
+                            throttle_command_by_epoch[command_epoch])
                     if not step(ctypes.byref(input_value), 0.025,
                                 ctypes.byref(output)):
                         valid = False
@@ -4771,6 +5082,62 @@ def report_source_plant_rollout(
                       f"p95={percentile(values, 0.95):.4f}m "
                       f">5cm={sum(value > 0.05 for value in values)}/{len(values)}")
 
+    endpoint_rows = position_decomposition[max(horizons)]
+    result = {
+        "valid_750ms_windows": endpoint_rows,
+        "collision_or_fault_cutoff_receipt_s": cutoff_receipt_s,
+        "collision_or_fault_cutoff_reason": cutoff_reason,
+        "aligned_epoch_count_after_cutoff": len(times),
+        "skipped_windows": skipped,
+    }
+    if case_index_path is not None:
+        extra_control_windows: list[dict[str, Any]] = []
+        control_index_inputs = []
+        for control_path in case_index_control_paths or []:
+            with control_path.open(encoding="utf-8") as stream:
+                control_index = json.load(stream)
+            control_index_inputs.append({
+                "path": str(control_path),
+                "sha256": _sha256_path(control_path),
+                "schema": control_index.get("schema"),
+            })
+            for control_row in control_index.get("clean_control_pool", []):
+                selected = dict(control_row)
+                selected["control_source_index"] = str(control_path)
+                extra_control_windows.append(selected)
+        index = _build_source_rollout_case_index(
+            endpoint_rows, case_index_metadata or {}, extra_control_windows)
+        index["control_index_inputs"] = control_index_inputs
+        index["evaluation"] = {
+            "command_queue_reconstructed_from_bridge":
+                reconstruct_command_queue_from_bridge,
+            "command_queue_reconstructed_from_stamps":
+                reconstruct_command_queue_from_stamps,
+            "bridge_command_epoch_offset": bridge_command_epoch_offset,
+            "yaw_residual_gain": yaw_residual_gain,
+            "yaw_residual_decay": yaw_residual_decay,
+            "oracle_motion_initial_state": oracle_motion_initial_state,
+            "causal_prior_step_raw_rear_omega_initialization":
+                source_initial_rear_omega_from_prior_step,
+            "collision_or_fault_cutoff_receipt_s": cutoff_receipt_s,
+            "collision_or_fault_cutoff_reason": cutoff_reason,
+            "truth_pose_twist_closure_validity_threshold_m_per_25ms":
+                SOURCE_ROLLOUT_TRUTH_CLOSURE_VALIDITY_M,
+            "case_rows_are_rolling_750ms_windows": True,
+            "truth_is_scoring_only": True,
+        }
+        case_index_path.parent.mkdir(parents=True, exist_ok=True)
+        with case_index_path.open("w", encoding="utf-8") as stream:
+            json.dump(_json_safe(index), stream, indent=2, sort_keys=True)
+            stream.write("\n")
+        summary = index["summary"]
+        print("  machine-readable rollout case index: "
+              f"{case_index_path} failures={summary['full_path_over_5cm']} "
+              f"matched_controls={summary['matched_distinct_nonfailure_controls']} "
+              f"truth-closure-excluded="
+              f"{summary['truth_pose_twist_closure_invalid_windows']}")
+    return result
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -4786,6 +5153,13 @@ def main() -> int:
              "UnityPlantState and the production C++ source plant",
     )
     parser.add_argument(
+        "--source-initial-rear-omega-from-prior-step", action="store_true",
+        help="diagnostic A/B ONLY: replace the initial two encoder-corrected "
+             "rear wheel angular speeds with the raw source-plant transition "
+             "from the immediately preceding exact request epoch; this reads "
+             "only causal state/commands, never Unity truth or future sensors",
+    )
+    parser.add_argument(
         "--source-reconcile-suspension-jounce", action="store_true",
         help="diagnostic A/B: recompute geometric suspension jounce from each "
              "rollout's corrected initial body state, matching the production "
@@ -4795,6 +5169,17 @@ def main() -> int:
         "--source-plant-library", type=Path,
         default=Path("build/f1tenth_mpc/libunity_source_plant_eval.so"),
         help="optional evaluator library built from the production plant source",
+    )
+    parser.add_argument(
+        "--source-rollout-case-index", type=Path,
+        help="write exact-stamp >5cm 750ms path failures and matched clean "
+             "windows to this JSON file (offline diagnostic only)",
+    )
+    parser.add_argument(
+        "--source-rollout-control-index", type=Path, action="append",
+        default=[],
+        help="additional previously generated case-index JSON whose clean "
+             "windows may serve as descriptive matched controls; repeatable",
     )
     parser.add_argument(
         "--yaw-residual-gain", type=float, default=0.0,
@@ -4811,6 +5196,13 @@ def main() -> int:
         help="diagnostic only: initialize each source-plant rollout with same-epoch "
              "Unity-truth u/v/r while keeping logged hidden plant states and all "
              "future commands unchanged; never a production input",
+    )
+    parser.add_argument(
+        "--oracle-initial-motion-components", nargs="+",
+        choices=("u", "v", "r"), default=[],
+        help="diagnostic only: initialize selected start u/v/r components from "
+             "same-epoch Unity truth while leaving hidden plant states and future "
+             "commands unchanged; never a production input",
     )
     parser.add_argument(
         "--source-extra-steering-delay-packets", type=int, default=0,
@@ -4834,6 +5226,13 @@ def main() -> int:
              "future information, never deployable",
     )
     parser.add_argument(
+        "--source-causal-steering-boundary-correction", action="store_true",
+        help="diagnostic A/B: reconstruct each rollout's current rack state "
+             "from current steering feedback plus one source Steer() step "
+             "using the preceding applied command; no future feedback enters "
+             "the open-loop horizon",
+    )
+    parser.add_argument(
         "--source-reconstruct-command-queue-from-stamps", action="store_true",
         help="diagnostic: reconstruct the two-packet command queue from the "
              "recorded Float32 command topic arrival times and sensor request "
@@ -4846,9 +5245,10 @@ def main() -> int:
              "request stamp; this restricted debug stream is never a runtime input",
     )
     parser.add_argument(
-        "--source-bridge-command-epoch-offset", type=int, default=0,
-        help="offline diagnostic: choose command epoch (normally interval i uses "
-             "request command i-1; offset +1 tests request i; negative tests older)",
+        "--source-bridge-command-epoch-offset", type=int, default=1,
+        help="offline diagnostic: offset from the request immediately preceding "
+             "an interval; +1 (default) selects the request paired with the "
+             "interval's start state; negative values select older commands",
     )
     parser.add_argument(
         "--diagnose-observed-state-reanchoring", action="store_true",
@@ -4964,13 +5364,28 @@ def main() -> int:
                 args.source_extra_throttle_delay_packets,
                 args.source_oracle_steering_feedback,
                 args.source_oracle_throttle_feedback,
+                args.source_causal_steering_boundary_correction,
                 args.source_reconstruct_command_queue_from_stamps,
                 args.source_reconstruct_command_queue_from_bridge,
                 args.source_bridge_command_epoch_offset,
                 data.get(STEERING_COMMAND, []),
                 data.get(THROTTLE_COMMAND, []),
                 data.get(BRIDGE_TIMING, []),
-                args.source_reconcile_suspension_jounce)
+                args.source_reconcile_suspension_jounce,
+                data.get(DIAGNOSTICS, []) +
+                data.get(CANDIDATE_DIAGNOSTICS, []),
+                data.get(COLLISION, []), data.get(BRIDGE_FAULT, []),
+                args.source_rollout_case_index,
+                {
+                    "bag_path": str(args.bag),
+                    "trajectory_path": (
+                        str(args.trajectory) if args.trajectory else None),
+                    "source_plant_library_path":
+                        str(args.source_plant_library),
+                },
+                args.source_rollout_control_index,
+                set(args.oracle_initial_motion_components),
+                args.source_initial_rear_omega_from_prior_step)
     elif args.source_plant_rollout:
         print(f"source-plant rollout: bag has no usable {PLANT} stream")
     # A replay bag may contain both the source run's controller diagnostics
@@ -5004,10 +5419,6 @@ def main() -> int:
         report_admm_convergence(diagnostics, data.get(DRIVE_COMMAND, []))
         print(f"MPC plant-state source counts: {dict(Counter(x.get('plant_state_source') for x in payloads))}")
         report_horizon_errors(truth, diagnostics, load_trajectory(args.trajectory))
-    if data.get(OPEN_LOOP_TEST):
-        report_open_loop_horizon_test(
-            truth, data[OPEN_LOOP_TEST], data.get(COLLISION, []),
-            data.get(STEERING_COMMAND, []), data.get(THROTTLE_COMMAND, []))
     for row in data.get(BRIDGE_FAULT, []):
         if row["value"]:
             print(f"bridge timing fault detail: {row['value']}")

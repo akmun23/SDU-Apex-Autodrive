@@ -40,7 +40,8 @@ def test_backtrack_rejects_full_step_and_finds_feasible_lower_defect():
     checked = _get_checkpoint_function()
     ref = {'x': np.array([.2]), 'elastic': np.array([-.6])}
     trial = {'x': np.array([2.6]), 'elastic': np.array([50.])}
-    proposal, diagnostics, alpha = checked(trial, ref, .36)
+    ref_measure = {'elastic_merit': .36, 'raw_max_dynamic_defect': .6}
+    proposal, diagnostics, alpha = checked(trial, ref, ref_measure)
     assert alpha == pytest.approx(.25)  # x=.8, exact dynamics
     assert proposal['x'][0] == pytest.approx(.8)
     assert proposal['elastic'][0] == pytest.approx(0.)
@@ -52,9 +53,10 @@ def test_backtrack_does_not_accept_nonimproving_or_invalid_candidates():
     checked = _get_checkpoint_function()
     ref = {'x': np.array([.8]), 'elastic': np.array([0.])}
     worse = {'x': np.array([2.6]), 'elastic': np.array([100.])}
-    assert checked(worse, ref, 0.) == (None, None, None)
+    ref_measure = {'elastic_merit': 0., 'raw_max_dynamic_defect': 0.}
+    assert checked(worse, ref, ref_measure) == (None, None, None)
     bad = {'x': np.array([np.nan]), 'elastic': np.array([100.])}
-    assert checked(bad, ref, 0.) == (None, None, None)
+    assert checked(bad, ref, ref_measure) == (None, None, None)
 
 
 def test_v234_cache_exact_upgrade_with_unknown_edit_rejection(tmp_path):

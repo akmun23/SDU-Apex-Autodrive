@@ -4,13 +4,158 @@
 from __future__ import annotations
 
 import unittest
+import json
+import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
-import export_mpc_run_report as report
-import evaluate_mpc_bag as evaluator
+from tools import evaluate_mpc_bag as evaluator
+from tools import export_mpc_run_report as report
 
 
 class MpcRunReportTest(unittest.TestCase):
+    def test_fixed_commands_are_not_scored_as_unexecuted_plans(self):
+        rows = [dict(xy_m=.02, path_max_xy_m=.03, end_u_error_mps=.01,
+                     end_v_error_mps=.002, end_r_error_radps=.02),
+                dict(xy_m=.04, path_max_xy_m=.06, progress_m=float('nan'), end_u_error_mps=-.01,
+                     end_v_error_mps=-.002, end_r_error_radps=-.02)]
+        result = report.summarize_fixed_command_rollout(rows)
+        self.assertEqual(result['windows'], 2)
+        self.assertAlmostEqual(result['endpoint_xy_rmse_m'], (.001)**.5)
+        self.assertEqual(result['full_path_xy_max_m'], .06)
+        self.assertEqual(result['paths_over_5cm'], 1)
+        self.assertIsNone(result['worst_window']['progress_m'])
+        json.dumps(result, allow_nan=False)
+        self.assertIn('Not an unexecuted MPC-plan test', result['interpretation'])
+        self.assertEqual(report.summarize_fixed_command_rollout([])['status'], 'unavailable')
+
+    def test_lap_tracking_uses_counter_boundaries_not_wall_time_guess(self) -> None:
+        laps = [dict(bag_time=10., value=0), dict(bag_time=20., value=1),
+                dict(bag_time=30., value=2)]
+        def cycle(t, error):
+            return dict(bag_receipt_epoch_s=t, score_eligible=True, e_y_m=error,
+                        e_psi_rad=error/2, speed_error_mps=error/4,
+                        callback_to_gate_ms=7., status="accepted_optimal")
+        result = report._per_lap_tracking(laps, [cycle(11., .1),cycle(12., -.1),
+                                                   cycle(21., .02),cycle(22., .02),
+                                                   cycle(31., .2)])
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["official_lap_index"], 1)
+        self.assertEqual(result[1]["official_lap_index"], 2)
+        self.assertAlmostEqual(result[0]["cross_track_rmse_m"], .1)
+        self.assertAlmostEqual(result[1]["cross_track_rmse_m"], .02)
+        self.assertEqual(result[1]["diagnostic_cycles"], 2)
+
+
+    def test_rejected_refinement_prefix_comparison(self) -> None:
+        row = report._cycle_row(3., 0., {"solver": {
+            "refinement_prefix_selected_pass": 1,
+            "refinement_full_horizon_selected_pass": 2,
+            "refinement_nominal_build_us": 478.5,
+            "refinement_first_prefix_objective": 12.5,
+            "refinement_second_prefix_objective": None,
+            "refinement_prefix_validation_us": 231.}}, {}, {})
+        self.assertEqual(row["refinement_full_horizon_selected_pass"], 2)
+        self.assertEqual(row["refinement_nominal_build_us"], 478.5)
+        self.assertEqual(row["refinement_prefix_selected_pass"], 1)
+        self.assertEqual(row["refinement_first_prefix_objective"], 12.5)
+        self.assertIsNone(row["refinement_second_prefix_objective"])
+        self.assertEqual(row["refinement_prefix_validation_us"], 231.)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cycles.csv"
+            report.write_cycle_csv(path, [row])
+            import csv
+            with path.open() as stream:
+                exported = next(csv.DictReader(stream))
+            self.assertEqual(exported["refinement_full_horizon_selected_pass"], "2")
+            self.assertEqual(exported["refinement_nominal_build_us"], "478.5")
+            self.assertEqual(exported["refinement_prefix_selected_pass"], "1")
+            self.assertEqual(exported["refinement_first_prefix_objective"], "12.5")
+
+    def test_publication_and_history_timings_are_separate(self) -> None:
+        row = report._cycle_row(3., 0., {
+            "middleware_publish_us": 53.2, "command_history_us": .7,
+            "end_to_end_control_ms": 19.1}, {}, {})
+        self.assertEqual(row["middleware_publish_us"], 53.2)
+        self.assertEqual(row["command_history_us"], .7)
+        self.assertEqual(row["callback_to_publish_return_ms"], 19.1)
+        row = report._cycle_row(3., 0., {"middleware_publish_us": float('nan')}, {}, {})
+        self.assertIsNone(row["middleware_publish_us"])
+        self.assertIsNone(row["command_history_us"])
+
+    def test_identical_lap_durations_are_separate_completion_events(self) -> None:
+        counts = [{"bag_time": 0, "value": 0},
+                  {"bag_time": 1, "value": 1},
+                  {"bag_time": 2, "value": 1},
+                  {"bag_time": 6.5, "value": 2}]
+        durations = [{"bag_time": 0, "value": 0},
+                     {"bag_time": 1.001, "value": 5.5},
+                     {"bag_time": 2, "value": 5.5},
+                     {"bag_time": 6.501, "value": 5.5}]
+        self.assertEqual(report._distinct_lap_times(durations, None, counts),
+                         [5.5, 5.5])
+        self.assertEqual(report._distinct_lap_times(durations, 6.5, counts),
+                         [5.5])
+
+    def test_counter_join_rejects_stale_duration_and_counter_reset(self) -> None:
+        counts = [{"bag_time": 0, "value": 2},
+                  {"bag_time": 1, "value": 0},
+                  {"bag_time": 2, "value": 1}]
+        durations = [{"bag_time": 0, "value": 5.0},
+                     {"bag_time": 1.999, "value": 5.0},
+                     {"bag_time": 2.025, "value": 6.0}]
+        self.assertEqual(report._distinct_lap_times(durations, None, counts),
+                         [6.0])
+        self.assertEqual(report._distinct_lap_times(durations[:2], None, counts),
+                         [])
+
+    def test_diagnostic_sidecar_preserves_candidate_nominal_and_plan_payloads(self) -> None:
+        payload = {
+            "status": "accepted_candidate_prefix",
+            "action_source": "revalidated_candidate_prefix",
+            "command_published": True,
+            "source_stamp_ns": 123,
+            "control_ros_stamp_ns": 124,
+            "candidate_command_stamp_ns": 125,
+            "issued_command_stamp_ns": 126,
+            "candidate_controls": [[0.1, 0.2], [0.3, 0.4]],
+            "nominal_controls": [[-0.1, 0.5], [-0.2, 0.6]],
+            "certified_plan_snapshot": {"valid": True, "cursor": 7},
+            "prior_plan_revalidation": {"attempted": True, "exact_valid": False},
+        }
+        rows = [
+            {"bag_time": 2.0, "json": payload},
+            {"bag_time": 1.0, "json": {"status": "waiting"}},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "diagnostics.jsonl"
+            count = report.write_diagnostic_sequence_sidecar(output, rows)
+            records = [json.loads(line) for line in output.read_text().splitlines()]
+
+        self.assertEqual(count, 2)
+        self.assertEqual(records[0]["bag_receipt_epoch_s"], 1.0)
+        self.assertEqual(records[1]["candidate_command_stamp_ns"], 125)
+        self.assertEqual(records[1]["issued_command_stamp_ns"], 126)
+        self.assertEqual(records[1]["payload"]["candidate_controls"],
+                         payload["candidate_controls"])
+        self.assertEqual(records[1]["payload"]["nominal_controls"],
+                         payload["nominal_controls"])
+        self.assertEqual(records[1]["payload"]["certified_plan_snapshot"],
+                         payload["certified_plan_snapshot"])
+
+    def test_drive_command_ros_stamp_keeps_exact_nanoseconds(self) -> None:
+        expected = 1_792_611_522_369_873_606
+        message = SimpleNamespace(header=SimpleNamespace(
+            stamp=SimpleNamespace(sec=expected // 1_000_000_000,
+                                  nanosec=expected % 1_000_000_000)))
+        exact = evaluator.stamp_nanoseconds(message)
+        indexed = report._drive_command_by_stamp([
+            {"stamp": exact * 1e-9, "stamp_ns": exact,
+             "steering": 0.1, "throttle": 0.3},
+        ])
+        self.assertEqual(exact, expected)
+        self.assertIn(expected, indexed)
+
     def test_solver_termination_categories_remain_distinct(self) -> None:
         self.assertEqual(report._normalized_solver_category("converged"),
                          "optimal")
@@ -38,6 +183,164 @@ class MpcRunReportTest(unittest.TestCase):
         self.assertEqual(row["solver_stop_reason"], "not_run")
         self.assertEqual(report._normalized_solver_category(
             row["solver_stop_reason"]), "not_run")
+
+    def test_rejection_and_prefix_failure_details_are_exported(self) -> None:
+        payload = {
+            "status": "rejected_nonlinear_rollout",
+            "reason": "accepted-plan prefix failed exact delayed-command rollout/corridor validation",
+            "input_failure_reason": "none",
+            "nonlinear_failure_reason": "corridor",
+            "nonlinear_failure_stage": 8,
+            "nonlinear_failure": {"stage": 8, "margin_m": 0.02},
+            "candidate_prefix_revalidation": {
+                "attempted": True, "exact_valid": False,
+                "failure_stage": 3, "validation_status": 5,
+                "validation_horizon": 3, "timing_rejected": False,
+                "solver_converged": False,
+                "solver_iteration_limited": True,
+            },
+            "prior_plan_revalidation": {
+                "attempted": True, "exact_valid": False,
+                "failure_stage": 2, "validation_status": 5,
+                "validation_horizon": 3, "timing_rejected": False,
+            },
+            "full_prior_plan_suffix_revalidation": {
+                "attempted": True, "exact_valid": False,
+                "failure_stage": 11, "validation_status": 5,
+                "validation_horizon": 27, "timing_rejected": False,
+                "validation_us": 610.5,
+            },
+            "quality_aware_prefix_selection_on_rejection": True,
+            "quality_aware_prefix_selection": {
+                "attempted": True, "choice": "candidate",
+                "candidate_valid": True, "prior_valid": True,
+                "candidate_objective": 12.5, "prior_objective": 13.0,
+                "candidate_minimum_corridor_slack_m": 0.08,
+                "prior_minimum_corridor_slack_m": 0.07,
+                "validation_us": 214.0,
+                "candidate_prefix_controls": [[0.1, 0.4], [0.2, 0.3]],
+                "prior_prefix_controls": [[-0.1, 0.2], [-0.2, 0.2]],
+            },
+            "solver": {"admm_status": 1},
+        }
+        row = report._cycle_row(3.0, 0.0, payload, {}, {})
+        self.assertEqual(row["cycle_reason"], payload["reason"])
+        self.assertEqual(row["nonlinear_failure_reason"], "corridor")
+        self.assertEqual(row["nonlinear_failure_stage"], 8)
+        self.assertEqual(row["nonlinear_failure_detail"],
+                         {"stage": 8, "margin_m": 0.02})
+        self.assertTrue(row["candidate_prefix_validation_attempted"])
+        self.assertFalse(row["candidate_prefix_exact_valid"])
+        self.assertEqual(row["candidate_prefix_failure_stage"], 3)
+        self.assertEqual(row["candidate_prefix_validation_horizon"], 3)
+        self.assertFalse(row["prior_plan_exact_valid"])
+        self.assertEqual(row["prior_plan_failure_stage"], 2)
+        self.assertTrue(row["full_prior_suffix_attempted"])
+        self.assertFalse(row["full_prior_suffix_exact_valid"])
+        self.assertEqual(row["full_prior_suffix_failure_stage"], 11)
+        self.assertEqual(row["full_prior_suffix_validation_horizon"], 27)
+        self.assertEqual(row["full_prior_suffix_validation_us"], 610.5)
+        self.assertTrue(row["quality_prefix_policy_enabled"])
+        self.assertTrue(row["quality_prefix_attempted"])
+        self.assertEqual(row["quality_prefix_choice"], "candidate")
+        self.assertTrue(row["quality_candidate_prefix_exact_valid"])
+        self.assertTrue(row["quality_prior_prefix_exact_valid"])
+        self.assertEqual(row["quality_candidate_prefix_objective"], 12.5)
+        self.assertEqual(row["quality_prior_prefix_objective"], 13.0)
+        self.assertEqual(row["quality_candidate_prefix_min_slack_m"], 0.08)
+        self.assertEqual(row["quality_prior_prefix_min_slack_m"], 0.07)
+        self.assertEqual(row["quality_prefix_validation_us"], 214.0)
+        self.assertEqual(
+            row["quality_candidate_prefix_controls_json"],
+            "[[0.1,0.4],[0.2,0.3]]")
+        self.assertEqual(
+            row["quality_prior_prefix_controls_json"],
+            "[[-0.1,0.2],[-0.2,0.2]]")
+
+        compact = report._cycle_row(
+            4.0, 0.0,
+            {"status": "rejected", "reason": "prefix validation failed",
+             "solver": {"admm_status": -1}}, {}, {})
+        self.assertEqual(compact["cycle_reason"], "prefix validation failed")
+        self.assertIsNone(compact["candidate_prefix_failure_stage"])
+
+    def test_failure_reason_counts_use_diagnostic_fields(self) -> None:
+        diagnostic = {"bag_time": 1.0, "json": {
+            "status": "rejected_nonlinear_rollout",
+            "reason": "no exact-feasible prefix",
+            "nonlinear_failure_reason": "corridor",
+            "nonlinear_failure_stage": 8,
+            "candidate_prefix_revalidation": {
+                "attempted": True, "exact_valid": False,
+                "failure_stage": 3,
+            },
+            "solver": {"admm_status": -1},
+        }}
+        data = {
+            evaluator.DIAGNOSTICS: [diagnostic],
+            evaluator.CANDIDATE_DIAGNOSTICS: [],
+            evaluator.BRIDGE_TIMING: [], evaluator.DRIVE_COMMAND: [],
+            evaluator.LAST_LAP: [], evaluator.COLLISION: [],
+            evaluator.BRIDGE_FAULT: [], evaluator.GT: [],
+        }
+        result, _ = report.make_report(
+            Path.cwd(), Path("missing_bag"), data, None, None, 5.0,
+            "live_closed_loop")
+        self.assertEqual(result["summary"]["cycle_reason_counts"],
+                         {"no exact-feasible prefix": 1})
+        self.assertEqual(
+            result["summary"]["nonlinear_failure_reason_counts"],
+            {"corridor": 1})
+        self.assertEqual(
+            result["summary"]["candidate_prefix_failure_stage_counts"],
+            {"3": 1})
+
+    def test_quality_prefix_selection_is_summarized(self) -> None:
+        data = {
+            evaluator.DIAGNOSTICS: [
+                {"bag_time": 0.5, "json": {
+                    "status": "accepted_prior_plan",
+                    "quality_aware_prefix_selection_on_rejection": True,
+                    "quality_aware_prefix_selection": {
+                        "attempted": True, "choice": "retained_plan",
+                        "candidate_valid": True, "prior_valid": True,
+                        "validation_us": 200.0,
+                    },
+                    "solver": {"admm_status": 1},
+                }},
+                {"bag_time": 0.6, "json": {
+                    "status": "accepted_candidate_prefix",
+                    "quality_aware_prefix_selection_on_rejection": True,
+                    "quality_aware_prefix_selection": {
+                        "attempted": True, "choice": "candidate",
+                        "candidate_valid": True, "prior_valid": False,
+                        "validation_us": 250.0,
+                    },
+                    "solver": {"admm_status": 1},
+                }},
+                {"bag_time": 0.7, "json": {
+                    "status": "accepted_optimal",
+                    "quality_aware_prefix_selection_on_rejection": True,
+                    "quality_aware_prefix_selection": {"attempted": False},
+                    "solver": {"admm_status": 0},
+                }},
+            ],
+            evaluator.CANDIDATE_DIAGNOSTICS: [],
+            evaluator.BRIDGE_TIMING: [], evaluator.DRIVE_COMMAND: [],
+            evaluator.LAST_LAP: [], evaluator.COLLISION: [],
+            evaluator.BRIDGE_FAULT: [], evaluator.GT: [],
+        }
+        result, cycles = report.make_report(
+            Path.cwd(), Path("missing_bag"), data, None, None, 5.0,
+            "live_closed_loop")
+        self.assertEqual(len(cycles), 3)
+        summary = result["summary"]
+        self.assertTrue(summary["quality_prefix_policy_enabled"])
+        self.assertEqual(summary["quality_prefix_attempt_count"], 2)
+        self.assertEqual(summary["quality_prefix_choice_counts"], {
+            "retained_plan": 1, "candidate": 1})
+        self.assertEqual(summary["quality_prefix_both_exact_valid_count"], 1)
+        self.assertEqual(summary["quality_prefix_validation_us"]["p50"], 200.0)
 
     def test_joins_only_exact_bridge_and_command_stamps(self) -> None:
         bridge = report._bridge_by_request_stamp([

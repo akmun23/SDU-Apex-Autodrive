@@ -112,6 +112,47 @@ bool is_causal_plant_state_usable(bool received,
     return static_cast<double>(age_ns) * kNsToSeconds <= maximum_age_s;
 }
 
+MpcStateFreshnessGuard::MpcStateFreshnessGuard(double stale_fault_grace_s)
+    : stale_fault_grace_s_(std::isfinite(stale_fault_grace_s)
+            ? std::max(0.0, stale_fault_grace_s) : 0.0)
+{
+}
+
+MpcFreshnessDecision MpcStateFreshnessGuard::observe(
+    MpcSyncStatus status, int64_t steady_now_ns)
+{
+    if (status == MpcSyncStatus::kOk) {
+        reset();
+        return MpcFreshnessDecision::kReady;
+    }
+    if ((status != MpcSyncStatus::kStateTooOld &&
+         status != MpcSyncStatus::kMapPoseFutureOfOdom &&
+         status != MpcSyncStatus::kNoOdomBracket) || steady_now_ns <= 0) {
+        reset();
+        return MpcFreshnessDecision::kFault;
+    }
+    if (stale_since_steady_ns_ <= 0 || steady_now_ns < stale_since_steady_ns_) {
+        stale_since_steady_ns_ = steady_now_ns;
+    }
+    return stale_fault_grace_s_ > 0.0 &&
+            stale_duration_s(steady_now_ns) <= stale_fault_grace_s_
+        ? MpcFreshnessDecision::kWaitForFreshState
+        : MpcFreshnessDecision::kFault;
+}
+
+double MpcStateFreshnessGuard::stale_duration_s(int64_t steady_now_ns) const
+{
+    if (stale_since_steady_ns_ <= 0 || steady_now_ns < stale_since_steady_ns_)
+        return 0.0;
+    return static_cast<double>(steady_now_ns - stale_since_steady_ns_) *
+        kNsToSeconds;
+}
+
+void MpcStateFreshnessGuard::reset()
+{
+    stale_since_steady_ns_ = 0;
+}
+
 MpcSyncStatus MpcStateSynchronizer::synchronize(
     int64_t command_time_ns, MpcSynchronizedState *state) const
 {
@@ -126,20 +167,33 @@ MpcSyncStatus MpcStateSynchronizer::synchronize(
         return MpcSyncStatus::kPoseOdomSkewExceeded;
     }
 
-    MpcOdomSample odom_at_anchor;
-    if (!interpolate_odom(odometry_, map_pose_.stamp_ns, &odom_at_anchor)) {
-        // A pose can arrive outside the retained odometry window under host
-        // jitter. Use the nearest available odometry endpoint instead of
-        // rejecting the state; this preserves a finite best-effort estimate.
-        const MpcOdomSample &front = odometry_.front();
-        odom_at_anchor =
-            std::llabs(map_pose_.stamp_ns - front.stamp_ns) <
-                    std::llabs(map_pose_.stamp_ns - latest.stamp_ns) ?
-            front : latest;
-    }
+    const MpcSyncStatus status = state_at_odometry_epoch(latest.stamp_ns, state);
+    if (status != MpcSyncStatus::kOk) return status;
+    const double age_s = static_cast<double>(command_time_ns - latest.stamp_ns) *
+        kNsToSeconds;
+    state->source_age_s = age_s;
+    if (age_s < 0.0) return MpcSyncStatus::kCommandTimeBeforeState;
+    if (age_s > config_.max_state_age_s) return MpcSyncStatus::kStateTooOld;
+    return MpcSyncStatus::kOk;
+}
 
-    const double dx_odom = latest.x - odom_at_anchor.x;
-    const double dy_odom = latest.y - odom_at_anchor.y;
+MpcSyncStatus MpcStateSynchronizer::state_at_odometry_epoch(
+    int64_t stamp_ns, MpcSynchronizedState *state) const
+{
+    if (!state || stamp_ns <= 0) return MpcSyncStatus::kInvalidInput;
+    if (odometry_.empty()) return MpcSyncStatus::kMissingOdom;
+    if (!map_pose_valid_) return MpcSyncStatus::kMissingMapPose;
+    if (map_pose_.stamp_ns > odometry_.back().stamp_ns)
+        return MpcSyncStatus::kMapPoseFutureOfOdom;
+
+    MpcOdomSample odom_at_anchor;
+    MpcOdomSample requested;
+    if (!interpolate_odom(odometry_, map_pose_.stamp_ns, &odom_at_anchor) ||
+        !interpolate_odom(odometry_, stamp_ns, &requested))
+        return MpcSyncStatus::kNoOdomBracket;
+
+    const double dx_odom = requested.x - odom_at_anchor.x;
+    const double dy_odom = requested.y - odom_at_anchor.y;
     const double c_odom = std::cos(odom_at_anchor.yaw);
     const double s_odom = std::sin(odom_at_anchor.yaw);
     const double relative_x = c_odom * dx_odom + s_odom * dy_odom;
@@ -147,24 +201,20 @@ MpcSyncStatus MpcStateSynchronizer::synchronize(
     const double c_map = std::cos(map_pose_.yaw);
     const double s_map = std::sin(map_pose_.yaw);
 
-    const int64_t fused_stamp_ns = std::max(latest.stamp_ns, map_pose_.stamp_ns);
-    const double age_s = static_cast<double>(command_time_ns - fused_stamp_ns) *
-        kNsToSeconds;
-    if (age_s < 0.0) return MpcSyncStatus::kCommandTimeBeforeState;
-    if (age_s > config_.max_state_age_s) return MpcSyncStatus::kStateTooOld;
-
-    state->source_stamp_ns = fused_stamp_ns;
-    state->odom_source_stamp_ns = latest.stamp_ns;
+    state->source_stamp_ns = requested.stamp_ns;
+    state->odom_source_stamp_ns = requested.stamp_ns;
     state->map_pose_source_stamp_ns = map_pose_.stamp_ns;
+    state->source_age_s = 0.0;
+    state->pose_odom_skew_s = static_cast<double>(
+        requested.stamp_ns - map_pose_.stamp_ns) * kNsToSeconds;
+
     state->map_x = map_pose_.x + c_map * relative_x - s_map * relative_y;
     state->map_y = map_pose_.y + s_map * relative_x + c_map * relative_y;
     state->map_yaw = wrap_angle(map_pose_.yaw +
-                                wrap_angle(latest.yaw - odom_at_anchor.yaw));
-    state->u = latest.u;
-    state->v = latest.v;
-    state->yaw_rate = latest.yaw_rate;
-    state->source_age_s = age_s;
-    state->pose_odom_skew_s = pose_odom_skew_s;
+                                wrap_angle(requested.yaw - odom_at_anchor.yaw));
+    state->u = requested.u;
+    state->v = requested.v;
+    state->yaw_rate = requested.yaw_rate;
     return MpcSyncStatus::kOk;
 }
 

@@ -115,17 +115,138 @@ typedef struct
 extern "C" {
 #endif
 
+/* Canonical physical MPC <-> original 26-coordinate source conversion.
+ * Exactly the conversion used by the original vehicle dynamics. Import
+ * changes only physical state coordinates; path errors, actuator history
+ * and source-initialized flags remain owned by the caller.
+ */
+int vehicle_model_pack_source_state(
+    const MpcModelState_t *state,
+    double source_state[UNITY_SOURCE_PLANT_STATE_SIZE]);
+int vehicle_model_inject_source_state(
+    MpcModelState_t *state,
+    const double source_state[UNITY_SOURCE_PLANT_STATE_SIZE]);
+
+/* Full 26-channel source-plant tangent integration in 28 independent
+ * directions. Unlike the reduced 23-state QP Jacobian, the caller seeds and
+ * receives ALL wheel/suspension/sticky-tire history coordinates, plus body
+ * displacement and within-step slip derivatives. Requires a source-initialized
+ * full state. No physics substitution and no finite-difference plant steps. */
+int vehicle_model_full_source_interval_sensitivities(
+    const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
+    const double seed_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    const double seed_control[2][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double next_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double body_motion[3][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double slip_excess[4][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH]);
+
+/* One original source-plant AD evaluation returns the full physical
+ * transition/body/peak tangents AND ALL physically observed substep tire
+ * slip derivatives. Both components have exactly the same source branch
+ * decisions; this feeds the sparse source-exact NLP in a single pass.
+ */
+int vehicle_model_full_source_interval_and_substep_sensitivities(
+    const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
+    const double seed_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    const double seed_control[2][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double next_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],double body_motion[3][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    double slip_excess[4][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    UnitySourceSlipSubstepSensitivityC *samples,
+    int capacity,int *count);
+
+/* Full-source second-order directional transition oracle.
+ *
+ * For the true 26-dimensional Unity-derived physical state x and absolute
+ * control u, evaluate f(x +/- epsilon*dx,u +/- epsilon*du) via the ORIGINAL
+ * 1 ms source plant and return symmetric directional first/second
+ * differences of the complete 25 ms physical transition. No fitted yaw,
+ * bicycle, slip, reduced-state, or QP surrogate is used.
+ *
+ * These are branch-local finite differences. They must NOT be interpreted
+ * as a smooth Hessian when the +/- perturbations cross steering slew,
+ * contact, or friction-curve switching surfaces. Both perturbed controls
+ * must be inside the REAL physical steering and positive-drive limits.
+ *
+ * The input state must already contain all initialized physical source
+ * channels. This oracle never publishes commands or changes a controller
+ * mode. Profiling can decide whether its per-stage source curvature
+ * calculations are appropriate for a production Lagrangian-HVP.
+ */
+typedef struct
+{
+    double first_source[UNITY_SOURCE_PLANT_STATE_SIZE];
+    double second_source[UNITY_SOURCE_PLANT_STATE_SIZE];
+    double first_body[3];
+    double second_body[3];
+    double first_slip_excess_mps[4];
+    double second_slip_excess_mps[4];
+} MpcSourceDirectionalSecondOrder_t;
+
+int vehicle_model_full_source_interval_directional_second_order(
+    const MpcModelState_t *state,const MpcModelControl_t *control,
+    float dt,
+    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double direction_control[2],double epsilon,
+    MpcSourceDirectionalSecondOrder_t *out);
+
+/* Branch-local analytic second directional source derivative. This is
+ * distinct from the three-probe independent FD oracle above. It computes
+ * the selected source branch in ONE full interval and keeps both physical
+ * steering and throttle directions coupled. No SQP switch or publication. */
+int vehicle_model_full_source_interval_analytic_directional_second_order(
+    const MpcModelState_t *state,const MpcModelControl_t *control,
+    float dt,
+    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double direction_control[2],
+    MpcSourceDirectionalSecondOrder_t *out);
+
 /* Seed missing wheel/suspension state for explicit cold-start use. */
 int vehicle_model_initialize_plant_state(MpcModelState_t *state);
 
 /* Unity-source tire slip metrics for the current MPC plant state. */
+/* Exact source WheelHit instantaneous lateral-slip directional curvature.
+ * Inputs are the 26-source-coordinate first and second horizon tangents
+ * (not the reduced state). Uses source contact geometry and Jet2, not FD. */
+/* Exact original substep tire-slip maximum/active-branch trace.
+ * Offline diagnostic only. No duplicate source-plant implementation. */
+/* All real internal source substep slip-penalty features. Used for
+ * a nonlinear epigraph representation of the actual source maximum. */
+int vehicle_model_source_slip_substeps(
+    const MpcModelState_t *state,const MpcModelControl_t *control,
+    float dt,UnitySourceSlipSubstepC *samples,int capacity,
+    int *count,double source_maximum[4]);
+
+int vehicle_model_source_slip_substep_sensitivities(
+    const MpcModelState_t *state,const MpcModelControl_t *control,
+    float dt,const double seed_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    const double seed_control[2][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
+    UnitySourceSlipSubstepSensitivityC *samples,int capacity,int *count);
+
+int vehicle_model_trace_peak_longitudinal_slip(
+    const MpcModelState_t *state,const MpcModelControl_t *control,
+    float dt,UnitySourcePeakSlipTraceC out[4]);
+
+int vehicle_model_source_lateral_slip_second(
+    const MpcModelState_t *state,
+    const double first_source[UNITY_SOURCE_PLANT_STATE_SIZE],
+    const double second_source[UNITY_SOURCE_PLANT_STATE_SIZE],
+    double lateral_slip[4],double first_slip[4],double second_slip[4]);
+
 int vehicle_model_longitudinal_slip_excess(
     const MpcModelState_t *state,
     double excess_speed_mps[4],
     double excess_derivative_wheel_omega[4]);
 
-/* One packet-rate model stage: use newest in-flight slot 2, then shift history
- * and append this stage's decision. */
+/* Front/rear lateral tire slip from the EXACT native source wheel-contact
+ * geometry at this full physical state. Optional 4x20 Jacobian is with
+ * respect to the normal QP's 20 physical coordinates (not path progress).
+ * The additional evaluation is cheap: no 25ms source integration. */
+int vehicle_model_source_lateral_slip(
+    const MpcModelState_t *state, double slip[4],
+    double derivative[4][MPC_OPT_PHYSICAL_NX]);
+
+/* One MPC horizon stage at the command-application epoch: drive the source
+ * plant with this decision, then shift it into the carried command history. */
 MpcStageResult_t mpc_vehicle_model_step(
     const MpcModelState_t *state,
     const MpcModelControl_t *control,
@@ -142,8 +263,8 @@ int vehicle_model_reproject_tracking(
     float path_curvature,
     MpcStageResult_t *reprojected_step);
 
-/* Propagate from newest queued commands in slot 2 without advancing either
- * command-history slot. */
+/* Pre-command-time propagation uses newest accepted command in slot 2 without
+ * advancing either command-history slot. */
 MpcStageResult_t mpc_vehicle_model_propagate(
     const MpcModelState_t *state,
     float dt,

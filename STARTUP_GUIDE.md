@@ -1,127 +1,52 @@
-# Startup guide
+# Running the MPC: choose practice or competition
 
-The maintained stack is bridge + PhysX odometry + localization + direct
-throttle MPC + actuator interface. Start the ROS stack before connecting the
-simulator. The simulator helper uses Unity batch mode with a graphics display
-through Xvfb; do not add `-no-graphics`.
+The maintained controller uses one of TWO standalone track configurations.
+The ROS launcher selects the profile from the map identity. There is no
+shared stack of old weight overlays in the normal runtime.
 
-## Build and run the development stack
+| Track | Complete MPC profile | Native command raceline |
+|---|---|---|
+| Practice | f1tenth_mpc/config/mpc_practice.yaml | autodrive_practice_20260924_b/source_command_4p800.csv |
+| Competition | f1tenth_mpc/config/mpc_competition.yaml | autodrive_iros_2026_compete/ipopt_best_6p925_source_witness.csv |
 
-```bash
-./tools/start_dev.sh
-```
+The practice profile is the exact merged, qualified 4500/1450 parameter
+set: five complete independent ten-scored-lap races, mean 49.1622 s,
+zero collisions/controller failures or hard command deadlines. The
+competition profile has INDEPENDENT weights and remains experimental.
+The competition reference is the 6.925 s PhysX source-validated IPOPT
+line, NOT a verified Unity/MPC ten-lap time.
 
-This rebuilds the development image by default, checks the competition topic
-policy, and starts the single MPC/localization launch. To reuse an existing
-image without rebuilding the image layers (the mounted current workspace is
-still compiled before launch):
+## Choose a track
 
-```bash
-AUTODRIVE_REBUILD=0 SDU_APEX_IMAGE=sdu-apex-autodrive:dev \
-  ./tools/start_dev.sh
-```
+    tools/run_mpc_trial.sh show
+    SDU_APEX_TRIAL_TOTAL_LAPS=11 tools/run_mpc_trial.sh practice practice_01
+    SDU_APEX_IROS_TOTAL_LAPS=11 tools/run_mpc_trial.sh competition comp_01
 
-For the practice map/raceline pair:
+Each supervised runner starts the controller, recorder, Unity simulator
+and collision/lap watcher, saving results to live_runs/RUN_ID. Use a new
+RUN_ID every time. The normal dispatcher refuses runtime parameter
+overrides and thus cannot silently mix practice and competition weights.
 
-```bash
-AUTODRIVE_REBUILD=0 \
-SDU_APEX_IMAGE=sdu-apex-autodrive:dev \
-SDU_APEX_MAP_YAML="$PWD/f1tenth_planning/maps/autodrive_practice_20260924_b.yaml" \
-SDU_APEX_TRAJECTORY_FILE="$PWD/f1tenth_planning/trajectories/autodrive_practice_20260924_b/autodrive_practice_20260924_b_mintime_raceline.csv" \
-./tools/start_dev.sh
-```
-
-Map and trajectory overrides must be supplied together. Optional development
-diagnostics and parameter overlays are available through `SDU_APEX_WITH_RVIZ`,
-`SDU_APEX_MPC_PUBLISH_DIAGNOSTICS`, and the `SDU_APEX_*_PARAMETER_OVERLAY`
-environment variables.
-
-## Start the simulator
-
-In another terminal, after the ROS stack is listening:
-
-```bash
-SDU_APEX_SIM_TRACK=practice SDU_APEX_SIM_MODE=batchmode \
-  ./tools/start_simulator.sh
-```
-
-Use `SDU_APEX_SIM_TRACK=compete` to select the other installed simulator
-image. Keep the simulator terminal open; stop it with `Ctrl-C`.
-
-## Run monitoring and recording
-
-Start the collision/lap watcher and optional debug recorder before starting
-the simulator:
-
-```bash
-./tools/watch_sim_run.sh <controller-container> <simulator-container> \
-  <recorder-container> 12
-```
-
-```bash
-SDU_APEX_RUN_ID=run_name ./tools/record_debug_bag.sh
-```
-
-The watcher stops the simulator immediately on collision and finalizes the
-recorder. Preserve only captures intended for a specific analysis in the
-workspace; run data belongs under ignored `live_runs/`.
-
-## Freeze and execute one MPC horizon
-
-For a development-only rollout check, the MPC can latch its next accepted
-30-command plan once odometry reports at least 7 m/s, publish all 30 outputs
-without another solve, and emit predicted-versus-current state samples on
-`/mpc/open_loop_test`. The normal controller profile leaves this disabled.
-Use the focused recorder profile to avoid recording the high-volume lidar
-stream:
-
-```bash
-SDU_APEX_MPC_PARAMETER_OVERLAY="$PWD/f1tenth_mpc/config/mpc_open_loop_horizon_test.yaml" \
-SDU_APEX_MPC_PUBLISH_DIAGNOSTICS=true \
-AUTODRIVE_REBUILD=0 SDU_APEX_IMAGE=sdu-apex-autodrive:practice-physx-odom-20261016 \
-SDU_APEX_MAP_YAML="$PWD/f1tenth_planning/maps/autodrive_practice_20260924_b.yaml" \
-SDU_APEX_TRAJECTORY_FILE="$PWD/f1tenth_planning/trajectories/autodrive_practice_20260924_b/autodrive_practice_20260924_b_mintime_raceline.csv" \
-./tools/start_dev.sh
-```
-
-In separate terminals, start the focused recorder, the completion/collision
-watcher, and then the practice simulator in batch mode:
-
-```bash
-SDU_APEX_IMAGE=sdu-apex-autodrive:practice-physx-odom-20261016 \
-SDU_APEX_RUN_ID=mpc_horizon_run SDU_APEX_RECORD_PROFILE=mpc_open_loop_test \
-  ./tools/record_debug_bag.sh
-./tools/watch_sim_run.sh sdu_apex_autodrive_dev sdu_apex_sim_practice \
-  rec_mpc_horizon_run mpc-horizon 60
-SDU_APEX_SIM_TRACK=practice SDU_APEX_SIM_MODE=batchmode \
-  ./tools/start_simulator.sh
-```
-
-The watcher aborts on any collision or execution-state fault, and stops the
-simulator shortly after the 750 ms horizon has been sampled. Analyze a
-completed capture with:
-
-```bash
-python3 tools/evaluate_mpc_bag.py live_runs/mpc_horizon_run/run
-```
+For intentional development A/B runs only, call the lower-level
+tools/run_mpc_practice_trial.sh or tools/run_iros_trial.sh directly
+with its explicitly named MPC parameter overlay. Such overlays are
+never required to run the production practice baseline.
 
 ## Competition image
 
-Build the self-contained image with its installed map/raceline pair:
+    tools/build_competition.sh
+    tools/run_competition.sh
 
-```bash
-./tools/build_competition.sh
-```
+This standalone launch has the same default IROS map and pinned IPOPT
+raceline. Source-only validity is not a substitute for closed-loop
+validation. The native source-plant physical corridor, controller
+faults, and 20 ms command-publication checks remain active.
 
-With the simulator already running, launch the fixed competition stack:
+## Development
 
-```bash
-./tools/run_competition.sh
-```
+    AUTODRIVE_REBUILD=0 SDU_APEX_IMAGE=sdu-apex-autodrive:dev tools/start_dev.sh
+    SDU_APEX_SIM_TRACK=practice SDU_APEX_SIM_MODE=batchmode tools/start_simulator.sh
 
-The competition launch has no recorder, RViz, mapping, alternate controller,
-or debug parameter overlay. Its only actuator command is steering angle plus
-normalized throttle.
-
-Stop the development container with `Ctrl-C`, or run
-`./tools/stop_autodrive.sh` from another terminal.
+Stop with tools/stop_autodrive.sh or Ctrl-C. Superseded experiment files
+were preserved outside active config under
+live_runs/mpc_profile_history_20261101.

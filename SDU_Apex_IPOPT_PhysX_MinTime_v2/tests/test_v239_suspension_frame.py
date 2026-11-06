@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 import numpy as np
 import pytest
-from diagnose_suspension_frame_v239 import (
+from diagnostic_fixtures.diagnose_suspension_frame_v239 import (
     apply_sign_options, lateral_transfer,load_metrics,mirrored_lateral_geometry,compare_candidates)
 from test_v238_scalar_force_audit import Tire,seed
 

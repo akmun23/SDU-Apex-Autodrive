@@ -35,7 +35,7 @@ TEST(SensorPacketAssembler, RecordsNormalSourceGapWithoutReordering)
   EXPECT_EQ(assembler.diagnostics().maximum_reorder_depth, 0U);
 }
 
-TEST(SensorPacketAssembler, DropsLateCompletionAfterBypassingIncompletePacket)
+TEST(SensorPacketAssembler, WaitsForEarlierIncompletePacketBeforeIntegratingLaterOne)
 {
   SensorPacketAssembler assembler;
   std::vector<int64_t> emitted;
@@ -48,16 +48,16 @@ TEST(SensorPacketAssembler, DropsLateCompletionAfterBypassingIncompletePacket)
   assembler.add_encoder_sample(earlier, 0.1, true);
   add_complete_packet(assembler, later);
 
-  EXPECT_EQ(emitted, (std::vector<int64_t>{later}));
+  EXPECT_TRUE(emitted.empty());
   EXPECT_EQ(assembler.diagnostics().maximum_reorder_depth, 1U);
   EXPECT_EQ(assembler.diagnostics().maximum_reorder_time_ns, 25'000'000);
 
   assembler.add_encoder_sample(earlier, 0.2, false);
   assembler.add_imu_sample(earlier, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 
-  EXPECT_EQ(emitted, (std::vector<int64_t>{later}));
-  EXPECT_EQ(assembler.diagnostics().source_reversal_count, 1U);
-  EXPECT_EQ(assembler.diagnostics().late_completed_packet_count, 1U);
+  EXPECT_EQ(emitted, (std::vector<int64_t>{earlier, later}));
+  EXPECT_EQ(assembler.diagnostics().source_reversal_count, 0U);
+  EXPECT_EQ(assembler.diagnostics().late_completed_packet_count, 0U);
   EXPECT_EQ(assembler.diagnostics().last_emitted_source_stamp_ns, later);
 }
 

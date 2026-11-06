@@ -1,6 +1,6 @@
 import math
 import numpy as np
-from diagnose_native_tire_v2311 import (
+from diagnostic_fixtures.diagnose_native_tire_v2311 import (
     curve_response_without_stiffness, filtered_tire_load,
     predicted_native_callback, calculate_contact_audit)
 

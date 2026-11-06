@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <stdexcept>
 
 namespace f1tenth_localization
 {
@@ -49,10 +50,9 @@ void SensorPacketAssembler::update_packet(int64_t source_stamp_ns, Update && upd
   update(packet);
 
   process_ready_packets();
-  while (pending_.size() > kMaximumPendingPackets) {
-    pending_.erase(pending_.begin());
-    ++packet_drop_count_;
-    ++diagnostics_.incomplete_packet_drop_count;
+  if (pending_.size() > kMaximumPendingPackets) {
+    ++packet_coherence_fault_count_;
+    throw std::runtime_error("sensor epoch backlog overflow; cannot skip a physical interval");
   }
 }
 
@@ -103,6 +103,11 @@ void SensorPacketAssembler::process_ready_packets()
       const auto reorder_time_ns = packet.stamp_ns - pending_.begin()->first;
       diagnostics_.maximum_reorder_time_ns = std::max(
         diagnostics_.maximum_reorder_time_ns, reorder_time_ns);
+      // The source observer integrates one 25 ms physical interval per
+      // packet. Bypassing an earlier incomplete packet loses that interval;
+      // dropping its later completion cannot repair the hidden state.
+      ++it;
+      continue;
     }
 
     bool stale_packet = false;

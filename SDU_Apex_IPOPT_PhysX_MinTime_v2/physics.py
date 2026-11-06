@@ -20,6 +20,8 @@ from dataclasses import dataclass
 import numpy as np
 
 REPO_DEFAULT='akmun23/SDU-Apex-Autodrive'
+SOURCE_PLANT_STATE_SIZE = 26  # Must match UNITY_SOURCE_PLANT_STATE_SIZE in unity_source_plant_c.h.
+SOURCE_PLANT_CORE_STATE_SIZE = 18  # IPOPT seed stores the 18 optimized physical states.
 STEER_MAX=math.pi/6
 MOTOR_TORQUE=428.0
 WHEELBASE=.324
@@ -49,14 +51,30 @@ class State:
 
 
 class _CInput(C.Structure):
-    _fields_=[('state',C.c_double*18),('steering_target_rad',C.c_double),
-              ('throttle_normalized',C.c_double),('suspension_history_initialized',C.c_int)]
+    # Exact field order and dimensions from UnitySourcePlantInputC in
+    # unity_source_plant_c.h. Truncating state shifts every following member.
+    _fields_=[('state',C.c_double*SOURCE_PLANT_STATE_SIZE),
+              ('wheel_rotation_angle_rad',C.c_double*4),
+              ('steering_target_rad',C.c_double),
+              ('throttle_normalized',C.c_double),
+              ('suspension_history_initialized',C.c_int)]
 
 
 class _COutput(C.Structure):
-    _fields_=[('state',C.c_double*18),('suspension_history_initialized',C.c_int),
-              ('longitudinal_slip',C.c_double*4),('lateral_slip',C.c_double*4),
-              ('normal_load_n',C.c_double*4),('suspension_force_n',C.c_double*4),
+    # Exact UnitySourcePlantOutputC layout. The C function writes the complete
+    # structure even when a warm-start caller consumes only some fields.
+    _fields_=[('state',C.c_double*SOURCE_PLANT_STATE_SIZE),
+              ('integrated_body_forward_displacement_m',C.c_double),
+              ('integrated_body_lateral_displacement_m',C.c_double),
+              ('integrated_yaw_delta_rad',C.c_double),
+              ('wheel_rotation_angle_rad',C.c_double*4),
+              ('suspension_history_initialized',C.c_int),
+              ('longitudinal_slip',C.c_double*4),
+              ('maximum_positive_longitudinal_slip',C.c_double*4),
+              ('maximum_longitudinal_slip_excess_mps',C.c_double*4),
+              ('lateral_slip',C.c_double*4),
+              ('normal_load_n',C.c_double*4),
+              ('suspension_force_n',C.c_double*4),
               ('suspension_jounce_rate_mps',C.c_double*4),
               ('tire_longitudinal_force_n',C.c_double*4),
               ('tire_lateral_force_n',C.c_double*4),
@@ -95,31 +113,37 @@ class SourcePlant:
         self.state=None
 
     def reset(self,x,y,yaw,speed):
-        arr=[0.]*18
+        arr=[0.]*SOURCE_PLANT_STATE_SIZE
         arr[0]=float(speed)
         for i in range(3,7): arr[i]=speed/.059
         arr[7]=.00464804098
         self.input=_CInput()
         self.input.state[:]=arr
+        self.input.wheel_rotation_angle_rad[:]=[0.0]*4
         self.input.suspension_history_initialized=0
         self.state=State(float(x),float(y),float(yaw),float(speed),0.,0.,0.,[0.]*4,[0.]*4,[0.]*4)
         return self.state
 
-    def step(self,steer,throttle):
+    def step(self,steer,throttle,*,duration_s=.025):
         inp=self.input;out=self.output
         inp.steering_target_rad=max(-STEER_MAX,min(STEER_MAX,float(steer)))
         inp.throttle_normalized=max(0.,min(1.,float(throttle)))
-        if not self.lib.unity_source_plant_step_c(C.byref(inp),C.c_double(.025),C.byref(out)):
+        if not self.lib.unity_source_plant_step_c(C.byref(inp),C.c_double(duration_s),C.byref(out)):
             raise RuntimeError('production source plant rejected vehicle transition')
         old=self.state
-        u=.5*(old.u+out.state[0]);v=.5*(old.v+out.state[1]);r=.5*(old.r+out.state[2])
-        yaw_mid=old.yaw+.0125*r
-        xx=old.x+.025*(u*math.cos(yaw_mid)-v*math.sin(yaw_mid))
-        yy=old.y+.025*(u*math.sin(yaw_mid)+v*math.cos(yaw_mid))
-        self.state=State(xx,yy,old.yaw+.025*r,out.state[0],out.state[1],out.state[2],
+        # The production plant already integrates rear-axle pose at every
+        # source substep. Re-integrating endpoint COM velocities here both
+        # discards that accuracy and uses the wrong lateral velocity origin.
+        dx=out.integrated_body_forward_displacement_m
+        dy=out.integrated_body_lateral_displacement_m
+        c,s=math.cos(old.yaw),math.sin(old.yaw)
+        xx=old.x+c*dx-s*dy
+        yy=old.y+s*dx+c*dy
+        self.state=State(xx,yy,old.yaw+out.integrated_yaw_delta_rad,out.state[0],out.state[1],out.state[2],
                          out.state[13],list(out.longitudinal_slip),list(out.lateral_slip),
                          list(out.normal_load_n))
         inp.state[:]=out.state[:]
+        inp.wheel_rotation_angle_rad[:]=out.wheel_rotation_angle_rad[:]
         inp.suspension_history_initialized=out.suspension_history_initialized
         return self.state
 
@@ -135,8 +159,10 @@ class NativePhysX:
     separately; contact with obstacles is not simulated in the native model.
     """
     kind='native-physx-4.1'
-    def __init__(self,repo:Path, binary:Path|None=None):
+    def __init__(self,repo:Path, binary:Path|None=None,
+                 capture_diagnostics:bool=False):
         self.repo=Path(repo)
+        self.capture_diagnostics=bool(capture_diagnostics)
         loc=self.repo/'f1tenth_localization'
         self.init_path=loc/'config/physx_odom_reset_initial.json'
         self.shapes=loc/'config/physx_odom_vehicle_shapes.json'
@@ -165,6 +191,8 @@ class NativePhysX:
         self.initial=None
         # Physical 18-state vector returned by native PhysX for warm starts.
         self.last_source_state=None
+        self.last_wheel_commands_by_tick=None
+        self.last_steering_rack_rad_by_tick=None
         # Observations from the native wheel tire-force callback.
         self.last_native_contact=None
         # Diagnostic-only observables. Native binary already emits these;
@@ -190,6 +218,8 @@ class NativePhysX:
         self.last_full_source_state=None
         self.last_native_contact=None
         self.last_native_math=None
+        self.last_wheel_commands_by_tick=None
+        self.last_steering_rack_rad_by_tick=None
         return self.state
 
     def step(self,steer,throttle):
@@ -203,6 +233,7 @@ class NativePhysX:
         torque=(MOTOR_TORQUE*throttle/4) if throttle != 0. else 0.
         brake=MOTOR_TORQUE if throttle == 0. else 0.
         profile=[]
+        rack_trace=[] if self.capture_diagnostics else None
         for tick in range(25):
             old=self.steering_internal_deg
             inc=STEER_RATE*.001
@@ -211,6 +242,8 @@ class NativePhysX:
                 self.steering_internal_deg=max(target,old-inc)
             else:
                 self.steering_internal_deg=min(target,old+inc)
+            if rack_trace is not None:
+                rack_trace.append(math.radians(self.steering_internal_deg))
             a=math.radians(self.steering_internal_deg)
             tang=math.tan(a)
             fl=math.atan(2*WHEELBASE*tang/(2*WHEELBASE+TRACK*tang))
@@ -220,6 +253,8 @@ class NativePhysX:
                 {'steer_angle_rad':fr,'drive_torque_nm':torque,'brake_torque_nm':brake},
                 {'steer_angle_rad':0.,'drive_torque_nm':torque,'brake_torque_nm':brake},
                 {'steer_angle_rad':0.,'drive_torque_nm':torque,'brake_torque_nm':brake}])
+        self.last_wheel_commands_by_tick=(profile if self.capture_diagnostics else None)
+        self.last_steering_rack_rad_by_tick=rack_trace
         stage={'capture_row':self.step_index*25,
                'time_s':self.step_index*.025,'wheel_commands_by_tick':profile}
         message={'op':'rollout','stages':[stage]}

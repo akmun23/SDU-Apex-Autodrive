@@ -1,0 +1,17 @@
+# Next practice lap-time and viability investigation (2026-10-31)
+
+Target: five consecutive 10-scored-lap Unity practice races below 49.5 s, then push toward consistently sub-49.0 s while keeping native source dynamics, 30×25 ms full horizon, two SQP passes, exact footprint/corridor checks, and 20 ms publication deadline.
+
+Reference (scoped Riccati FTZ plus `live_runs/mpc_collision_margin_experiment_20261030/practice_guarded_prefixseed_20261030_01.yaml`): 49.370, 49.350, 49.253, 49.854, 49.594 s; 5/5 clean, 3/5 below 49.5, worst callback 18.254 ms, 23 accepted recoveries. Fully documented in `MPC_FTZ_CONVERGENCE_RACETIME_AUDIT_20261031.md`.
+
+Source lap-time topics contain individual scored laps as low as 4.881 s; several 5.0–5.168 s slow laps drive total variance. The race is not limited to a uniform 4.95 s lap. Clusters in the five full diagnostics occur around cumulative progress s=27–30 m in runs 1,4,5 and s=268–269 m in run 4 (three recovery actions). The latter is cumulative progress, not wrapped track coordinate. For fair spatial comparisons, take progress modulo the raceline length before aggregating corner recurrence.
+
+Recovery actions are `accepted_viability_recovery` with `action_source=current_solver_candidate`. Do not assume they are unnecessary or skip their physically exact validation: investigate how R2's current feasible full horizon approaches a terminally nonviable state, and whether improved continuation terms/trust-region adaptation can avoid that state **before** fallback. Do not remove hard corridor checks or bypass native 1 ms source-plant substeps.
+
+Single-variable trials from prior round: 0.06 rad steering trust (increased from actual practice 0.04) completed 49.843 s; heading weight 1650 (from 1700) completed 49.618 s; steering slew 1600 (increased from actual practice 1500) aborted after 9 scored laps. None was promoted. A separate pre-existing live experiment is already running steering slew 1400 (observed first three runs 49.299, 49.739, 49.654 s, all clean, 1/3 under 49.5). **Do not interrupt or duplicate concurrently owned optimizer pause/Unity runs.**
+
+Planned next independent test: change **only `weight_u` from 45 to 47** in the previously fastest practice profile. Keep steering slew=1500, heading=1700, lateral=5000, 0.04 steering trust, existing speed reference and all physical margins. Check 10-lap total, per-lap distribution, accepted recovery counts, R2 selection, exact-rollout p99, callback max and deadline misses. Stop if the first run is incomplete or violates a deadline; if it is reliably faster, qualify five consecutive complete races. A `weight_u=50` trial can follow independently if 47 is promising, but never combine speculative changes. The overlay `live_runs/mpc_collision_margin_experiment_20261030/practice_ftz_speed47_20261031.yaml` was created; race execution was deferred because an existing live owner held `mpc_validation/optimizer_pause.json`.
+
+Do not call a five-run mean of 49.484 s a 5/5 pass: it is only 3/5 under 49.5. Prefer a Pareto gain in minimum safety reserve, accepted full-horizon feasibility, R2 convergence and mean/worst lap time—not a lucky single lap at the cost of a late fatal rejection.
+
+The first `weight_u=47` run completed cleanly in 49.653 s (0 missed deadlines, max callback 18.145 ms), not an improvement on 49.370 s baseline. A subsequent independent one-variable sweep covers effective practice lateral 5000→5300, heading 1700→1750, steering command 4.5→4.3, steering slew 1500→1450, throttle slew 50→45.

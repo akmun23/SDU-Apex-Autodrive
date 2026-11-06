@@ -11,23 +11,22 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sdu_apex_msgs/msg/unity_plant_state.hpp>
+#include <sdu_apex_msgs/msg/drive_command.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
-#include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
 
+#include "f1tenth_localization/bridge_epoch_assembler.hpp"
 #include "f1tenth_localization/odometry_observer.hpp"
 #include "f1tenth_localization/physx_odom_runtime.hpp"
 #include "f1tenth_localization/sensor_packet_assembler.hpp"
-#include "f1tenth_localization/timed_command_history.hpp"
 
 namespace
 {
 
 constexpr double kPhysicsPacketPeriodS = 0.025;
-constexpr auto kActuatorFeedbackMaxAge = std::chrono::milliseconds(100);
 
 double yaw_from_quaternion(const geometry_msgs::msg::Quaternion & q)
 {
@@ -75,10 +74,8 @@ public:
     declare_parameter("left_encoder_topic", "/autodrive/roboracer_1/left_encoder");
     declare_parameter("right_encoder_topic", "/autodrive/roboracer_1/right_encoder");
     declare_parameter("imu_topic", "/autodrive/roboracer_1/imu");
-    declare_parameter("steering_feedback_topic", "/autodrive/roboracer_1/steering");
-    declare_parameter("throttle_feedback_topic", "/autodrive/roboracer_1/throttle");
-    declare_parameter("steering_command_topic", "/autodrive/roboracer_1/steering_command");
-    declare_parameter("throttle_command_topic", "/autodrive/roboracer_1/throttle_command");
+    declare_parameter("bridge_request_command_topic", "/odom/bridge_request_command");
+    declare_parameter("bridge_actuator_feedback_topic", "/odom/bridge_actuator_feedback");
     declare_parameter("odom_topic", "/odom");
     declare_parameter("diagnostics_topic", "/odom/diagnostics");
     declare_parameter("publish_diagnostics", false);
@@ -175,31 +172,24 @@ public:
       [this](sensor_msgs::msg::Imu::ConstSharedPtr message) {
         imu_callback(*message);
       });
-    steering_feedback_sub_ = create_subscription<std_msgs::msg::Float32>(
-      get_parameter("steering_feedback_topic").as_string(), sensor_qos,
-      [this](std_msgs::msg::Float32::ConstSharedPtr message) {
-        actuator_feedback_callback(*message, true);
+    bridge_request_command_sub_ =
+      create_subscription<sdu_apex_msgs::msg::DriveCommand>(
+      get_parameter("bridge_request_command_topic").as_string(), rclcpp::QoS(100),
+      [this](sdu_apex_msgs::msg::DriveCommand::ConstSharedPtr message) {
+        bridge_actuator_callback(*message, false);
       });
-    throttle_feedback_sub_ = create_subscription<std_msgs::msg::Float32>(
-      get_parameter("throttle_feedback_topic").as_string(), sensor_qos,
-      [this](std_msgs::msg::Float32::ConstSharedPtr message) {
-        actuator_feedback_callback(*message, false);
-      });
-    steering_command_sub_ = create_subscription<std_msgs::msg::Float32>(
-      get_parameter("steering_command_topic").as_string(), sensor_qos,
-      [this](std_msgs::msg::Float32::ConstSharedPtr message) {
-        actuator_command_callback(*message, true);
-      });
-    throttle_command_sub_ = create_subscription<std_msgs::msg::Float32>(
-      get_parameter("throttle_command_topic").as_string(), sensor_qos,
-      [this](std_msgs::msg::Float32::ConstSharedPtr message) {
-        actuator_command_callback(*message, false);
+    bridge_actuator_feedback_sub_ =
+      create_subscription<sdu_apex_msgs::msg::DriveCommand>(
+      get_parameter("bridge_actuator_feedback_topic").as_string(), rclcpp::QoS(100),
+      [this](sdu_apex_msgs::msg::DriveCommand::ConstSharedPtr message) {
+        bridge_actuator_callback(*message, true);
       });
 
     packet_assembler_.set_packet_callback(
       [this](const f1tenth_localization::SensorPacket & packet) {
         try {
-          process_packet(packet);
+          bridge_epochs_.push_packet(packet);
+          drain_bridge_epochs();
         } catch (const std::exception & error) {
           RCLCPP_FATAL(get_logger(), "odometry plant update failed: %s", error.what());
           rclcpp::shutdown();
@@ -254,10 +244,15 @@ private:
       return;
     }
     std::lock_guard<std::mutex> lock(sensor_mutex_);
+    try {
     packet_assembler_.add_imu_sample(
       stamp_ns(message.header.stamp), message.linear_acceleration.x,
       message.linear_acceleration.y, message.angular_velocity.z, yaw,
       roll, pitch, message.angular_velocity.x, message.angular_velocity.y);
+    } catch (const std::exception & error) {
+      RCLCPP_FATAL(get_logger(), "sensor epoch assembly failed: %s", error.what());
+      rclcpp::shutdown();
+    }
   }
 
   void encoder_callback(const sensor_msgs::msg::JointState & message, bool left)
@@ -266,45 +261,47 @@ private:
       return;
     }
     std::lock_guard<std::mutex> lock(sensor_mutex_);
+    try {
     packet_assembler_.add_encoder_sample(
       stamp_ns(message.header.stamp), message.position.front(), left);
+    } catch (const std::exception & error) {
+      RCLCPP_FATAL(get_logger(), "sensor epoch assembly failed: %s", error.what());
+      rclcpp::shutdown();
+    }
   }
 
-  void actuator_feedback_callback(const std_msgs::msg::Float32 & message, bool steering)
+  void bridge_actuator_callback(
+    const sdu_apex_msgs::msg::DriveCommand & message, bool feedback)
   {
-    const double value = static_cast<double>(message.data);
-    if (!std::isfinite(value)) {
-      return;
-    }
-    std::lock_guard<std::mutex> lock(actuator_mutex_);
-    const auto received = std::chrono::steady_clock::now();
-    if (steering) {
-      steering_feedback_rad_ = value;
-      steering_feedback_received_ = received;
-      have_steering_feedback_ = true;
-    } else {
-      throttle_feedback_ = value;
-      throttle_feedback_received_ = received;
-      have_throttle_feedback_ = true;
+    constexpr double kMaxSteeringRad = 3.14159265358979323846 / 6.0;
+    std::lock_guard<std::mutex> lock(sensor_mutex_);
+    try {
+      const auto stamp = stamp_ns(message.header.stamp);
+      const double steering = message.steering_angle_rad / kMaxSteeringRad;
+      const bool valid = feedback ? bridge_epochs_.push_feedback(
+        stamp, steering, message.throttle_normalized) : bridge_epochs_.push_command(
+        stamp, steering, message.throttle_normalized);
+      if (!valid) throw std::runtime_error("invalid stamped Bridge actuator sample");
+      drain_bridge_epochs();
+    } catch (const std::exception & error) {
+      RCLCPP_FATAL(get_logger(), "odometry epoch join failed: %s", error.what());
+      rclcpp::shutdown();
     }
   }
 
-  void actuator_command_callback(const std_msgs::msg::Float32 & message, bool steering)
+  void drain_bridge_epochs()
   {
-    const double value = static_cast<double>(message.data);
-    if (!std::isfinite(value)) {
-      return;
-    }
-    const int64_t received_stamp_ns = get_clock()->now().nanoseconds();
-    std::lock_guard<std::mutex> lock(actuator_mutex_);
-    if (steering) {
-      steering_command_history_.push(received_stamp_ns, value);
-    } else {
-      throttle_command_history_.push(received_stamp_ns, value);
-    }
+    // sensor_mutex_ is held by both the sensor assembler and actuator callbacks.
+    f1tenth_localization::SensorPacket packet;
+    f1tenth_localization::BridgeEpochAssembler::Command command, feedback;
+    while (bridge_epochs_.pop_ready(&packet, &command, &feedback))
+      process_packet(packet, command, feedback);
   }
 
-  void process_packet(const f1tenth_localization::SensorPacket & packet)
+  void process_packet(
+    const f1tenth_localization::SensorPacket & packet,
+    const f1tenth_localization::BridgeEpochAssembler::Command & command,
+    const f1tenth_localization::BridgeEpochAssembler::Command & measured_feedback)
   {
     const auto packet_start = diagnostics_pub_
       ? std::chrono::steady_clock::now()
@@ -316,36 +313,14 @@ private:
       observer_stamp_s_ += kPhysicsPacketPeriodS;
     }
 
-    double steering_command = 0.0;
-    double throttle_command = 0.0;
-    double steering_feedback = 0.0;
-    double throttle_feedback = 0.0;
-    bool feedback_valid = false;
-    bool steering_feedback_valid = false;
-    bool throttle_feedback_valid = false;
-    {
-      std::lock_guard<std::mutex> lock(actuator_mutex_);
-      // Sensor headers carry the Bridge request epoch, while controller
-      // outputs may be published during the later telemetry round trip.
-      // Sampling by callback receipt time prevents a command for the next
-      // request from being shifted into this packet's two-command delay line.
-      steering_command = steering_command_history_.value_at_or_before(
-        packet.stamp_ns, 0.0);
-      throttle_command = throttle_command_history_.value_at_or_before(
-        packet.stamp_ns, 0.0);
-      const auto current = std::chrono::steady_clock::now();
-      steering_feedback_valid = have_steering_feedback_ &&
-        current - steering_feedback_received_ <= kActuatorFeedbackMaxAge;
-      throttle_feedback_valid = have_throttle_feedback_ &&
-        current - throttle_feedback_received_ <= kActuatorFeedbackMaxAge;
-      feedback_valid = steering_feedback_valid && throttle_feedback_valid;
-      if (steering_feedback_valid) {
-        steering_feedback = steering_feedback_rad_;
-      }
-      if (throttle_feedback_valid) {
-        throttle_feedback = throttle_feedback_;
-      }
-    }
+    constexpr double kMaxSteeringRad = 3.14159265358979323846 / 6.0;
+    const double steering_command = command.steering_normalized;
+    const double throttle_command = command.throttle_normalized;
+    const double steering_feedback = measured_feedback.steering_normalized * kMaxSteeringRad;
+    const double throttle_feedback = measured_feedback.throttle_normalized;
+    constexpr bool feedback_valid = true;
+    constexpr bool steering_feedback_valid = true;
+    constexpr bool throttle_feedback_valid = true;
 
     std::chrono::steady_clock::time_point plant_advance_start{};
     if (diagnostics_pub_)
@@ -507,8 +482,7 @@ private:
     state.roll_rate_radps = last_plant_.state[10];
     state.pitch_rad = last_plant_.state[11];
     state.pitch_rate_radps = last_plant_.state[12];
-    state.physical_steering_rad = feedback_valid ?
-      steering_feedback : last_plant_.state[13];
+    state.physical_steering_rad = last_plant_.state[13];
     std::copy_n(last_plant_.state.begin() + 14, 4,
       state.suspension_jounce_m.begin());
     std::copy_n(last_plant_.state.begin() +
@@ -598,25 +572,15 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr left_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr right_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
-  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr steering_feedback_sub_;
-  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr throttle_feedback_sub_;
-  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr steering_command_sub_;
-  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr throttle_command_sub_;
+  rclcpp::Subscription<sdu_apex_msgs::msg::DriveCommand>::SharedPtr bridge_request_command_sub_;
+  rclcpp::Subscription<sdu_apex_msgs::msg::DriveCommand>::SharedPtr bridge_actuator_feedback_sub_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
 
   std::mutex sensor_mutex_;
-  std::mutex actuator_mutex_;
   bool clock_initialized_{false};
   double observer_stamp_s_{0.0};
-  f1tenth_localization::TimedCommandHistory steering_command_history_;
-  f1tenth_localization::TimedCommandHistory throttle_command_history_;
-  double steering_feedback_rad_{0.0};
-  double throttle_feedback_{0.0};
-  std::chrono::steady_clock::time_point steering_feedback_received_{};
-  std::chrono::steady_clock::time_point throttle_feedback_received_{};
-  bool have_steering_feedback_{false};
-  bool have_throttle_feedback_{false};
+  f1tenth_localization::BridgeEpochAssembler bridge_epochs_;
 
   std::string odom_frame_{"odom"};
   std::string base_frame_{"base_link"};

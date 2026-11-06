@@ -48,8 +48,8 @@ struct SensorPacketAssemblerDiagnostics
   // The current assembler does not discard incomplete packets; this remains
   // zero until an explicit drop policy exists.
   std::uint64_t incomplete_packet_drop_count{0};
-  // Number and source-time span of incomplete earlier packets bypassed while
-  // emitting a later complete packet.
+  // Number and source-time span of earlier incomplete packets blocking a
+  // later complete packet. Those intervals must never be skipped.
   std::uint64_t maximum_reorder_depth{0};
   int64_t maximum_reorder_time_ns{0};
 };

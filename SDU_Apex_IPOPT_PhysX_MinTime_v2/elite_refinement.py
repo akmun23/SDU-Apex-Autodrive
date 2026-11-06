@@ -1,0 +1,573 @@
+"""Durable equal-duration source-witness polishing and clearance-ranked archive.
+
+The racing time stays fixed. Every accepted witness must pass the independent
+1 ms source-model verifier. This is not a Unity/MPC runtime certificate.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+
+import numpy as np
+
+from pathlib import Path
+
+from command_ocp import (save_json_checkpoint, save_command_checkpoint,
+                         witness_quality, quality_key, validate_margin, reported_clearance_cuts)
+from command_campaign import source_count
+from map_track import clearance_passes, declared_clearance_tolerance
+
+
+def quality_of_certificate(report):
+    if report.get('status') != 'source_witness_passed':
+        return None
+    margin = (report.get('rollout') or {}).get('minimum_1ms_footprint_slack_m')
+    tolerance = declared_clearance_tolerance(report)
+    if margin is None or tolerance is None or not clearance_passes(float(margin),tolerance_m=tolerance):
+        return None
+    return float(margin)
+
+
+def geometry_seed(seed, destination, lateral_offset_m, harmonic):
+    """Uncertified, smoothly displaced geometry; source hidden states unchanged.
+
+    This is an alternate local basin, NOT an integration and NOT a certificate.
+    IPOPT and the independent full-tick gate must restore realizability.
+    """
+    if not math.isfinite(lateral_offset_m) or not 0 < abs(lateral_offset_m) <= .5:
+        raise ValueError('bad lateral perturbation')
+    if not 1 <= harmonic <= 8:
+        raise ValueError('bad geometry harmonic')
+    with np.load(seed, allow_pickle=False) as data:
+        states=np.asarray(data['state'],dtype=float).copy()
+        controls=np.asarray(data['controls'],dtype=float).copy()
+        digest=str(data['source_sha256'].item())
+    count=controls.shape[1]
+    theta=2*np.pi*np.arange(count+1)/count
+    profile=lateral_offset_m*np.sin(harmonic*theta)
+    heading=states[2].copy()
+    states[0] -= profile*np.sin(heading)
+    states[1] += profile*np.cos(heading)
+    # Enforce precisely the periodic closure already present in the seed.
+    states[0,-1]=states[0,0]
+    states[1,-1]=states[1,0]
+    destination.parent.mkdir(parents=True,exist_ok=True)
+    save_command_checkpoint(destination,states,controls,digest,float('inf'),-1)
+    return destination
+
+
+def state_diversity_m(a,b):
+    """RMS XY displacement; trajectories share the same fixed phase and count."""
+    with np.load(a,allow_pickle=False) as aa, np.load(b,allow_pickle=False) as bb:
+        xa=np.asarray(aa['state'][:2,:-1],dtype=float)
+        xb=np.asarray(bb['state'][:2,:-1],dtype=float)
+        if xa.shape != xb.shape:
+            return float('inf')
+        return float(np.sqrt(np.mean(np.sum((xa-xb)**2,axis=0))))
+
+
+def partial_clearance_candidate(report, margin, frontier):
+    """A failed stronger target may still contain a useful nominal witness."""
+    rollout=report.get('rollout') or {}
+    slack=rollout.get('minimum_1ms_footprint_slack_m')
+    requested=report.get('required_margin_m')
+    return (report.get('status')=='no_validated_witness' and
+            slack is not None and requested is not None and
+            math.isfinite(float(slack)) and
+            float(requested)+float(slack)-margin>frontier+1.e-4 and
+            rollout.get('full_lap_xy_max_m',float('inf'))<=.05)
+
+
+def archive_candidate(*,repo,seed,map_path,output,margin,count,state,attempt,report,
+                      directory,target,certify,diversity_threshold_m,on_candidate,
+                      adaptive_spec=None):
+    """Independently certify full goals or explicitly labeled partial gains."""
+    index,strategy=attempt['index'],attempt['strategy']
+    partial=(strategy=='margin' and partial_clearance_candidate(
+        report,margin,state['best_clearance_slack_m']))
+    if report['status']!='source_witness_passed' and not partial:
+        return
+    candidate_hash=hashlib.sha256((directory/'witness.npz').read_bytes()).hexdigest()
+    certificate_dir=output/f'certified_{index:02d}_{candidate_hash[:12]}'
+    independent=certificate_dir/'report.json'
+    if independent.exists():
+        checked=json.loads(independent.read_text())
+    else:
+        if certificate_dir.exists():
+            from command_campaign import unused_directory
+            certificate_dir=unused_directory(certificate_dir)
+        checked=certify(repo,directory/'witness.npz',map_path,certificate_dir,
+                        **({'margin':margin} if margin!=.05 else {}))
+    score=quality_of_certificate(checked)
+    target_met=(score is not None and clearance_passes(score,target-margin,
+        tolerance_m=declared_clearance_tolerance(checked)))
+    if score is not None and not target_met:
+        # A purportedly passed goal must be independently confirmed. Only an
+        # explicitly failed stronger search can be recovered as partial gain.
+        if not partial or score<=state['best_clearance_slack_m']+1.e-4:
+            score=None
+    if abs(float(checked.get('trial_lap_s',float('inf')))-count*.025)>1.e-8:
+        score=None
+        target_met=False
+    attempt.update(independent_status=checked['status'],clearance_slack_m=score,
+                   requested_target_met=target_met)
+    if score is None:
+        return
+    if partial:
+        attempt['search_status']=report['status']
+        attempt['status']='partial_clearance_improvement' if not target_met else 'source_witness_passed'
+    alternative=certificate_dir/'witness.npz'
+    current=[seed]+[Path(e['witness']) for e in state['accepted']]
+    diversity=min(state_diversity_m(alternative,other) for other in current)
+    better_clearance=score>state['best_clearance_slack_m']+1.e-6
+    quality=witness_quality(alternative,checked)
+    prior=state.get('best_quality') or witness_quality(seed,json.loads(seed.with_name('report.json').read_text()))
+    smoother=quality['steering_step_rms_rad']<prior['steering_step_rms_rad']-1.e-4
+    attempt['geometry_diversity_m']=diversity
+    if diversity<diversity_threshold_m and not better_clearance and not smoother:
+        return
+    record=dict(witness=str(alternative),sha256=hashlib.sha256(alternative.read_bytes()).hexdigest(),
+        clearance_slack_m=score,lap_s=count*.025,geometry_diversity_m=diversity,
+        required_margin_m=margin,requested_margin_m=target,requested_target_met=target_met,
+        partial_clearance_improvement=partial and not target_met,strategy=strategy,quality=quality)
+    if not any(e['sha256']==record['sha256'] for e in state['accepted']):
+        state['accepted'].append(record)
+    if adaptive_spec is not None:
+        attempt.update(accepted=True,certified_witness=str(alternative))
+        print(json.dumps(dict(event='adaptive_region_certified',index=index,
+            sector=adaptive_spec['sector'],clearance_slack_m=score,diversity_m=diversity,source_only=True)),flush=True)
+    if quality_key(quality)>quality_key(prior):
+        state.update(best_seed=str(alternative),best_clearance_slack_m=score,best_quality=quality)
+    if partial:
+        print(json.dumps(dict(event='partial_clearance_certified',index=index,
+            clearance_slack_m=score,required_margin_m=margin,
+            requested_margin_m=target,requested_target_met=target_met,
+            lap_s=count*.025,source_only=True)),flush=True)
+    if on_candidate is not None:
+        on_candidate(alternative,count*.025)
+
+
+def polish_equal_time(*, repo, seed, map_path, output, iterations=300, workers=4,
+                      margin_steps=(.0001, .0005, .002),
+                      geometry_seeds=(), control_seeds=(), adaptive_regions=0,
+                      diversity_threshold_m=.015,
+                      max_elites=6, solve=None,
+                      certify=None, stagnation_iterations=90,
+                      cancel_requested=None, quality_objectives=(), on_candidate=None,
+                      margin=.05):
+    """Search at unchanged duration for higher-clearance certified seeds."""
+    if solve is None or certify is None:
+        from command_ocp import solve_witness, certify_witness
+        solve = solve or solve_witness
+        certify = certify or certify_witness
+    repo, seed, map_path, output = map(Path, (repo, seed, map_path, output))
+    margin = validate_margin(margin)
+    if not margin_steps and not geometry_seeds and not quality_objectives and not control_seeds and not adaptive_regions:
+        raise ValueError('at least one elite-search strategy required')
+    if any(mode not in ('clearance', 'smooth') for mode in quality_objectives):
+        raise ValueError('unknown equal-time quality objective')
+    if not all(math.isfinite(d) and 0 < d <= .05 for d in margin_steps):
+        raise ValueError('invalid strictly positive equal-time clearance targets')
+    if not math.isfinite(diversity_threshold_m) or diversity_threshold_m <= 0:
+        raise ValueError('invalid diversity threshold')
+    if not isinstance(adaptive_regions,int) or not 0 <= adaptive_regions <= 24:
+        raise ValueError('invalid adaptive search budget')
+    if not isinstance(max_elites,int) or not 1 <= max_elites <= 16:
+        raise ValueError('invalid elite count')
+    for offset,harmonic in geometry_seeds:
+        if not math.isfinite(offset) or not 0 < abs(offset) <= .5 or not 1 <= harmonic <= 8:
+            raise ValueError('invalid alternate geometry seed')
+    for amplitude,harmonic in control_seeds:
+        from causal_seed import control_profile
+        control_profile(40,amplitude,harmonic)
+    count = source_count(seed)
+    seed_hash = hashlib.sha256(seed.read_bytes()).hexdigest()
+    map_hash = hashlib.sha256(map_path.read_bytes()).hexdigest()
+    output.mkdir(parents=True, exist_ok=True)
+    path = output/'elite.json'
+    contract = dict(seed_sha256=seed_hash, map_sha256=map_hash, intervals=count,
+                    extra_margin_m=list(margin_steps),
+                    quality_objectives=list(quality_objectives),
+                    geometry_seeds=[list(entry) for entry in geometry_seeds],
+                    control_seeds=[list(entry) for entry in control_seeds],
+                    adaptive_regions=adaptive_regions,
+                    adaptive_strategy='interleaved-cyclic-regions-v2',
+                    diversity_threshold_m=diversity_threshold_m,max_elites=max_elites)
+    # Preserve resumability for existing default-margin archives.
+    if margin != .05:
+        contract['required_margin_m'] = margin
+    if path.exists():
+        state = json.loads(path.read_text())
+        if state['contract'] != contract:
+            raise ValueError('elite archive input contract mismatch')
+    else:
+        baseline = seed.with_name('report.json')
+        if not baseline.exists():
+            raise ValueError('elite archive requires certified input witness/report')
+        checked = json.loads(baseline.read_text())
+        score = quality_of_certificate(checked)
+        if score is None or abs(float(checked['trial_lap_s'])-count*.025)>1.e-8:
+            raise ValueError('elite baseline did not pass source and clearance gates')
+        state = dict(schema='source-elite-refinement/v1', contract=contract,
+                     baseline_clearance_slack_m=score, best_clearance_slack_m=score,
+                     best_quality=witness_quality(seed, checked),
+                     best_seed=str(seed), attempts=[], accepted=[])
+        save_json_checkpoint(path,state)
+    # Recover useful nominal witnesses from previously missed stronger goals
+    # without rerunning IPOPT or overwriting the currently pending attempt.
+    for prior in state['attempts']:
+        if (prior.get('strategy')!='margin' or prior.get('partial_clearance_reviewed') or
+                prior.get('clearance_slack_m') is not None or not prior.get('report')):
+            continue
+        previous_path=Path(prior['report'])
+        if not previous_path.is_file():
+            prior.update(partial_clearance_reviewed=True,partial_clearance_review_reason='original report missing')
+            save_json_checkpoint(path,state)
+            continue
+        previous_report=json.loads(previous_path.read_text())
+        if partial_clearance_candidate(previous_report,margin,state['best_clearance_slack_m']):
+            archive_candidate(repo=repo,seed=seed,map_path=map_path,output=output,
+                margin=margin,count=count,state=state,attempt=prior,report=previous_report,
+                directory=Path(prior['report']).parent,target=prior['required_margin_m'],
+                certify=certify,diversity_threshold_m=diversity_threshold_m,on_candidate=on_candidate)
+        prior['partial_clearance_reviewed']=True
+        save_json_checkpoint(path,state)
+    # Alternate independent adaptive basins with the known useful quality
+    # objectives. Otherwise multiple 1200-iteration quality solves could
+    # starve adaptive exploration for hours on the current incumbent.
+    focused=[('adaptive',step) for step in range(adaptive_regions)]
+    quality=[('objective',mode) for mode in quality_objectives]
+    strategies=[]
+    while focused or quality:
+        if focused:
+            strategies.append(focused.pop(0))
+        if quality:
+            strategies.append(quality.pop(0))
+    strategies += ([('control',(amplitude,harmonic))
+                    for amplitude,harmonic in control_seeds] +
+                   [('margin',value) for value in margin_steps] +
+                   [('geometry',(offset,harmonic)) for offset,harmonic in geometry_seeds])
+    # A resumed archive may have exhausted the coarse margin ladder. Give it
+    # one bounded backtracking round, not endless retries of larger failures.
+    # Appended indices keep all existing attempt identities stable.
+    failed_margin=any(a.get('strategy')=='margin' and
+                      (a.get('clearance_slack_m') is None or a.get('requested_target_met') is False)
+                      for a in state['attempts'])
+    if margin_steps and failed_margin and 'clearance_retry_indices' not in state:
+        state['clearance_retry_indices']=list(range(len(strategies),len(strategies)+len(margin_steps)))
+        save_json_checkpoint(path,state)
+    for index in state.get('clearance_retry_indices',[]):
+        if index!=len(strategies):
+            raise ValueError('clearance retry index contract differs')
+        strategies.append(('margin',max(margin_steps)))
+    # Retain stable indices/contracts while running feasible clearance
+    # continuation before unrestricted quality/geometry exploration. Finish
+    # any pending attempt first, so changing allocation cannot lose its resume.
+    pending_index=(state.get('active_attempt') or {}).get('index')
+    ordered=sorted(enumerate(strategies),key=lambda pair:(
+        -1 if pair[0]==pending_index else 0 if pair[1][0]=='margin' else 1,pair[0]))
+    for index,(strategy,value) in ordered:
+        if cancel_requested is not None and cancel_requested():
+            raise KeyboardInterrupt('equal-duration polishing interrupted')
+        if any(a['index']==index for a in state['attempts']):
+            continue
+        if len(state['accepted'])>=max_elites:
+            break
+        target=margin
+        if strategy=='margin':
+            # Continue above the measured frontier, not above the original
+            # 5 cm baseline. The latter asked already-roomy seeds to solve
+            # weaker constraints again and could never add useful clearance.
+            requests=state.setdefault('clearance_requests',{})
+            request=requests.get(str(index))
+            if request is None:
+                active=state.get('active_attempt') or {}
+                old_report=output/f'polish_{index:02d}'/'report.json'
+                if active.get('index')==index and 'margin' in active:
+                    target=float(active['margin'])  # resume the exact pending request
+                    policy='retained_pending_request'
+                elif old_report.exists():
+                    # Power loss after solve completion but before archiving.
+                    target=float(json.loads(old_report.read_text()).get('required_margin_m',margin+value))
+                    policy='retained_completed_request'
+                else:
+                    frontier=margin+max(0.,state['best_clearance_slack_m'])
+                    failed_targets=[float(a['required_margin_m']) for a in state['attempts']
+                        if a.get('strategy')=='margin' and
+                        (a.get('clearance_slack_m') is None or a.get('requested_target_met') is False)
+                        and float(a.get('required_margin_m',0.))>frontier]
+                    step=min(value,(min(failed_targets)-frontier)/2.) if failed_targets else value
+                    if step<1.e-4:
+                        # quality_key ranks clearance in 0.1 mm bands; below
+                        # that this continuation no longer seeks a useful gain.
+                        state['attempts'].append(dict(index=index,strategy=strategy,
+                            status='clearance_bracket_exhausted',clearance_slack_m=None,
+                            reason='remaining local bracket below 0.1 mm improvement'))
+                        save_json_checkpoint(path,state)
+                        continue
+                    target=frontier+step
+                    policy='measured-clearance-frontier/v1'
+                request=dict(required_margin_m=target,policy=policy,
+                             frontier_slack_m=state['best_clearance_slack_m'],
+                             nominal_increment_m=value,
+                             actual_increment_m=target-margin-max(0.,state['best_clearance_slack_m']))
+                requests[str(index)]=request
+                save_json_checkpoint(path,state)
+                print(json.dumps(dict(event='clearance_continuation_target',index=index,
+                                      **request)),flush=True)
+            target=float(request['required_margin_m'])
+        objective_mode=value if strategy=='objective' else 'repair'
+        directory=output/f'polish_{index:02d}'
+        if directory.exists() and not (directory/'report.json').exists():
+            # CasADi/IPOPT stops are durable, but a partially written output
+            # cannot be overwritten. Resume the saved primal in a new folder.
+            previous=directory
+            resume_seed=previous/'best_iterate.npz'
+            directory=output/f'polish_{index:02d}_retry_001'
+            attempt_no=1
+            while directory.exists() and not (directory/'report.json').exists():
+                attempt_no+=1
+                directory=output/f'polish_{index:02d}_retry_{attempt_no:03d}'
+            state.setdefault('retry_history',[]).append(str(previous))
+        else:
+            resume_seed=None
+        result_file=directory/'report.json'
+        initializer=Path(state['best_seed'])
+        if resume_seed is not None and resume_seed.exists():
+            initializer=resume_seed
+        if strategy=='geometry' and not (resume_seed is not None and resume_seed.exists()):
+            initializer=output/f'geometry_seed_{index:02d}.npz'
+            if not initializer.exists():
+                geometry_seed(seed,initializer,*value)
+        adaptive_spec=None
+        if strategy=='adaptive':
+            from adaptive_regions import (ranked_sectors,choose_adaptive_region,
+                                          localized_steering_profile)
+            from causal_seed import source_profile_seed
+            choices=state.setdefault('adaptive_choices',{})
+            adaptive_spec=choices.get(str(index))
+            if adaptive_spec is None:
+                if 'adaptive_hotspots' not in state:
+                    from map_track import MapGrid
+                    with np.load(seed,allow_pickle=False) as packed:
+                        state['adaptive_hotspots']=ranked_sectors(
+                            packed['state'], MapGrid.load(map_path),
+                            sectors=8)
+                adaptive_spec=choose_adaptive_region(
+                    state['adaptive_hotspots'],state['attempts'])
+                adaptive_spec['seed']=adaptive_spec.get('seed',str(seed))
+                choices[str(index)]=adaptive_spec
+                save_json_checkpoint(path,state)
+            if not (resume_seed is not None and resume_seed.exists()):
+                initializer=output/f'adaptive_seed_{index:02d}.npz'
+                if not initializer.exists():
+                    base=Path(adaptive_spec['seed'])
+                    count_parent=source_count(base)
+                    profile=localized_steering_profile(
+                        count_parent,sector=int(adaptive_spec['sector']),
+                        sectors=int(adaptive_spec['sectors']),
+                        amplitude_rad=float(adaptive_spec['amplitude_rad']),
+                        polarity=int(adaptive_spec['polarity']),
+                        center_shift_sectors=float(adaptive_spec.get(
+                            'center_shift_sectors',0.)))
+                    diagnostics=source_profile_seed(
+                        repo,base,initializer,profile,map_path=map_path)
+                    state.setdefault('adaptive_seed_diagnostics',[]).append(
+                        dict(index=index,**diagnostics))
+                    if diagnostics.get('status')=='rejected_initializer':
+                        state['attempts'].append(dict(index=index,strategy=strategy,
+                            adaptive_spec=adaptive_spec,
+                            status='rejected_initializer',accepted=False,
+                            node_slack_m=diagnostics['initial_minimum_node_slack_m'],
+                            reason='local source-profile seed exceeded footprint preflight'))
+                        save_json_checkpoint(path,state)
+                        print(json.dumps(dict(event='adaptive_region_rejected',
+                            index=index,**adaptive_spec,
+                            source_only=True)),flush=True)
+                        continue
+                    save_json_checkpoint(path,state)
+                state['active_attempt']=dict(index=index,strategy=strategy,
+                    adaptive_spec=adaptive_spec,output=str(directory),
+                    trial_lap_s=count*.025,margin=target)
+                save_json_checkpoint(path,state)
+                print(json.dumps(dict(event='adaptive_region_started',
+                    index=index,**adaptive_spec,source_only=True)),flush=True)
+        if strategy=='control' and not (resume_seed is not None and resume_seed.exists()):
+            initializer=output/f'causal_seed_{index:02d}.npz'
+            if not initializer.exists():
+                from causal_seed import source_alternative_seed
+                diagnostics=source_alternative_seed(
+                    repo,seed,initializer,*value,map_path=map_path)
+                state.setdefault('control_seed_diagnostics',[]).append(
+                    dict(index=index,**diagnostics))
+                if diagnostics.get('status')=='rejected_initializer':
+                    state['attempts'].append(dict(index=index,strategy=strategy,
+                        status='rejected_initializer',
+                        node_slack_m=diagnostics['initial_minimum_node_slack_m'],
+                        reason='source-propagated initializer outside map preflight'))
+                    save_json_checkpoint(path,state)
+                    continue
+                save_json_checkpoint(path,state)
+        active_attempt=state.get('active_attempt') or {}
+        restoring_this_index=(active_attempt.get('index')==index and
+                              active_attempt.get('strategy')=='proposal_restoration')
+        if not restoring_this_index:
+            state['active_attempt']=dict(index=index,strategy=strategy,output=str(directory),
+                                         trial_lap_s=count*.025,margin=target,
+                                         **({'adaptive_spec':adaptive_spec}
+                                            if adaptive_spec is not None else {}))
+            save_json_checkpoint(path,state)
+        if result_file.exists():
+            report=json.loads(result_file.read_text())
+        else:
+            print(json.dumps(dict(event='solve', output=str(directory),
+                                  key=f'elite_{index:02d}_{strategy}',refinement=0,
+                                  target_lap_s=count*.025,source_only=True)),flush=True)
+            report=solve(repo=repo,checkpoint=None,mesh=None,audit=None,
+                map_path=map_path,output=directory,count=count,
+                iterations=iterations,cpu_seconds=1.e20,margin=target,
+                command_seed=initializer,workers=workers,
+                stagnation_iterations=stagnation_iterations,
+                cancel_requested=cancel_requested, objective_mode=objective_mode,
+                # A genuinely new physical corner basin should not continue
+                # optimization after its exact 1ms source replay is feasible.
+                # Archive diversity/quality checks still decide its fate.
+                early_clearance_target_m=(
+                    max(.002,min(.005,.25*state['best_clearance_slack_m']))
+                    if strategy=='adaptive' else 0. if strategy=='margin' else None))
+        quality_directory=directory
+        # Restore the same candidate against newly discovered 1 ms wall cuts.
+        # Previously equal-time candidates were discarded here even when the
+        # only missing constraints were sub-packet clearance samples.
+        cuts=set()
+        for repair in range(1, 4):
+            if report['status']=='source_witness_passed':
+                break
+            rollout=report.get('rollout') or {}
+            cuts.update(tuple(c) for c in report.get('source_clearance_cuts', []))
+            discovered=reported_clearance_cuts(report)
+            if (not discovered-cuts or report.get('max_constraint_violation',1.)>1.e-3
+                    or rollout.get('full_lap_xy_max_m',1.)>.05):
+                break
+            cuts.update(discovered)
+            initializer=directory/'witness.npz'
+            directory=output/f'polish_{index:02d}_cut_{repair:02d}'
+            result_file=directory/'report.json'
+            if result_file.exists():
+                report=json.loads(result_file.read_text())
+                continue
+            if directory.exists():
+                if (directory/'best_iterate.npz').exists():
+                    initializer=directory/'best_iterate.npz'
+                from command_campaign import unused_directory
+                directory=unused_directory(directory)
+                result_file=directory/'report.json'
+            state['active_attempt']=dict(index=index,strategy=strategy,output=str(directory),
+                trial_lap_s=count*.025,margin=target,source_clearance_cuts=sorted(cuts))
+            save_json_checkpoint(path,state)
+            report=solve(repo=repo,checkpoint=None,mesh=None,audit=None,
+                map_path=map_path,output=directory,count=count,
+                iterations=iterations,cpu_seconds=1.e20,margin=target,
+                command_seed=initializer,workers=workers,clearance_cuts=sorted(cuts),
+                objective_mode=objective_mode,stagnation_iterations=stagnation_iterations,
+                cancel_requested=cancel_requested,
+                early_clearance_target_m=0. if strategy=='margin' else None)
+        restoration_status=None
+        proposal=quality_directory/'best_quality_proposal.npz'
+        if strategy=='objective' and proposal.exists():
+            # Objective runs retain a separate bounded near-feasible proposal.
+            # Restore it with the source repair objective before deciding whether
+            # it can enter the independently certified equal-time archive.
+            restore_base=output/f'polish_{index:02d}_restore'
+            restore_seed=proposal
+            active=state.get('active_attempt') or {}
+            resume_active=(active.get('index')==index and
+                           active.get('strategy')=='proposal_restoration')
+            restore_directory=Path(active['output']) if resume_active else restore_base
+            restore_cuts={tuple(map(int,cut)) for cut in
+                          active.get('source_clearance_cuts', [])} if resume_active else set()
+            restore_report_path=restore_directory/'report.json'
+            if restore_report_path.exists():
+                restore_report=json.loads(restore_report_path.read_text())
+            else:
+                if restore_directory.exists():
+                    saved=restore_directory/'best_iterate.npz'
+                    if saved.exists():
+                        restore_seed=saved
+                    from command_campaign import unused_directory
+                    restore_directory=unused_directory(restore_directory)
+                    restore_report_path=restore_directory/'report.json'
+                state['active_attempt']=dict(index=index,strategy='proposal_restoration',
+                    output=str(restore_directory),proposal=str(proposal),
+                    trial_lap_s=count*.025,margin=margin,
+                    source_clearance_cuts=sorted(restore_cuts))
+                save_json_checkpoint(path,state)
+                restore_report=solve(repo=repo,checkpoint=None,mesh=None,audit=None,
+                    map_path=map_path,output=restore_directory,count=count,
+                    iterations=iterations,cpu_seconds=1.e20,margin=margin,
+                    command_seed=restore_seed,workers=workers,
+                    clearance_cuts=sorted(restore_cuts),
+                    stagnation_iterations=stagnation_iterations,
+                    cancel_requested=cancel_requested,objective_mode='repair',
+                    early_clearance_target_m=state['best_clearance_slack_m']+.002)
+            for repair in range(1,4):
+                if restore_report['status']=='source_witness_passed':
+                    break
+                rollout=restore_report.get('rollout') or {}
+                restore_cuts.update(tuple(c) for c in restore_report.get('source_clearance_cuts', []))
+                discovered=reported_clearance_cuts(restore_report)
+                if (not discovered-restore_cuts or
+                        restore_report.get('max_constraint_violation',1.)>1.e-3 or
+                        rollout.get('full_lap_xy_max_m',1.)>.05):
+                    break
+                restore_cuts.update(discovered)
+                restore_seed=restore_directory/'witness.npz'
+                next_directory=output/f'polish_{index:02d}_restore_cut_{repair:02d}'
+                next_report=next_directory/'report.json'
+                if next_report.exists():
+                    restore_report=json.loads(next_report.read_text())
+                    restore_directory=next_directory
+                    continue
+                if next_directory.exists():
+                    saved=next_directory/'best_iterate.npz'
+                    if saved.exists():
+                        restore_seed=saved
+                    from command_campaign import unused_directory
+                    next_directory=unused_directory(next_directory)
+                restore_directory=next_directory
+                state['active_attempt']=dict(index=index,strategy='proposal_restoration',
+                    output=str(restore_directory),proposal=str(proposal),
+                    trial_lap_s=count*.025,margin=margin,
+                    source_clearance_cuts=sorted(restore_cuts))
+                save_json_checkpoint(path,state)
+                restore_report=solve(repo=repo,checkpoint=None,mesh=None,audit=None,
+                    map_path=map_path,output=restore_directory,count=count,
+                    iterations=iterations,cpu_seconds=1.e20,margin=margin,
+                    command_seed=restore_seed,workers=workers,
+                    clearance_cuts=sorted(restore_cuts),
+                    stagnation_iterations=stagnation_iterations,
+                    cancel_requested=cancel_requested,objective_mode='repair',
+                    early_clearance_target_m=state['best_clearance_slack_m']+.002)
+            restoration_status=restore_report.get('status')
+            if restoration_status=='source_witness_passed':
+                report=restore_report
+                directory=restore_directory
+        attempt = dict(index=index, strategy=strategy, required_margin_m=target,
+                       objective_mode=objective_mode,
+                       ipopt_status=report.get('ipopt_status'),
+                       status=report['status'], report=str(directory/'report.json'),
+                       proposal_restoration_status=restoration_status)
+        if adaptive_spec is not None:
+            attempt['adaptive_spec']=adaptive_spec
+            attempt['accepted']=False
+        archive_candidate(repo=repo,seed=seed,map_path=map_path,output=output,margin=margin,
+            count=count,state=state,attempt=attempt,report=report,directory=directory,
+            target=target,certify=certify,diversity_threshold_m=diversity_threshold_m,
+            on_candidate=on_candidate,adaptive_spec=adaptive_spec)
+        state['attempts'].append(attempt)
+        state.pop('active_attempt',None)
+        save_json_checkpoint(path,state)
+    state['complete']=True
+    save_json_checkpoint(path,state)
+    return state

@@ -2,6 +2,7 @@
 #define F1TENTH_MPC_UNITY_SOURCE_PLANT_HPP
 
 #include <array>
+#include <vector>
 
 namespace f1tenth_mpc {
 
@@ -93,7 +94,7 @@ struct UnitySourcePlantOutputT {
 
 using UnitySourcePlantOutput = UnitySourcePlantOutputT<double>;
 
-inline constexpr std::size_t kUnityPlantSensitivityWidth = 20;
+inline constexpr std::size_t kUnityPlantSensitivityWidth = 28;
 inline constexpr std::size_t kUnityPlantSensitivityStateSize = 26;
 struct UnitySourcePlantSensitivitySeeds {
   std::array<std::array<double, kUnityPlantSensitivityWidth>,
@@ -102,13 +103,81 @@ struct UnitySourcePlantSensitivitySeeds {
   std::array<double, kUnityPlantSensitivityWidth> throttle{};
 };
 
+// Derivative of EVERY physical source tire-slip substep in up to 28
+// source-state/actuator seed directions, not merely the largest slip.
+struct UnitySourceSlipSubstepSensitivity {
+  int fixed_tick{};
+  int vehicle_substep{};
+  int wheel{};
+  double positive_excess_mps{};
+  std::array<double,kUnityPlantSensitivityWidth> derivative{};
+};
 struct UnitySourcePlantSensitivity {
   std::array<std::array<double, kUnityPlantSensitivityWidth>,
              kUnityPlantSensitivityStateSize> state{};
   std::array<double, kUnityPlantSensitivityWidth> body_forward_displacement{};
   std::array<double, kUnityPlantSensitivityWidth> body_lateral_displacement{};
   std::array<double, kUnityPlantSensitivityWidth> yaw_delta{};
+  std::array<double, 4> maximum_longitudinal_slip_excess_mps{};
+  std::array<std::array<double, kUnityPlantSensitivityWidth>, 4>
+      maximum_longitudinal_slip_excess_derivative{};
 };
+
+// Exact branch-local directional second derivative of the full 1 ms source
+// plant integrated over one MPC stage. All 26 physical coordinates and
+// both command targets participate in the same fixed source branch. The
+// result is one selected piecewise Hessian direction; at force/contact
+// switches the global second derivative need not exist. Offline-first API.
+struct UnitySourcePlantDirectionalCurvature {
+  std::array<double,kUnityPlantSensitivityStateSize> first_state{};
+  std::array<double,kUnityPlantSensitivityStateSize> second_state{};
+  std::array<double,3> first_body{};
+  std::array<double,3> second_body{};
+  std::array<double,4> first_slip_excess{};
+  std::array<double,4> second_slip_excess{};
+};
+// One-sided derivatives of the SAME templated physical source equations.
+// This is the selected directional derivative of the complete 25 ms
+// integrator, including all 1/5 PxVehicle substeps, tire/contact and slip.
+// At an actual discrete source switch (zero throttle / wheel-substep count
+// or contact continuity failure), the directional derivative is REJECTED
+// rather than invented by a smoothed physical model.
+struct UnitySourceDirectionalBranchReport {
+  int exact_physical_switch_ties{};
+  int derivative_selected_switch_ties{};
+  int contact_switch_ties{};
+  int zero_throttle_brake_switches{};
+  int discrete_substep_schedule_switches{};
+  int valid_one_sided_directional{};
+};
+bool unity_source_plant_step_one_sided_directional(
+    const UnitySourcePlantState &state,
+    const UnitySourcePlantInput &input,
+    double duration_s,
+    const std::array<double,kUnityPlantSensitivityStateSize> &direction_state,
+    const std::array<double,2> &direction_control,
+    UnitySourcePlantDirectionalCurvature *output,
+    UnitySourceDirectionalBranchReport *branch_report);
+
+bool unity_source_plant_step_with_directional_curvature(
+    const UnitySourcePlantState &state,
+    const UnitySourcePlantInput &input,
+    double duration_s,
+    const std::array<double,kUnityPlantSensitivityStateSize> &direction_state,
+    const std::array<double,2> &direction_control,
+    UnitySourcePlantDirectionalCurvature *output);
+
+// Chain a curved incoming state path through the same source equations.
+// Controls follow u(t)=u+t*du. A report selects the existing one-sided
+// branch semantics; nullptr retains the nominal selected branch.
+bool unity_source_plant_step_path_curvature(
+    const UnitySourcePlantState &state, const UnitySourcePlantInput &input,
+    double duration_s,
+    const std::array<double,kUnityPlantSensitivityStateSize> &first_state,
+    const std::array<double,kUnityPlantSensitivityStateSize> &second_state,
+    const std::array<double,2> &first_control,
+    UnitySourcePlantDirectionalCurvature *output,
+    UnitySourceDirectionalBranchReport *branch_report = nullptr);
 
 // VehicleController stores AutonomousSteering with the opposite sign in its
 // internal wheel angle, then publishes CurrentSteeringAngle as the negated
@@ -117,11 +186,37 @@ struct UnitySourcePlantSensitivity {
 double unity_steering_command_normalized_to_physical_rad(
     double normalized_command, double max_steering_rad);
 
-// Exact practice-player schedule: five substeps below 128 m/s and one at or
-// above 128 m/s. UnityPlayer_s.debug confirms the WheelCollider initialization
-// call setSubStepCount(128.0f, 5, 1); see the pinned source constant in
-// unity_source_plant.cpp and test the equality branch explicitly.
+// Exact pinned practice-player schedule: five substeps below 5 m/s and one at
+// or above 5 m/s. The matching UnityPlayer build disassembly confirms
+// setSubStepCount(5.0f, 5, 1); see the source constant and boundary test.
 unsigned int unity_source_wheel_substep_count(double forward_speed_mps);
+
+// Evaluate the exact native source wheel-contact lateral-slip expression
+// at a physical state, without advancing a motor/steering command or
+// repeating the expensive 25ms source-plant dynamics. Used by the normal
+// SQP's coherent lateral tire-saturation objective and its finite-difference
+// state Jacobian. WheelHit.sidewaysSlip sign is retained.
+bool unity_source_plant_lateral_slip_at_state(
+    const UnitySourcePlantState &state, std::array<double,4> *slip);
+
+// Differentiate the ORIGINAL instantaneous WheelHit lateral-slip contact
+// equation in all 26 source-state coordinates with the same Dual28 AD
+// kernel used by the physical Unity-source plant. One 28-lane pass;
+// no finite-difference step or altered tire/contact formula.
+bool unity_source_plant_lateral_slip_with_sensitivities(
+    const UnitySourcePlantState &state, std::array<double,4> *slip,
+    std::array<std::array<double,kUnityPlantSensitivityStateSize>,4> *jacobian);
+
+// Second directional derivative of original instantaneous front-wheel
+// lateral slip, including first AND second source-state perturbations. Uses
+// SourceJet2 through the SAME contact/attitude/atan formula as the plant.
+bool unity_source_plant_lateral_slip_directional_second(
+    const UnitySourcePlantState &state,
+    const std::array<double,kUnityPlantSensitivityStateSize> &first_state,
+    const std::array<double,kUnityPlantSensitivityStateSize> &second_state,
+    std::array<double,4> *slip,
+    std::array<double,4> *first_slip,
+    std::array<double,4> *second_slip);
 
 // Reconcile the suspension history after an observer corrects body pose or
 // attitude. PhysX damper velocity is a finite difference from the preceding
@@ -131,6 +226,54 @@ unsigned int unity_source_wheel_substep_count(double forward_speed_mps);
 bool unity_source_plant_reconcile_suspension_jounce(
     UnitySourcePlantState *state);
 
+
+// Development-only event trace of every original PxVehicle internal
+// wheel substep. At <5 m/s, each source 1 ms tick contains FIVE 0.2 ms
+// friction/contact evaluations; stage-end or 1 ms summaries conceal
+// regime changes. No alternative plant or hidden smoothing is permitted.
+struct UnitySourceBranchObservation {
+  int fixed_tick{};
+  int vehicle_substep{};
+  int vehicle_substep_count{};
+  int wheel{};
+  bool grounded{};
+  bool sticky_forward{};
+  bool sticky_side{};
+  int longitudinal_curve_region{}; // 0: rising, 1: falling, 2: plateau
+  int lateral_curve_region{};
+  int tire_load_filter_region{};
+  bool combined_slip_saturated{};
+  // Further original PhysX/Unity physical switching surfaces. These are
+  // recorded only in source-trace mode, NEVER used to approximate forces.
+  // -1 / 0 / +1: below minimum / interior / above maximum jounce.
+  int suspension_jounce_region{};
+  // -1 wheel-ground > wheel-surface, +1 surface > ground (the max
+  // denominator derivative changes at equality); 0 exact tie.
+  int longitudinal_slip_denominator_region{};
+  // -1,0,+1 for distinct absolute-value derivatives at zero speed.
+  int forward_contact_speed_sign{};
+  int lateral_contact_speed_sign{};
+  int wheel_surface_speed_sign{};
+  bool steering_target_reached{};
+  bool zero_throttle_brake_mode{};
+  double raw_suspension_jounce_m{};
+  double wheel_ground_forward_speed_mps{};
+  double wheel_surface_speed_mps{};
+  double unfiltered_tire_load_ratio{};
+  double normalized_combined_slip_demand_squared{};
+  double longitudinal_slip{};
+  // ORIGINAL instantaneous source penalty feature, already computed by
+  // the tire model. This is before the exact max over substeps/ticks.
+  double positive_longitudinal_slip_excess_mps{};
+  double lateral_slip{};
+  double combined_slip_utilization{};
+  double normal_load_n{};
+};
+bool unity_source_plant_trace_branches(
+    const UnitySourcePlantState &state,
+    const UnitySourcePlantInput &input,double duration_s,
+    std::vector<UnitySourceBranchObservation> *trace,
+    UnitySourcePlantOutput *traced_output=nullptr);
 
 // Advance a held 40 Hz steering/throttle command using Unity's 1 ms fixed
 // step, source Ackermann geometry, four independent wheel speeds, PhysX slip
@@ -158,7 +301,7 @@ bool unity_source_plant_step(
     UnitySourcePlantOutput *output);
 
 // Differentiate the same source-derived interval step through its active
-// branch for up to eight independent directions. Branch selection is based on
+// branch for up to twenty independent directions. Branch selection is based on
 // primal doubles and is therefore a local derivative, not a smoothing of the
 // WheelCollider/PhysX branch transitions.
 bool unity_source_plant_step_with_sensitivities(
@@ -166,7 +309,9 @@ bool unity_source_plant_step_with_sensitivities(
     const UnitySourcePlantInput &input,
     double duration_s,
     const UnitySourcePlantSensitivitySeeds &seeds,
-    UnitySourcePlantSensitivity *sensitivity);
+    UnitySourcePlantSensitivity *sensitivity,
+    std::vector<UnitySourceSlipSubstepSensitivity>
+        *all_original_slip_substeps=nullptr);
 
 bool unity_source_plant_slip_excess(
     const UnitySourcePlantState &state,

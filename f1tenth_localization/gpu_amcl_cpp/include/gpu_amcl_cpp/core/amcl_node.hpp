@@ -17,6 +17,7 @@
 #include <mutex>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <limits>
 #include <Eigen/Core>
@@ -54,10 +55,7 @@ private:
                                            double matched_odom_error_ms,
                                            bool accepted,
                                            std::size_t sampled_valid_beams,
-                                           std::size_t sampled_beams,
-                                           double likelihood_offset_m,
-                                           double likelihood_score_gain,
-                                           double likelihood_applied_m);
+                                           std::size_t sampled_beams);
     void retry_pending_scans();
 
     // ── Helpers ────────────────────────────────────────────────────
@@ -121,7 +119,6 @@ private:
     double prev_theta_ = 0;
     double update_min_d_ = 0.001;
     double update_min_a_ = 0.001;
-    double max_scan_age_ = 0.05;
     int max_beams_ = 270;
     double laser_min_range_m_ = 0.06;
     double laser_max_range_m_ = 10.0;
@@ -155,6 +152,7 @@ private:
     double force_max_particles_initial_sec_ = 0.0;
     rclcpp::Time localization_start_time_;
     rclcpp::Time last_processed_scan_stamp_;
+    sensor_msgs::msg::LaserScan::ConstSharedPtr last_distinct_scan_;
     rclcpp::Time last_map_correction_stamp_;
     rclcpp::Time last_current_map_pose_stamp_;
     bool map_odom_valid_ = false;
@@ -222,8 +220,8 @@ private:
     double local_cluster_min_weight_ = 0.75;
     // Keep translational scan correction independently disabled until a
     // geometry-aware matcher supplies calibrated anisotropic information.
-    // Yaw is observable from the wall orientation even when along-corridor
-    // translation is not, so it has its own experimentally tunable gain.
+    // Yaw is observable from wall orientation even when along-corridor
+    // translation is not, so it has an independently configured gain.
     double local_scan_correction_xy_gain_ = 0.0;
     bool local_scan_correction_cross_track_only_ = true;
     // Attenuate only the raceline-tangent component of a local scan
@@ -236,9 +234,7 @@ private:
     double local_scan_correction_fast_speed_threshold_mps_ = 3.0;
     double local_scan_correction_fast_along_track_gain_ = 0.25;
     double local_scan_correction_yaw_gain_ = 0.0;
-    // Experimental scan-likelihood translation; production remains disabled
-    // until the matched live AMCL/Pure Pursuit holdout passes.
-    double scan_likelihood_along_track_gain_ = 0.0;
+    // Reinitialize the local particle cloud around an accepted tracking update.
     bool local_tracking_reinitialize_cloud_ = true;
     double local_tracking_cloud_covariance_xy_ = 0.01;
     double local_tracking_cloud_covariance_yaw_ = 0.01;
@@ -258,6 +254,7 @@ private:
 
     std::deque<OdomSample> odom_history_;
     double odom_history_duration_s_ = 0.2;
+    std::int64_t scan_acquisition_delay_ns_ = 0;
     double odom_reset_distance_m_ = 2.0;
     double odom_reset_yaw_rad_ = 1.5;
     // During startup/first lap AMCL may apply a larger scan-supported

@@ -4,6 +4,7 @@ No surrogate physical friction/vehicle parameters are used here.
 """
 from __future__ import annotations
 import math
+import json
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,9 +19,11 @@ from scipy.spatial import cKDTree
 from skimage.morphology import skeletonize
 
 
-# Source-car physical footprint (body/root frame); all points are on the edge.
+# Runtime trajectory / Unity GPS origin is the rear axle, 0.16 m behind
+# the Unity root. Root bounds [-0.240, +0.270] therefore become these bounds.
+# Match MPC_REAR_OVERHANG_M and MPC_REAR_AXLE_TO_FRONT_BUMPER_M.
 # Precomputed once; do not allocate sampling grids in the control loop.
-_EDGE_ALONG = np.array([-.240, .270])
+_EDGE_ALONG = np.array([-.080, .430])
 _EDGE_SIDE = np.array([-.273/2, .273/2])
 _FOOTPRINT_LOCAL = np.asarray(
     [(a,b) for a in _EDGE_ALONG for b in np.linspace(*_EDGE_SIDE,7)] +
@@ -30,6 +33,31 @@ _FOOTPRINT_UNSAMPLED_CORRECTION = .5*max(
     (_EDGE_ALONG[1]-_EDGE_ALONG[0])/14,
     (_EDGE_SIDE[1]-_EDGE_SIDE[0])/6)
 _FOOTPRINT_RADIUS = float(np.max(np.linalg.norm(_FOOTPRINT_LOCAL,axis=1)))
+DEFAULT_WALL_MARGIN_M = 0.05
+_CLEARANCE_POLICY_PATH = Path(__file__).resolve().parents[1]/'config/racing/raceline_clearance_policy.json'
+_CLEARANCE_POLICY = json.loads(_CLEARANCE_POLICY_PATH.read_text())
+CLEARANCE_NUMERICAL_TOLERANCE_M = float(_CLEARANCE_POLICY['numerical_tolerance_m'])
+if (_CLEARANCE_POLICY.get('schema') != 'sdu-apex-raceline-clearance/v1' or
+        not math.isfinite(CLEARANCE_NUMERICAL_TOLERANCE_M) or
+        not 0. <= CLEARANCE_NUMERICAL_TOLERANCE_M <= 1.e-4):
+    raise ValueError('invalid raceline numerical-clearance policy')
+
+
+def clearance_passes(slack_m, target_m=0., *, tolerance_m=CLEARANCE_NUMERICAL_TOLERANCE_M):
+    """Keep raw measurements; tolerate only the explicitly declared roundoff band."""
+    return (math.isfinite(slack_m) and math.isfinite(target_m) and
+            math.isfinite(tolerance_m) and 0. <= tolerance_m <= CLEARANCE_NUMERICAL_TOLERANCE_M
+            and slack_m >= target_m-tolerance_m)
+
+
+def declared_clearance_tolerance(report):
+    value = report.get('clearance_numerical_tolerance_m',
+        (report.get('rollout') or {}).get('clearance_numerical_tolerance_m', 0.))
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and 0. <= value <= CLEARANCE_NUMERICAL_TOLERANCE_M else None
 
 @dataclass
 class MapGrid:
@@ -96,8 +124,8 @@ class MapGrid:
             order=1,mode='constant',cval=0.0)
         return vals
 
-    def footprint_clearance(self, x, y, psi, *, margin=0.15):
-        # Native PhysX body/root origin, not rear axle. Body bounds from MPC anchors.
+    def footprint_clearance(self, x, y, psi, *, margin=DEFAULT_WALL_MARGIN_M):
+        # Same rear-axle origin as Unity GPS, production MPC and exported path.
         # Include densely sampled edges: do not rely on the four corners alone.
         pts=_FOOTPRINT_LOCAL
         c, s = math.cos(psi), math.sin(psi)
@@ -107,6 +135,18 @@ class MapGrid:
         # bound on unexamined points between perimeter probes.
         return float(np.min(self.distance(world)) -
                      _FOOTPRINT_UNSAMPLED_CORRECTION - margin)
+
+    def side_clearances(self, xy, heading, *, maximum_distance=3.0):
+        """Raw map distances along path normals, not car-adjusted bounds."""
+        distances = np.arange(0., maximum_distance+.01, max(.0125, .5*self.resolution))
+        normal = np.column_stack((-np.sin(heading), np.cos(heading)))
+        widths = []
+        for sign in (1, -1):
+            probes = xy[:, None, :] + sign*distances[None, :, None]*normal[:, None, :]
+            occupied = self.distance(probes) < .55*self.resolution
+            first = np.argmax(occupied, axis=1)
+            widths.append(np.where(occupied.any(axis=1), distances[first], distances[-1]))
+        return np.column_stack(widths)
 
 
 def _skeleton_cycle(free):

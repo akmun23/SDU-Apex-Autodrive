@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 from source_vehicle import convert_unity_suspension_mounts_to_model_frame
-from diagnose_suspension_frame_v239 import compare_candidates
+from diagnostic_fixtures.diagnose_suspension_frame_v239 import compare_candidates
 from test_v239_suspension_frame import SuspensionModel,SuspensionWheel
 from test_v238_scalar_force_audit import seed
 

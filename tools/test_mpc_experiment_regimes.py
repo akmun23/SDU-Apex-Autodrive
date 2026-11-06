@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import unittest
 
-from benchmark_mpc_replay import experiment_regime_for_memory_mode
+from tools.benchmark_mpc_replay import experiment_regime_for_memory_mode
 
 
 class MpcExperimentRegimeTest(unittest.TestCase):

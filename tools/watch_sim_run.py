@@ -13,20 +13,39 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import Int32, String
 
 
+def lap_target_satisfied(initial_lap_count: int | None,
+                         current_lap_count: int | None,
+                         target_laps: int,
+                         odometry_distance_m: float,
+                         minimum_lap_distance_m: float) -> bool:
+    if (initial_lap_count is None or current_lap_count is None or
+            current_lap_count < initial_lap_count + target_laps):
+        return False
+    return odometry_distance_m >= target_laps * minimum_lap_distance_m
+
+
+def stall_watch_armed(watch_mpc_run: bool, mpc_active: bool) -> bool:
+    """Gate motion-stall aborts on MPC startup, not localization warm-up."""
+    return not watch_mpc_run or mpc_active
+
+
 class SimRunWatcher(Node):
-    def __init__(self, watch_mpc_horizon_test: bool = False,
-                 watch_mpc_run: bool = False,
+    def __init__(self, watch_mpc_run: bool = False,
                  watch_csv_command_test: bool = False,
-                 watch_csv_path_follow: bool = False) -> None:
+                 watch_csv_path_follow: bool = False,
+                 continue_after_mpc_rejection: bool = False) -> None:
         super().__init__("development_sim_run_watcher")
         self.lap_count: int | None = None
         self.initial_lap_count: int | None = None
         self.collision_count: int | None = None
         self.progress_position: tuple[float, float] | None = None
+        self.last_odometry_position: tuple[float, float] | None = None
+        self.total_odometry_distance_m = 0.0
         self.last_progress_time: float | None = None
-        self.mpc_horizon_event: str | None = None
-        self.mpc_horizon_terminal_observed = False
         self.mpc_fault_reason: str | None = None
+        self.mpc_active = False
+        self.continue_after_mpc_rejection = continue_after_mpc_rejection
+        self.mpc_rejection_count = 0
         self.csv_command_event: str | None = None
         self.create_subscription(
             Int32,
@@ -41,13 +60,6 @@ class SimRunWatcher(Node):
             10,
         )
         self.create_subscription(Odometry, "/odom", self._odom_callback, 10)
-        if watch_mpc_horizon_test:
-            self.create_subscription(
-                String,
-                "/mpc/open_loop_test",
-                self._mpc_horizon_callback,
-                10,
-            )
         if watch_mpc_run:
             self.create_subscription(
                 String,
@@ -76,6 +88,14 @@ class SimRunWatcher(Node):
     def _odom_callback(self, message: Odometry) -> None:
         position = message.pose.pose.position
         current = (float(position.x), float(position.y))
+        if self.last_odometry_position is not None:
+            step = ((current[0] - self.last_odometry_position[0]) ** 2 +
+                    (current[1] - self.last_odometry_position[1]) ** 2) ** 0.5
+            # Ignore impossible discontinuities rather than letting one bad
+            # localization jump satisfy a multi-lap distance guard.
+            if step <= 1.0:
+                self.total_odometry_distance_m += step
+        self.last_odometry_position = current
         if self.progress_position is None:
             self.progress_position = current
             self.last_progress_time = time.monotonic()
@@ -86,38 +106,49 @@ class SimRunWatcher(Node):
             self.progress_position = current
             self.last_progress_time = time.monotonic()
 
-    def _mpc_horizon_callback(self, message: String) -> None:
-        try:
-            payload = json.loads(message.data)
-        except (TypeError, json.JSONDecodeError):
-            return
-        event = payload.get("event")
-        if event in ("complete", "abort"):
-            self.mpc_horizon_event = event
-            self.mpc_horizon_terminal_observed = bool(
-                payload.get("terminal_state_observed", False))
-            print(f"MPC_HORIZON_TEST_{event.upper()}: {message.data}", flush=True)
-
     def _mpc_diagnostics_callback(self, message: String) -> None:
         try:
             diagnostic = json.loads(message.data)
         except (TypeError, json.JSONDecodeError):
             self.mpc_fault_reason = "invalid MPC diagnostics JSON"
-            print("MPC_DIAGNOSTICS_INVALID_JSON: aborting supervised run",
+            print("MPC_DIAGNOSTICS_INVALID_JSON: invalid diagnostics recorded",
                   flush=True)
             return
         status = diagnostic.get("status")
         if status in ("waiting_for_localization", "waiting_for_plant_state",
-                      "waiting_for_actuator", "waiting_for_solver_budget"):
+                      "waiting_for_actuator", "waiting_for_solver_budget",
+                      "state_stale_wait"):
             return
         if status and status not in (
                 "accepted_optimal", "accepted_feasible",
                 "accepted_line_search",
-                "accepted_candidate_prefix", "accepted_prior_plan"):
+                "accepted_candidate_prefix", "accepted_prior_plan",
+                "accepted_viability_recovery", "deferred_deadline_recovery"):
             reason = diagnostic.get("nonlinear_failure_reason", "none")
             stage = diagnostic.get("nonlinear_failure_stage", -1)
             self.mpc_fault_reason = f"{status}; nonlinear={reason}@{stage}"
-            print(f"MPC_CYCLE_REJECTED: {message.data}", flush=True)
+            self.mpc_rejection_count += 1
+            if self.continue_after_mpc_rejection:
+                # The complete diagnostic stays in the recorded ROS bag.
+                if (self.mpc_rejection_count <= 5 or
+                        self.mpc_rejection_count % 100 == 0):
+                    print(f"MPC_REJECTION_OBSERVED: count="
+                          f"{self.mpc_rejection_count} "
+                          f"{self.mpc_fault_reason}", flush=True)
+            else:
+                print(f"MPC_CYCLE_REJECTED: {message.data}", flush=True)
+            return
+        if status in (
+                "accepted_optimal", "accepted_feasible",
+                "accepted_line_search", "accepted_candidate_prefix",
+                "accepted_prior_plan", "accepted_viability_recovery",
+                "deferred_deadline_recovery"):
+            # Localization/plant warm-up may legitimately hold the car still.
+            # Start the motion-stall timer when the controller first produces
+            # a usable cycle, not when the first stationary odometry arrives.
+            if not self.mpc_active:
+                self.last_progress_time = time.monotonic()
+            self.mpc_active = True
 
     def _csv_command_callback(self, message: String) -> None:
         try:
@@ -133,18 +164,25 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-lap", type=int, default=0)
     parser.add_argument("--collision-only", action="store_true")
-    parser.add_argument("--mpc-horizon-test", action="store_true",
-                        help="keep collision watch active until one-shot horizon stops")
     parser.add_argument("--mpc-run", action="store_true",
-                        help="abort the simulator on the first rejected MPC cycle")
+                        help="monitor MPC diagnostics; normally abort on first rejection")
+    parser.add_argument("--continue-after-mpc-rejection", action="store_true",
+                        help="SIMULATION-ONLY: record rejected cycles and continue "
+                             "to collision, completed target laps or time limit")
     parser.add_argument("--csv-command-test", action="store_true",
                         help="watch GT-indexed CSV replay completion or abort")
     parser.add_argument("--csv-path-follow", action="store_true",
                         help="watch follower abort while enforcing target laps")
     parser.add_argument("--timeout-s", type=float, default=120.0)
     parser.add_argument("--stall-timeout-s", type=float, default=20.0)
+    parser.add_argument("--mpc-startup-timeout-s", type=float, default=75.,
+                        help="maximum time to first accepted MPC cycle, including localization")
     parser.add_argument("--post-target-lap-guard-s", type=float, default=0.5,
                         help="keep collision monitoring active after the target lap")
+    parser.add_argument(
+        "--minimum-lap-distance-m", type=float, default=0.0,
+        help="require this much accumulated odometry travel per counted lap; "
+             "prevents stale/erroneous lap counters from ending a run early")
     parser.add_argument(
         "--stop-simulator-container",
         metavar="NAME",
@@ -152,37 +190,39 @@ def main() -> int:
     )
     args = parser.parse_args()
     if ((args.target_lap < 1 and not args.collision_only and
-         not args.mpc_horizon_test and not args.mpc_run and
+         not args.mpc_run and
          not args.csv_command_test) or
             (args.collision_only and args.target_lap != 0) or
-            (args.mpc_horizon_test and
-             (args.target_lap != 0 or args.collision_only or args.mpc_run)) or
             (args.mpc_run and
              (args.collision_only or args.csv_command_test or
               args.csv_path_follow)) or
             (args.csv_command_test and
-             (args.target_lap != 0 or args.collision_only or args.mpc_horizon_test)) or
+             (args.target_lap != 0 or args.collision_only)) or
             (args.csv_path_follow and
-             (args.target_lap < 1 or args.collision_only or args.mpc_horizon_test or
+             (args.target_lap < 1 or args.collision_only or
               args.csv_command_test)) or
             args.timeout_s <= 0.0 or args.stall_timeout_s <= 0.0 or
-            args.post_target_lap_guard_s < 0.0):
+            args.mpc_startup_timeout_s <= 0.0 or
+            args.post_target_lap_guard_s < 0.0 or
+            args.minimum_lap_distance_m < 0.0 or
+            (args.continue_after_mpc_rejection and not args.mpc_run)):
         parser.error(
             "set a positive target-lap or collision-only, and a positive timeout-s")
 
     rclpy.init()
     watcher = SimRunWatcher(
-        args.mpc_horizon_test, args.mpc_run or args.mpc_horizon_test,
-        args.csv_command_test, args.csv_path_follow)
+        args.mpc_run, args.csv_command_test, args.csv_path_follow,
+        args.continue_after_mpc_rejection)
     print("WATCHER_READY: collision, lap, odometry"
-          + (", and fixed-horizon completion" if args.mpc_horizon_test else "")
           + (", and MPC rejection" if args.mpc_run else "")
           + (", and CSV replay completion" if args.csv_command_test else "")
           + (", CSV follower abort, and target-lap completion"
              if args.csv_path_follow else "")
           + " subscriptions created", flush=True)
-    deadline = time.monotonic() + args.timeout_s
+    started = time.monotonic()
+    deadline = started + args.timeout_s
     target_lap_reached_at: float | None = None
+    lap_counter_ahead_of_distance = False
     result = 2
     try:
         while time.monotonic() < deadline:
@@ -191,13 +231,17 @@ def main() -> int:
                 print("SCREEN_ABORT: collision", flush=True)
                 result = 3
                 break
-            if watcher.mpc_horizon_event == "abort":
-                print("SCREEN_ABORT: MPC fixed-horizon execution aborted", flush=True)
-                result = 5
-                break
-            if watcher.mpc_fault_reason is not None:
+            if (not args.continue_after_mpc_rejection and
+                    watcher.mpc_fault_reason is not None):
                 print(f"SCREEN_ABORT: MPC fault ({watcher.mpc_fault_reason})",
                       flush=True)
+                result = 5
+                break
+            if (args.mpc_run and not args.continue_after_mpc_rejection and
+                    not watcher.mpc_active and (
+                    time.monotonic() - started >= args.mpc_startup_timeout_s)):
+                print("SCREEN_ABORT: MPC startup timeout; no accepted controller "
+                      "cycle or localized pose", flush=True)
                 result = 5
                 break
             if watcher.csv_command_event == "abort":
@@ -221,38 +265,53 @@ def main() -> int:
                           flush=True)
                     result = 0
                     break
-            if (args.mpc_horizon_test and
-                    watcher.mpc_horizon_event == "complete"):
-                if not watcher.mpc_horizon_terminal_observed:
-                    print("SCREEN_ABORT: MPC horizon ended without a terminal "
-                          "state observation", flush=True)
-                    result = 5
-                    break
-                print("SCREEN_COMPLETE: full MPC horizon observed; simulator "
-                      "will be stopped by the run supervisor", flush=True)
-                result = 0
-                break
             if (not args.collision_only and
+                    not args.continue_after_mpc_rejection and
+                    stall_watch_armed(args.mpc_run, watcher.mpc_active) and
                     watcher.last_progress_time is not None and
                     time.monotonic() - watcher.last_progress_time >=
                     args.stall_timeout_s):
                 print("SCREEN_ABORT: no odometry progress", flush=True)
                 result = 4
                 break
-            if (args.target_lap > 0 and watcher.lap_count is not None and
-                    watcher.initial_lap_count is not None and
-                    watcher.lap_count >=
-                    watcher.initial_lap_count + args.target_lap):
-                if target_lap_reached_at is None:
+            lap_count_reached = (
+                args.target_lap > 0 and watcher.lap_count is not None and
+                watcher.initial_lap_count is not None and
+                watcher.lap_count >=
+                watcher.initial_lap_count + args.target_lap)
+            if lap_count_reached:
+                distance_required = (
+                    args.target_lap * args.minimum_lap_distance_m)
+                target_satisfied = lap_target_satisfied(
+                    watcher.initial_lap_count, watcher.lap_count,
+                    args.target_lap, watcher.total_odometry_distance_m,
+                    args.minimum_lap_distance_m)
+                if not target_satisfied:
+                    if not lap_counter_ahead_of_distance:
+                        print(
+                            "LAP_COUNT_AHEAD_OF_DISTANCE: "
+                            f"counter={watcher.lap_count}/"
+                            f"{watcher.initial_lap_count + args.target_lap} "
+                            f"travel={watcher.total_odometry_distance_m:.2f}m "
+                            f"required={distance_required:.2f}m; continuing",
+                            flush=True)
+                    lap_counter_ahead_of_distance = True
+                    target_lap_reached_at = None
+                elif target_lap_reached_at is None:
                     target_lap_reached_at = time.monotonic()
+                    lap_counter_ahead_of_distance = False
                     print(
                         f"target laps completed: {args.target_lap}; "
+                        f"odometry_travel={watcher.total_odometry_distance_m:.2f}m; "
                         "retaining collision watch", flush=True)
                 elif (time.monotonic() - target_lap_reached_at >=
                       args.post_target_lap_guard_s):
                     print("SCREEN_COMPLETE: lap limit", flush=True)
                     result = 0
                     break
+            elif not lap_count_reached:
+                target_lap_reached_at = None
+                lap_counter_ahead_of_distance = False
         else:
             print("SCREEN_ABORT: timeout", flush=True)
     finally:

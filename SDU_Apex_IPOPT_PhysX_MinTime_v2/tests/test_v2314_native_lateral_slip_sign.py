@@ -9,7 +9,7 @@ from wheel_model_overlay_v2312 import transform_wheel_model as transform_v2312
 from wheel_model_overlay_v2314 import (
     transform_wheel_model,prepare_working_wheel_model,_SLIP_OLD,_SLIP_NEW,
 )
-from diagnose_slip_parity_v2314 import compare_baseline,reconstruct_records
+from diagnostic_fixtures.diagnose_slip_parity_v2314 import compare_baseline,reconstruct_records
 from tests.test_phase1_overlay import LEGACY,_sample
 
 

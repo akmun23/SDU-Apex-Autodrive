@@ -64,7 +64,7 @@ bool propagate_model_segment(MpcModelState_t *state, double *progress_m,
         start_ns < grid_origin_ns || end_ns < grid_origin_ns) return false;
 
     /* The source vehicle advances on Unity's fixed 1 ms physics grid. Bridge
-     * header stamps are receive-time stamps and commonly contain fractional
+     * header stamps are host request stamps and commonly contain fractional
      * milliseconds, so passing the raw final remainder to the plant makes it
      * reject an otherwise valid rollout. Quantize event boundaries relative
      * to this prediction's source stamp and preserve that phase across command
@@ -83,15 +83,21 @@ bool propagate_model_segment(MpcModelState_t *state, double *progress_m,
         const int64_t step_ticks = std::min(
             configured_ticks, target_ticks - integrated_ticks);
         const float dt = static_cast<float>(step_ticks) * 0.001f;
-        MpcTrajectorySample_t sample{};
-        if (!(dt > 0.0f) || !mpc_trajectory_sample(trajectory,
-                trajectory_count, lap_length_m, *progress_m, &sample))
-            return false;
+        if (!(dt > 0.0f)) return false;
         const MpcStageResult_t result = mpc_vehicle_model_propagate(
-            state, dt, static_cast<float>(sample.curvature));
+            state, dt, 0.0f);
         if (!result.valid) return false;
+        double next_progress;
+        float ey, epsi;
+        if (!mpc_trajectory_advance_tracking(trajectory, trajectory_count,
+                lap_length_m, *progress_m, state->e_y, state->e_psi,
+                result.body_forward_delta_m, result.body_lateral_delta_m,
+                result.body_yaw_delta_rad, *progress_m + result.delta_s_m,
+                &next_progress, &ey, &epsi, nullptr)) return false;
         *state = result.next;
-        *progress_m += result.delta_s_m;
+        state->e_y = ey;
+        state->e_psi = epsi;
+        *progress_m = next_progress;
         integrated_ticks += step_ticks;
         *integrated_elapsed_ns = integrated_ticks * kUnityPhysicsTickNs;
     }
@@ -107,21 +113,28 @@ bool MpcCommandHistory::push(const MpcCommandHistoryEntry &entry)
         (entry.throttle_valid && (!std::isfinite(entry.throttle_normalized) ||
             entry.throttle_normalized < 0.0 || entry.throttle_normalized > 1.0)))
         return false;
+    MpcCommandHistoryEntry accepted=entry;
+    accepted.unchanged_since_ns=entry.stamp_ns;
     if (size_ > 0) {
         MpcCommandHistoryEntry newest{};
         if (!at(size_ - 1, &newest)) return false;
+        if(entry.stamp_ns>=newest.stamp_ns &&
+           entry.steering_command_rad==newest.steering_command_rad &&
+           entry.throttle_valid==newest.throttle_valid &&
+           (!entry.throttle_valid || entry.throttle_normalized==newest.throttle_normalized))
+            accepted.unchanged_since_ns=newest.unchanged_since_ns;
         if (entry.stamp_ns == newest.stamp_ns) {
-            entries_[(oldest_index_ + size_ - 1) % entries_.size()] = entry;
+            entries_[(oldest_index_ + size_ - 1) % entries_.size()] = accepted;
             return true;
         }
         if (entry.stamp_ns < newest.stamp_ns) clear();
     }
 
     if (size_ < entries_.size()) {
-        entries_[(oldest_index_ + size_) % entries_.size()] = entry;
+        entries_[(oldest_index_ + size_) % entries_.size()] = accepted;
         ++size_;
     } else {
-        entries_[oldest_index_] = entry;
+        entries_[oldest_index_] = accepted;
         oldest_index_ = (oldest_index_ + 1) % entries_.size();
     }
     return true;

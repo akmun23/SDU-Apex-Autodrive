@@ -65,14 +65,36 @@ def load_modules(repo: Path, package_root: Path, allow_fetch: bool = False,
             recovered, package_root / ('_working_solver_condensed_' +
                 phase1_hessian.replace('-', '_')), LEGACY, phase1_hessian)
     elif phase1_formulation == 'elastic':
-        from solver_overlay import prepare_working_solver
-        root, provenance = prepare_working_solver(
-            recovered, package_root / ('_working_solver_' +
-                phase1_hessian.replace('-', '_')), LEGACY, phase1_hessian)
+        from solver_overlay_v251 import prepare_working_solver_v251
+        root, provenance = prepare_working_solver_v251(
+            recovered, package_root, LEGACY, phase1_hessian)
+    elif phase1_formulation == 'direct':
+        from solver_overlay_v251 import prepare_working_solver_v251
+        root, provenance = prepare_working_solver_v251(
+            recovered, package_root, LEGACY, phase1_hessian,
+            phase1_formulation='direct')
+    elif phase1_formulation == 'objective':
+        from solver_overlay_v251 import prepare_working_solver_v251
+        root, provenance = prepare_working_solver_v251(
+            recovered, package_root, LEGACY, phase1_hessian,
+            phase1_formulation='objective')
+    elif phase1_formulation == 'source-equalities':
+        from solver_overlay_v251 import prepare_working_solver_v251
+        root, provenance = prepare_working_solver_v251(
+            recovered, package_root, LEGACY, phase1_hessian,
+            phase1_formulation='source-equalities')
     else:
         raise ValueError('Unknown Phase-I formulation')
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
+    root_entry = str(root)
+    sys.path[:] = [entry for entry in sys.path if entry != root_entry]
+    sys.path.insert(0, root_entry)
+    # Multiple formulations intentionally use the same historical Python
+    # package name from isolated generated roots. Reusing an already-imported
+    # module silently selects the previous formulation, so evict only that
+    # solver package before importing the requested working copy.
+    for module_name in tuple(sys.modules):
+        if module_name == LEGACY or module_name.startswith(LEGACY + '.'):
+            del sys.modules[module_name]
     import importlib
     base=LEGACY+'.f1tenth_planning.autodrive_mintime.'
     o=importlib.import_module(base+'optimizer_unity_wheels')

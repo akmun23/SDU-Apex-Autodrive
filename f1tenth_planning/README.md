@@ -1,8 +1,6 @@
-# Installed tracks
+# Maps and trajectories
 
-This package contains only the maintained map/raceline pairs used by the
-development and competition launch files. Map YAML and image files stay
-together in `maps/`; trajectories stay under `trajectories/`. Each launch
-selects a map and its matching trajectory as a pair.
-
-Experimental and superseded trajectory candidates are not installed.
+`maps/` holds the track maps. `trajectories/` holds their reference paths.
+Practice development uses `autodrive_practice_20260924_b/`; the competition
+launch uses `autodrive_mintime_sim_5p0_dense/`. Keep each map paired with its
+matching trajectory.

@@ -1,0 +1,3 @@
+# Offline reference only; never a controller/image dependency.
+casadi==3.7.2
+numpy>=1.26,<3

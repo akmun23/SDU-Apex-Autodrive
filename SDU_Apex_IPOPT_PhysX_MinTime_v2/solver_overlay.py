@@ -108,12 +108,14 @@ _old_callback = '''        # An IPOPT trial is accepted only if *all nonelastic 
 _new_callback = '''        # A full IPOPT iterate may be outside safety bounds. Never accept it
         # directly in that case, but examine shorter physical-variable steps
         # from the last verified hard-feasible checkpoint. Slack is explicitly
-        # reprojected onto the original dynamics after each trial step.
+        # reprojected onto the original dynamics after each trial step. Retain
+        # checkpoints by the strict gate's max-defect metric first; scaled
+        # sum-of-squares is only a tie-breaker at equal worst defect.
         checkpoint_alphas = (1., .5, .25, .125, .0625, .03125,
                              .015625, .0078125, .00390625,
                              .001953125, .0009765625, .00048828125)
         accepted_backtracks = 0
-        def checked_checkpoint(trial, reference, reference_merit):
+        def checked_checkpoint(trial, reference, reference_measure):
             # Side-effect-free w.r.t. IPOPT; used only for recording candidate
             # states and potential subsequent starts, never to certify physics.
             for alpha in checkpoint_alphas:
@@ -127,31 +129,51 @@ _new_callback = '''        # A full IPOPT iterate may be outside safety bounds. 
                 if candidate is None:
                     continue
                 merit = diag['elastic_merit']
-                if (np.isfinite(merit) and
-                    (reference_merit is None or merit < reference_merit - 1.0e-8)):
+                defect = diag['raw_max_dynamic_defect']
+                reference_merit = (None if reference_measure is None else
+                                   reference_measure.get('elastic_merit'))
+                reference_defect = (None if reference_measure is None else
+                                    reference_measure.get('raw_max_dynamic_defect'))
+                improves_worst_defect = (reference_defect is None or
+                    defect < reference_defect - 1.0e-8)
+                holds_worst_defect_and_improves_merit = (
+                    reference_defect is not None and
+                    defect <= reference_defect + 1.0e-8 and
+                    (reference_merit is None or
+                     merit < reference_merit - 1.0e-8))
+                if (np.isfinite(merit) and np.isfinite(defect) and
+                    (improves_worst_defect or
+                     holds_worst_defect_and_improves_merit)):
                     return candidate, diag, alpha
             return None, None, None
 
         def save_feasible_iterate(iteration):
             nonlocal winning_snapshot, winning_measure, winning_origin
             nonlocal accepted_ipopt_iters, callback_errors, accepted_backtracks
+            checkpoint_status = 'no_improvement'
+            checkpoint_alpha = None
+            checkpoint_measure = None
             try:
                 trial = snapshot_current(debug=True)
                 reference = (winning_snapshot if winning_snapshot is not None
                              else initial_snapshot)
-                base = (winning_measure['elastic_merit'] if winning_measure
-                        is not None else None)
+                base = winning_measure
                 candidate, diag, alpha = checked_checkpoint(trial, reference, base)
                 if candidate is None:
+                    checkpoint_status = 'hard_reject_or_no_descent'
                     return
                 winning_snapshot, winning_measure = candidate, diag
                 winning_origin = ('ipopt_projected_iteration' if alpha == 1.
                                   else 'ipopt_hard_feasible_backtrack')
                 accepted_ipopt_iters += 1
+                checkpoint_status = 'accepted'
+                checkpoint_alpha = alpha
+                checkpoint_measure = diag
                 if alpha != 1.:
                     accepted_backtracks += 1
             except (RuntimeError, ValueError, OverflowError, KeyError):
-                callback_errors += 1'''
+                callback_errors += 1
+                checkpoint_status = 'callback_error' '''
 assert SOLVE_ELASTIC.count(_old_callback)==1
 SOLVE_ELASTIC = SOLVE_ELASTIC.replace(_old_callback, _new_callback, 1)
 _old_final = '''        try:
@@ -167,8 +189,7 @@ _new_final = '''        try:
             final_trial = snapshot_current(debug=True)
             final_ref = (winning_snapshot if winning_snapshot is not None
                          else initial_snapshot)
-            final_base = (winning_measure['elastic_merit'] if winning_measure
-                          is not None else None)
+            final_base = winning_measure
             final_candidate, final_measure, final_alpha = checked_checkpoint(
                 final_trial, final_ref, final_base)
             if final_candidate is not None:
@@ -187,85 +208,8 @@ SOLVE_ELASTIC = SOLVE_ELASTIC.replace(_old_metric,
     _old_metric+"            'accepted_hard_feasible_backtracks': accepted_backtracks,\n",1)
 
 
-# v2.3.7: distinguish weighted-square merit from the maximum raw physical defect.
-# A projected backtrack that decreases L2 but increases L-infinity is NOT an
-# improvement toward the strict zero-slack acceptance criterion.
+# Keep the exact generated v2.3.6 string for fail-closed cache checks.
 SOLVE_ELASTIC_V236 = SOLVE_ELASTIC
-
-# Keep the exact generated v2.3.6 string above for fail-closed cache checks.
-# Under the new rule both physical worst-case error and IPOPT's merit improve.
-_old_checkpoint = """        def checked_checkpoint(trial, reference, reference_merit):
-            # Side-effect-free w.r.t. IPOPT; used only for recording candidate
-            # states and potential subsequent starts, never to certify physics.
-            for alpha in checkpoint_alphas:
-                if alpha == 1.:
-                    proposed = trial
-                else:
-                    proposed = {var: (reference[var] +
-                        alpha * (trial[var] - reference[var]))
-                        for var in physical_vars}
-                candidate, diag = projected_trial(proposed)
-                if candidate is None:
-                    continue
-                merit = diag['elastic_merit']
-                if (np.isfinite(merit) and
-                    (reference_merit is None or merit < reference_merit - 1.0e-8)):
-                    return candidate, diag, alpha
-            return None, None, None"""
-_new_checkpoint = """        rejected_merit_but_worse_max = [0]
-        def checked_checkpoint(trial, reference, reference_merit,
-                               reference_max_defect=None):
-            # A smaller sum of squares is insufficient when the largest actual
-            # vehicle-dynamics defect becomes worse. Require both measures to
-            # improve (up to floating point roundoff in the max norm).
-            for alpha in checkpoint_alphas:
-                if alpha == 1.:
-                    proposed = trial
-                else:
-                    proposed = {var: (reference[var] +
-                        alpha * (trial[var] - reference[var]))
-                        for var in physical_vars}
-                candidate, diag = projected_trial(proposed)
-                if candidate is None:
-                    continue
-                merit = diag['elastic_merit']
-                worst = diag['raw_max_dynamic_defect']
-                energy_ok = (np.isfinite(merit) and
-                    (reference_merit is None or merit < reference_merit - 1.0e-8))
-                max_ok = (np.isfinite(worst) and
-                    (reference_max_defect is None or
-                     worst <= reference_max_defect + 1.0e-10))
-                if energy_ok and max_ok:
-                    return candidate, diag, alpha
-                if energy_ok and not max_ok:
-                    rejected_merit_but_worse_max[0] += 1
-            return None, None, None"""
-assert SOLVE_ELASTIC.count(_old_checkpoint)==1
-SOLVE_ELASTIC = SOLVE_ELASTIC.replace(_old_checkpoint,_new_checkpoint,1)
-# v236 code computes 'base' as merit; add worst-case baseline.
-old = """                base = (winning_measure['elastic_merit'] if winning_measure
-                        is not None else None)
-                candidate, diag, alpha = checked_checkpoint(trial, reference, base)"""
-new = """                base = (winning_measure['elastic_merit'] if winning_measure
-                        is not None else None)
-                worst_base = (winning_measure['raw_max_dynamic_defect']
-                              if winning_measure is not None else None)
-                candidate, diag, alpha = checked_checkpoint(
-                    trial, reference, base, worst_base)"""
-assert SOLVE_ELASTIC.count(old)==1
-SOLVE_ELASTIC=SOLVE_ELASTIC.replace(old,new,1)
-old="""            final_base = (winning_measure['elastic_merit'] if winning_measure
-                          is not None else None)
-            final_candidate, final_measure, final_alpha = checked_checkpoint(
-                final_trial, final_ref, final_base)"""
-new="""            final_base = (winning_measure['elastic_merit'] if winning_measure
-                          is not None else None)
-            final_worst = (winning_measure['raw_max_dynamic_defect']
-                           if winning_measure is not None else None)
-            final_candidate, final_measure, final_alpha = checked_checkpoint(
-                final_trial, final_ref, final_base, final_worst)"""
-assert SOLVE_ELASTIC.count(old)==1
-SOLVE_ELASTIC=SOLVE_ELASTIC.replace(old,new,1)
 # Add raw-physical dynamic residual group diagnostics, based on the same CasADi
 # numerical evaluator and original g label order; no new physics model.
 needle="""        def phase1_measure(debug=False):
@@ -310,6 +254,7 @@ insert="""        def defect_breakdown(raw):
                     'max_abs': abs(worst_value),
                     'rms': float(np.sqrt(np.mean(vec * vec))),
                     'worst_label': worst_label,
+                    'worst_sample_index': int(np.argmax(np.abs(vec))),
                     'worst_signed_value': worst_value,
                 })
             return sorted(breakdown, key=lambda item: -item['max_abs'])
@@ -338,9 +283,64 @@ repl="""        if winning_snapshot is None:
         # CRITICAL"""
 assert SOLVE_ELASTIC.count(needle)==1
 SOLVE_ELASTIC=SOLVE_ELASTIC.replace(needle,repl,1)
+report_seed = "        phase1_elastic_reports.append({\n            'name': 'elastic model-consistent initialization',\n"
+report_seed_with_radius = (report_seed +
+    "            'seed_trust_region_bound': float(opti.value(trust_region_bound)),\n")
+assert SOLVE_ELASTIC.count(report_seed) == 1
+SOLVE_ELASTIC = SOLVE_ELASTIC.replace(report_seed, report_seed_with_radius, 1)
+_stride_callback = _new_callback.replace(
+    "        def save_feasible_iterate(iteration):",
+    "        checkpoint_stride = 10\n"
+    "        checkpoint_callbacks_skipped = 0\n"
+    "        checkpoint_callback_count = 0\n"
+    "        checkpoint_callback_wall_s = 0.0\n"
+    "        def save_feasible_iterate(iteration):", 1)
+_stride_callback = _stride_callback.replace(
+    "            nonlocal accepted_ipopt_iters, callback_errors, accepted_backtracks\n"
+    "            checkpoint_status = 'no_improvement'\n"
+    "            checkpoint_alpha = None\n"
+    "            checkpoint_measure = None\n"
+    "            try:\n                trial = snapshot_current(debug=True)",
+    "            nonlocal accepted_ipopt_iters, callback_errors, accepted_backtracks\n"
+    "            nonlocal checkpoint_callbacks_skipped, checkpoint_callback_count\n"
+    "            nonlocal checkpoint_callback_wall_s\n"
+    "            if int(iteration) % checkpoint_stride:\n"
+    "                checkpoint_callbacks_skipped += 1\n"
+    "                return\n"
+    "            checkpoint_status = 'no_improvement'\n"
+    "            checkpoint_alpha = None\n"
+    "            checkpoint_measure = None\n"
+    "            callback_started = time.perf_counter()\n"
+    "            checkpoint_callback_count += 1\n"
+    "            try:\n                trial = snapshot_current(debug=True)", 1)
+_stride_callback = _stride_callback.replace(
+    "            except (RuntimeError, ValueError, OverflowError, KeyError):\n"
+    "                callback_errors += 1",
+    "            except (RuntimeError, ValueError, OverflowError, KeyError):\n"
+    "                callback_errors += 1\n"
+    "            finally:\n"
+    "                checkpoint_callback_wall_s += (\n"
+    "                    time.perf_counter() - callback_started)\n"
+    "                progress_measure = (checkpoint_measure or winning_measure or {})\n"
+    "                print(\n"
+    "                    f'Phase-I iter={int(iteration):4d} '\n"
+    "                    f'status={checkpoint_status} '\n"
+    "                    f'alpha={checkpoint_alpha} '\n"
+    "                    f'candidate_merit={(checkpoint_measure or {}).get(\"elastic_merit\")} '\n"
+    "                    f'best_merit={progress_measure.get(\"elastic_merit\")} '\n"
+    "                    f'best_max_defect={progress_measure.get(\"raw_max_dynamic_defect\")} '\n"
+    "                    f'accepted={accepted_ipopt_iters} '\n"
+    "                    f'callback_errors={callback_errors}', flush=True)", 1)
+assert _stride_callback != _new_callback
+assert SOLVE_ELASTIC.count(_new_callback) == 1
+SOLVE_ELASTIC = SOLVE_ELASTIC.replace(_new_callback, _stride_callback, 1)
+
 needle="            'accepted_hard_feasible_backtracks': accepted_backtracks,\n"
 repl="""            'accepted_hard_feasible_backtracks': accepted_backtracks,
-            'rejected_lower_merit_higher_max_defect': rejected_merit_but_worse_max[0],
+            'phase1_checkpoint_stride': checkpoint_stride,
+            'phase1_checkpoint_callback_count': checkpoint_callback_count,
+            'phase1_checkpoint_callbacks_skipped': checkpoint_callbacks_skipped,
+            'phase1_checkpoint_callback_wall_s': checkpoint_callback_wall_s,
             'initial_dynamic_defect_breakdown': initial_measure.get('raw_dynamic_breakdown', []),
             'selected_dynamic_defect_breakdown': selected_pre_strict_measure.get('raw_dynamic_breakdown', []),
 """
@@ -349,10 +349,17 @@ SOLVE_ELASTIC=SOLVE_ELASTIC.replace(needle,repl,1)
 
 from solver_overlay_v229_compat import SOLVE_ELASTIC_V229
 
-TRUST_ELASTIC = '''    # The synthetic starting profile is not measured capture data.
+TRUST_ELASTIC_V236 = '''    # The synthetic starting profile is not measured capture data.
     # Disable the capture-specific distance cap during feasibility; the
     # original minimum-time continuation restores its own trust factors.
     opti.set_value(trust_region_bound, 1.0e12)
+'''
+
+TRUST_ELASTIC = '''    # Phase I starts from measured native motion. Keep model-consistency
+    # search inside the configured normalized neighborhood; only after exact
+    # dynamics feasibility does the time-optimal continuation widen its own
+    # trust region.
+    opti.set_value(trust_region_bound, feasibility_trust_region)
 '''
 
 STRICT_DIAGNOSTICS_ELASTIC = '''    def stage_constraint_diagnostics(solution, stats):
@@ -469,7 +476,8 @@ def transform_solver_v236(source: str, mode: str) -> str:
     latest = transform_solver(source, mode)
     if latest.count(SOLVE_ELASTIC) != 1:
         raise RuntimeError('Cannot reconstruct v2.3.6 generated solver')
-    return latest.replace(SOLVE_ELASTIC, SOLVE_ELASTIC_V236, 1)
+    latest = latest.replace(SOLVE_ELASTIC, SOLVE_ELASTIC_V236, 1)
+    return latest.replace(TRUST_ELASTIC, TRUST_ELASTIC_V236, 1)
 
 
 def transform_solver_v235(source: str, mode: str) -> str:
@@ -575,6 +583,170 @@ def transform_solver_v240(source: str, mode: str) -> str:
         raise RuntimeError('Unknown Phase-I failure report site')
     return patched.replace(_PHASE1_REPORT_MARKER, _PHASE1_REPORT_EXPORT, 1)
 
+
+def transform_solver_phase1_raw_diagnostics(
+        source: str, mode: str, *, include_initial_raw_diagnostics: bool = True) -> str:
+    """Add raw Phase-I dynamics diagnostics without changing vehicle physics."""
+    patched = transform_solver_v240(source, mode)
+    if '    def source_wheel_update(' not in source:
+        return patched  # stripped unit-test fixture, not the active OCP
+    if not include_initial_raw_diagnostics:
+        return patched
+    diagnostic_site = '    if diagnose_initial_only:\n        return {}, {'
+    diagnostic = '''    # The relaxed elastic equalities make the NLP seed constraint-feasible,
+    # which can hide large defects in the original vehicle equations. Report
+    # those source-model residuals explicitly without another OCP evaluation.
+    initial_dynamic_labels = [label for label in constraint_labels if label.startswith((
+        'periodic_collocation_state_', 'physx_implicit_wheel_update_',
+        'longitudinal_force_balance_', 'lateral_force_balance_',
+        'unity_spring_damper_load_'))]
+    initial_raw_samples = {}
+    label_offset = 0
+    for elastic in elastic_vars:
+        values = np.asarray(elastic_initial_values[elastic], dtype=np.float64).reshape(-1, order='F')
+        labels = initial_dynamic_labels[label_offset:label_offset + values.size]
+        label_offset += values.size
+        if len(labels) != values.size:
+            raise RuntimeError('Initial raw-dynamics labels do not match elastic residuals')
+        for label, value in zip(labels, values):
+            if label.startswith('periodic_collocation_state_'):
+                group = 'periodic_collocation_state:' + label.removeprefix('periodic_collocation_state_')
+            elif label.startswith('longitudinal_force_balance_'):
+                group = 'longitudinal_force_balance'
+            elif label.startswith('lateral_force_balance_'):
+                group = 'lateral_force_balance'
+            elif label.startswith('unity_spring_damper_load_'):
+                group = 'unity_spring_damper_load'
+            else:
+                group = 'physx_implicit_wheel_update'
+            initial_raw_samples.setdefault(group, []).append({
+                'label': label,
+                'value': float(value),
+            })
+    initial_raw_dynamic_defects = {
+        group: {
+            'count': len(samples),
+            'max_abs': float(np.max(np.abs([item['value'] for item in samples]))),
+            'rmse': float(np.sqrt(np.mean(np.square(
+                [item['value'] for item in samples])))),
+            'p95_abs': float(np.percentile(np.abs(
+                [item['value'] for item in samples]), 95.0)),
+            'worst_sample_index': int(np.argmax(np.abs(
+                [item['value'] for item in samples]))),
+            'worst_constraint_label': max(
+                samples, key=lambda item: abs(item['value']))['label'],
+        }
+        for group, samples in initial_raw_samples.items()
+    }
+    initial_raw_values = [item['value']
+                          for samples in initial_raw_samples.values()
+                          for item in samples]
+    initial_raw_max_defect = (float(np.max(np.abs(initial_raw_values)))
+                              if initial_raw_values else None)
+'''
+    if patched.count(diagnostic_site) != 1:
+        if 'diagnose_initial_only' not in patched:
+            return patched  # unit-test fixture omits the initial-only path
+        raise RuntimeError('Unknown initial-only diagnostics insertion site')
+    patched = patched.replace(diagnostic_site, diagnostic + diagnostic_site, 1)
+    report_site = '            "nlp_diagnostics": {"initial_guess": initial_constraints},'
+    report = ('            "nlp_diagnostics": {"initial_guess": initial_constraints,\n'
+              '                                "initial_raw_dynamic_max_defect": initial_raw_max_defect,\n'
+              '                                "initial_raw_dynamic_defects": initial_raw_dynamic_defects},')
+    if patched.count(report_site) != 1:
+        raise RuntimeError('Unknown initial-only report insertion site')
+    return patched.replace(report_site, report, 1)
+
+
+def _previous_raw_diagnostic_cache(patched: str) -> str:
+    """Return the exact pre-label cache variant for safe generated-cache upgrade."""
+    if "initial_raw_samples.setdefault(group, []).append({" not in patched:
+        return patched  # Minimal test fixture has no raw-diagnostic block.
+    replacements = (
+        ("""            initial_raw_samples.setdefault(group, []).append({
+                'label': label,
+                'value': float(value),
+            })""",
+         """            initial_raw_samples.setdefault(group, []).append(float(value))"""),
+        ("""            'max_abs': float(np.max(np.abs([item['value'] for item in samples]))),
+            'rmse': float(np.sqrt(np.mean(np.square(
+                [item['value'] for item in samples])))),
+            'p95_abs': float(np.percentile(np.abs(
+                [item['value'] for item in samples]), 95.0)),
+            'worst_sample_index': int(np.argmax(np.abs(
+                [item['value'] for item in samples]))),
+            'worst_constraint_label': max(
+                samples, key=lambda item: abs(item['value']))['label'],""",
+         """            'max_abs': float(np.max(np.abs(samples))),
+            'rmse': float(np.sqrt(np.mean(np.square(samples)))),
+            'p95_abs': float(np.percentile(np.abs(samples), 95.0)),
+            'worst_sample_index': int(np.argmax(np.abs(samples))),"""),
+        ("""    initial_raw_values = [item['value']
+                          for samples in initial_raw_samples.values()
+                          for item in samples]""",
+         """    initial_raw_values = [value for samples in initial_raw_samples.values()
+                          for value in samples]"""),
+    )
+    result = patched
+    for current, previous in replacements:
+        if result.count(current) != 1:
+            raise RuntimeError('Cannot recognize prior raw-diagnostic cache form')
+        result = result.replace(current, previous, 1)
+    return result
+
+
+def prepare_working_physx_substep_source(recovered_root: Path,
+                                         working_root: Path) -> dict:
+    """Pin the generated wheel helper to the verified practice-player setup."""
+    rel = Path('tools/vehicle_dynamics_learning/physx_no_drive_source.py')
+    historical = Path(recovered_root).resolve() / rel
+    generated = Path(working_root).resolve() / rel
+    if not historical.is_file() or not generated.is_file():
+        return {'physx_substep_source_available': False}
+    original = historical.read_text(encoding='utf-8')
+    old_block = ('UNITY_NO_DRIVE_SUBSTEP_THRESHOLD_MPS = 5.0\n'
+                 'UNITY_NO_DRIVE_LOW_SPEED_SUBSTEPS = 5\n'
+                 'UNITY_NO_DRIVE_HIGH_SPEED_SUBSTEPS = 1')
+    new_block = ('# Pinned practice UnityPlayer.so Build ID\n'
+                 '# 79f401cda3570218568e40b5331a0e68aa86f11c calls\n'
+                 '# setSubStepCount(5.0f, 5, 1). PhysX selects five substeps\n'
+                 '# when abs(body velocity projected onto vehicle forward) < 5 m/s.\n'
+                 'UNITY_NO_DRIVE_SUBSTEP_THRESHOLD_MPS = 5.0\n'
+                 'UNITY_NO_DRIVE_LOW_SPEED_SUBSTEPS = 5\n'
+                 'UNITY_NO_DRIVE_HIGH_SPEED_SUBSTEPS = 1')
+    old_bad_block = ('# Unity VehicleCollider initialization calls\n'
+                     '# setSubStepCount(128.0f, 5, 1); keep this distinct from the\n'
+                     '# unrelated 5 m/s wheel-angle integration threshold.\n'
+                     'UNITY_NO_DRIVE_SUBSTEP_THRESHOLD_MPS = 128.0\n'
+                     'UNITY_NO_DRIVE_LOW_SPEED_SUBSTEPS = 5\n'
+                     'UNITY_NO_DRIVE_HIGH_SPEED_SUBSTEPS = 1')
+    if original.count(old_block) != 1:
+        if new_block not in original:
+            raise RuntimeError('Unknown recovered PhysX wheel-substep constants')
+        patched = original
+    else:
+        patched = original.replace(old_block, new_block, 1)
+    current = generated.read_text(encoding='utf-8')
+    prior_bad_cache = (original.replace(old_block, old_bad_block, 1)
+                       if original.count(old_block) == 1 else None)
+    if current not in (original, patched, prior_bad_cache):
+        raise RuntimeError('Unknown generated PhysX substep helper; refusing overwrite: '
+                           + str(generated))
+    if current != patched:
+        generated.write_text(patched, encoding='utf-8')
+    return {
+        'physx_substep_source_available': True,
+        'physx_substep_source_path': str(generated),
+        'physx_substep_source_sha256': hashlib.sha256(
+            patched.encode('utf-8')).hexdigest(),
+        'physx_substep_threshold_mps': 5.0,
+        'physx_substep_counts': [5, 1],
+        'physx_substep_call': 'setSubStepCount(5.0f, 5, 1)',
+        'unity_player_build_id': '79f401cda3570218568e40b5331a0e68aa86f11c',
+        'recovered_source_untouched': historical.read_text(
+            encoding='utf-8') == original,
+    }
+
 def prepare_working_solver(recovered_root: Path, working_root: Path,
                            legacy_name: str,
                            mode: str = 'limited-memory') -> tuple[Path, dict]:
@@ -586,7 +758,11 @@ def prepare_working_solver(recovered_root: Path, working_root: Path,
         raise FileNotFoundError(original)
     source_bytes = original.read_bytes()
     raw = source_bytes.decode('utf-8')
-    patched = transform_solver_v240(raw, mode)
+    patched = transform_solver_phase1_raw_diagnostics(raw, mode)
+    if '    def source_wheel_update(' in raw and (
+            patched.count(_CONTACT_SOLVER_CALL_NEW) != 1 or
+            _CONTACT_SOLVER_CALL_OLD in patched):
+        raise RuntimeError('Generated OCP does not include full roll/pitch contact velocity')
     dest = (target_root / legacy_name /
             'f1tenth_planning/autodrive_mintime/optimizer_unity_wheels.py')
     if source_root == target_root:
@@ -612,10 +788,20 @@ def prepare_working_solver(recovered_root: Path, working_root: Path,
                  transform_solver_v235(raw, mode),
                  transform_solver_v236(raw, mode),
                  transform_solver(raw, mode), transform_solver_v2316(raw, mode),
+                 transform_solver_v240(raw, mode),
                  transform_solver_v240(raw,
+                     'exact' if mode == 'limited-memory' else 'limited-memory'),
+                 transform_solver_phase1_raw_diagnostics(raw, mode,
+                     include_initial_raw_diagnostics=False),
+                 transform_solver_phase1_raw_diagnostics(raw,
                      'exact' if mode == 'limited-memory' else 'limited-memory'),
                  transform_solver_v2316(raw,
                      'exact' if mode == 'limited-memory' else 'limited-memory'),
+                 # Exact previously generated cache with the now-corrected
+                 # Phase-I diagnostic overlay but the erroneous 128 m/s text.
+                 transform_solver_phase1_raw_diagnostics(raw, mode).replace(
+                     '5 m/s', '128 m/s'),
+                 _previous_raw_diagnostic_cache(patched),
                  patched)
         if dest.read_text(encoding='utf-8') not in known:
             raise RuntimeError('Working solver has unknown local edits; refusing to overwrite '
@@ -627,17 +813,24 @@ def prepare_working_solver(recovered_root: Path, working_root: Path,
     from wheel_model_overlay_v241 import prepare_working_wheel_model
     wheel_provenance = prepare_working_wheel_model(source_root, target_root,
                                                   legacy_name)
+    substep_provenance = prepare_working_physx_substep_source(
+        source_root, target_root)
     if dest.read_text(encoding='utf-8') != patched:
         dest.write_text(patched, encoding='utf-8')
     return target_root, {
         'phase1_hessian': mode,
-        'phase1_method': 'v2.4.1 contact-arm correction + v2.4.0 checkpointed Phase-I continuation',
+        'phase1_method': 'v2.4.9 measured-seed trust region + flushed max-defect-first checkpoints; verified 3-axis contact velocity and wheel-substep corrections',
         'numerical_guards_equal_on_physical_domain': True,
         'phase1_detect_simple_bounds': True,
         'physical_dynamics_changed': True,
-        'physical_dynamics_change': 'v2.4.1 fixes +0.025 m target travel in contact arm and preserves prior u=x[2,k] wheel substep, roll/pitch rate 3-axis contact velocities; v2.4.0 Phase-I checkpointing',
-        'wheel_substep_selection': 'native-compatible forward speed <5m/s -> 5 substeps; >=5m/s -> 1',
+        'physical_dynamics_change': '3-axis contact-point velocity passes roll_rate and pitch_rate into the tire model; contact-arm correction; prior wheel-state index u=x[2,k] retained; PhysX NoDrive substep branch uses the pinned practice UnityPlayer setSubStepCount(5.0f,5,1); Phase-I max-defect-first checkpoint selection',
+        'generated_ocp_full_contact_velocity_verified': (
+            patched.count(_CONTACT_SOLVER_CALL_NEW) == 1 and
+            _CONTACT_SOLVER_CALL_OLD not in patched),
+        'wheel_substep_selection': 'Pinned practice UnityPlayer setSubStepCount(5.0f, 5, 1): abs(body velocity projected onto vehicle forward) <5m/s -> 5 substeps; >=5m/s -> 1',
         'phase1_checkpoint_continuation': True,
+        'phase1_checkpoint_stride': 10,
+        'phase1_seed_trust_region': 'configured feasibility_trust_region (default 200 normalized squared-distance units)',
         'elastic_slack_bound_phase1': 1.0e5,
         'elastic_slack_bound_final': 0.0,
         'original_solver_sha256': hashlib.sha256(source_bytes).hexdigest(),
@@ -645,4 +838,5 @@ def prepare_working_solver(recovered_root: Path, working_root: Path,
         'source_untouched': original.read_bytes() == source_bytes,
         'working_solver_path': str(dest),
         **wheel_provenance,
+        **substep_provenance,
     }

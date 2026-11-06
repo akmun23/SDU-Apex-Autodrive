@@ -1,5 +1,6 @@
 """Native-warm-start mechanics: no native simulator or full IPOPT run launched."""
 import math
+import json
 import numpy as np
 import pytest
 from types import SimpleNamespace
@@ -47,6 +48,27 @@ def test_native_state_seed_shapes_and_values():
     assert np.isfinite(seed['ay_mps2']).all()
 
 
+def test_seed_acceleration_is_body_velocity_derivative():
+    track=circle()
+    seed=build_seed(trace_circle(track),track,track.length)
+    # Constant-speed circular motion has no body-coordinate speed derivative;
+    # the active OCP's rotating-frame transport terms supply centripetal accel.
+    np.testing.assert_allclose(seed['ax_mps2'],0.0,atol=1e-10)
+    np.testing.assert_allclose(seed['ay_mps2'],0.0,atol=1e-10)
+
+
+def test_native_derivatives_are_computed_before_spatial_resampling():
+    track=circle()
+    trace=trace_circle(track)
+    for row in trace:
+        sample_time=row[1]
+        row[6][0]=2.2+.02*sample_time
+        row[6][1]=-.1+.01*sample_time
+    seed=build_seed(trace,track,track.length)
+    np.testing.assert_allclose(seed['ax_mps2'],.02,atol=1e-10)
+    np.testing.assert_allclose(seed['ay_mps2'],.01,atol=1e-10)
+
+
 def test_incomplete_or_ambiguous_lap_rejected():
     track=circle()
     with pytest.raises(ValueError,match='complete lap'):
@@ -72,6 +94,44 @@ def test_warmstart_failure_keeps_ipopt_unlaunched(monkeypatch,tmp_path):
     s,r=native_seed.generate(None,None,'native',None,None,None,tmp_path,.15,speeds=(2.4,1.8))
     assert s is None and len(r)==2
     assert 'footprint_clearance' in (tmp_path/'native_seed_report.json').read_text()
+
+
+def test_native_diagnostic_capture_persists_jsonl_and_alignment_limits(
+        monkeypatch,tmp_path):
+    import native_seed
+    def capture(*args,contact_records=None,state_records=None,**kwargs):
+        contact_records.append({
+            'packet_index': 4, 'time_s': .1,
+            'wheel_omega_radps': np.asarray([1.,2.,3.,4.]),
+            'tire_longitudinal_force_n': np.asarray([5.,6.,7.,8.])})
+        state_records.append({
+            'packet_index': 4, 'time_s': .1,
+            'body_state_18': np.zeros(18),
+            'native_math': {'solver_diagnostics': {'iterations': 25}}})
+        return None, {'failure':'fixture_stop','completed_flying_lap':False}
+    monkeypatch.setattr(native_seed,'one_trial',capture)
+    seed,report=native_seed.generate(
+        None,None,'native',None,None,None,tmp_path,.05,speeds=(2.4,),
+        capture_native_diagnostics=True)
+    assert seed is None and len(report)==1
+    contact=json.loads((tmp_path/'native_contact_2.4.jsonl').read_text())
+    state=json.loads((tmp_path/'native_state_2.4.jsonl').read_text())
+    assert contact['wheel_omega_radps']==[1.,2.,3.,4.]
+    assert state['body_state_18']==[0.]*18
+    manifest=json.loads((tmp_path/'native_diagnostics_manifest.json').read_text())
+    assert manifest['files'][0]['contact_records']==1
+    assert 'exact 1 ms substep timestamp' in manifest['time_alignment_limits']
+
+
+def test_native_diagnostic_capture_writes_empty_files_on_early_failure(
+        monkeypatch,tmp_path):
+    import native_seed
+    monkeypatch.setattr(native_seed,'one_trial',
+        lambda *args,**kwargs:(None,{'failure':'before_capture'}))
+    native_seed.generate(None,None,'native',None,None,None,tmp_path,.05,
+                         speeds=(2.4,),capture_native_diagnostics=True)
+    assert (tmp_path/'native_contact_2.4.jsonl').read_text()==''
+    assert (tmp_path/'native_state_2.4.jsonl').read_text()==''
 
 
 def test_completed_measured_flying_lap_is_passed_to_optimizer(monkeypatch,tmp_path):

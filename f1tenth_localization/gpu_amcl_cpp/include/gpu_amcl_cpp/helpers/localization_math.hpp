@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include "gpu_amcl_cpp/helpers/odom_history.hpp"
 
 namespace gpu_amcl_cpp::localization_math {
 
@@ -31,46 +32,21 @@ inline double angle_diff(double a, double b) {
 inline bool interpolate_pose(const std::vector<PoseSample>& samples,
                              double stamp,
                              PoseInterpolation& result) {
-    if (samples.empty() || stamp < samples.front().stamp ||
-        stamp > samples.back().stamp) {
+    const auto samples_at = odom_history::bracket(samples, stamp);
+    if (samples_at.first == nullptr) {
         return false;
     }
-
-    if (stamp == samples.front().stamp) {
-        result.pose = samples.front();
-        result.bracket_before = stamp;
-        result.bracket_after = stamp;
-        return true;
-    }
-    if (stamp == samples.back().stamp) {
-        result.pose = samples.back();
-        result.bracket_before = stamp;
-        result.bracket_after = stamp;
-        return true;
-    }
-
-    for (size_t i = 1; i < samples.size(); ++i) {
-        const auto& before = samples[i - 1];
-        const auto& after = samples[i];
-        if (stamp > after.stamp) {
-            continue;
-        }
-        result.bracket_before = before.stamp;
-        result.bracket_after = after.stamp;
-        const double dt = after.stamp - before.stamp;
-        if (dt <= 0.0) {
-            result.pose = after;
-            result.pose.stamp = stamp;
-            return true;
-        }
-        const double ratio = (stamp - before.stamp) / dt;
-        result.pose.stamp = stamp;
-        result.pose.x = before.x + ratio * (after.x - before.x);
-        result.pose.y = before.y + ratio * (after.y - before.y);
-        result.pose.theta = before.theta + ratio * angle_diff(after.theta, before.theta);
-        return true;
-    }
-    return false;
+    const auto& before = *samples_at.first;
+    const auto& after = *samples_at.second;
+    result.bracket_before = before.stamp;
+    result.bracket_after = after.stamp;
+    const double dt = after.stamp - before.stamp;
+    const double ratio = dt > 0.0 ? (stamp - before.stamp) / dt : 0.0;
+    result.pose.stamp = stamp;
+    result.pose.x = before.x + ratio * (after.x - before.x);
+    result.pose.y = before.y + ratio * (after.y - before.y);
+    result.pose.theta = before.theta + ratio * angle_diff(after.theta, before.theta);
+    return true;
 }
 
 inline Eigen::Matrix3d grow_pose_covariance(
