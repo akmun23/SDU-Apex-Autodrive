@@ -9,6 +9,8 @@
 #
 # Optional environment:
 #   SDU_APEX_TRIAL_TOTAL_LAPS         warm-up lap plus scored laps (default 6)
+#   SDU_APEX_TRIAL_TRAJECTORY_FILE    competition raceline override (inside the repository)
+#   SDU_APEX_TRIAL_WALL_TIMEOUT_S     supervisor wall-clock limit (default 240)
 #   SDU_APEX_MPC_PARAMETER_OVERLAY    MPC YAML overlay inside the repository
 #   SDU_APEX_MPC_NATIVE_TUNING / SDU_APEX_MPC_LTO   "true" for -march=native/LTO
 set -euo pipefail
@@ -34,7 +36,7 @@ case "$track" in
     ;;
   competition)
     map=f1tenth_planning/maps/autodrive_iros_2026_compete.yaml
-    trajectory=f1tenth_planning/trajectories/autodrive_iros_2026_compete/ipopt_best_6p925_source_witness.csv
+    trajectory=${SDU_APEX_TRIAL_TRAJECTORY_FILE:-f1tenth_planning/trajectories/autodrive_iros_2026_compete/ipopt_best_6p925_source_witness.csv}
     mpc_config=f1tenth_mpc/config/mpc_competition.yaml
     amcl_config=f1tenth_localization/config/amcl_iros.yaml
     amcl_overlay=f1tenth_localization/config/amcl_iros.yaml
@@ -116,7 +118,7 @@ wait_log "$run_dir/recorder.log" Recording
 env SDU_APEX_WATCH_STALL_TIMEOUT_S=30 \
   SDU_APEX_WATCH_MIN_DISTANCE_PER_LAP_M="$min_lap_distance_m" \
   tools/watch_sim_run.sh "$controller" "$simulator" "$recorder" \
-  "mpc-lap-$total_laps" 240 >"$run_dir/watcher.log" 2>&1 &
+  "mpc-lap-$total_laps" "${SDU_APEX_TRIAL_WALL_TIMEOUT_S:-240}" >"$run_dir/watcher.log" 2>&1 &
 watcher_job=$!
 wait_log "$run_dir/watcher.log" WATCHER_READY
 # A reset pulse makes the live modules start from a clean spawn state.

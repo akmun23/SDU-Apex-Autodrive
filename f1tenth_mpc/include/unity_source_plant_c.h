@@ -100,6 +100,12 @@ typedef struct {
       [UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
 } UnitySourcePlantSensitivityC;
 
+/* Recompute source-geometry suspension jounce after an observer corrects the
+ * body state. Mutates only state[14..17] and suspension_history_initialized. */
+int unity_source_plant_reconcile_suspension_jounce_c(
+    double state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    int *suspension_history_initialized);
+
 /* Returns 1 on success; rejects non-finite/out-of-contract inputs. duration
  * must be an integer number of 1 ms Unity fixed steps, no longer than 250 ms. */
 int unity_source_plant_step_c(const UnitySourcePlantInputC *input,

@@ -480,9 +480,9 @@ def execute(workspace: Path, state: dict, item: dict, state_path: Path, *, dry_r
     attempt["started_epoch_s"] = time.time()
     atomic_json(state_path, state)
     env = os.environ.copy()
-    env.update(SDU_APEX_IROS_TRAJECTORY_FILE=str(reference),
-               SDU_APEX_IROS_TOTAL_LAPS=str(TARGET_LAPS),
-               SDU_APEX_IROS_WALL_TIMEOUT_S=env.get("SDU_APEX_AUTO_TRIAL_TIMEOUT_S", "900"))
+    env.update(SDU_APEX_TRIAL_TRAJECTORY_FILE=str(reference),
+               SDU_APEX_TRIAL_TOTAL_LAPS=str(TARGET_LAPS),
+               SDU_APEX_TRIAL_WALL_TIMEOUT_S=env.get("SDU_APEX_AUTO_TRIAL_TIMEOUT_S", "900"))
     profile = workspace / 'mpc_validation/mpc_parameter_overlay.yaml'
     if profile.is_file():
         profile = safe_file(str(profile), workspace)
@@ -490,11 +490,11 @@ def execute(workspace: Path, state: dict, item: dict, state_path: Path, *, dry_r
         shutil.copyfile(profile, snapshot)
         attempt['mpc_profile_sha256'] = sha256(snapshot)
         attempt['mpc_profile_snapshot'] = str(snapshot)
-        env['SDU_APEX_IROS_MPC_PARAMETER_FILE'] = str(snapshot)
+        env['SDU_APEX_MPC_PARAMETER_OVERLAY'] = str(snapshot)
         atomic_json(state_path, state)
-    # The existing launcher builds the production controller image so that a
-    # stale prebuilt image is never silently treated as a fresh trial.
-    command = ["bash", str(REPO / "tools/run_iros_trial.sh"), run_id]
+    # The trial builds the working tree, so a stale image is never treated as a
+    # fresh controller.
+    command = ["bash", str(REPO / "tools/run_trial.sh"), "competition", run_id]
     status = 1
     try:
         with (input_dir / f"attempt_{iteration:02d}.log").open("w") as log:

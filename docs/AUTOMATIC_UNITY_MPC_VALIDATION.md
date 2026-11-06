@@ -7,7 +7,7 @@ optimizer. It never runs uncertified IPOPT candidates. On first startup it
 queues only the latest currently certified reference and marks earlier exports
 as seen. Each subsequent certified export enters a serialized FIFO queue.
 
-It starts the existing production IROS launcher with the immutable, SHA-256
+It starts `tools/run_trial.sh competition` with the immutable, SHA-256
 identified trajectory and the IROS map. The watcher stops the run on collision,
 MPC rejection, motion stall, timeout, or completion of **11 official laps**:
 one warmup plus 10 scored laps. A failed trial is not automatically retried.

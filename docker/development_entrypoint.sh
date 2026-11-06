@@ -29,18 +29,6 @@ if [[ "${SDU_APEX_BUILD_MOUNTED_SOURCE:-0}" == "1" ]]; then
     false) ;;
     *) echo "SDU_APEX_MPC_LTO must be true or false" >&2; exit 2 ;;
   esac
-  parallel_source_sensitivities=false
-  case "${SDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES:-false}" in
-    true)
-      echo "MPC exact-source sensitivity batch parallelism enabled"
-      parallel_source_sensitivities=true
-      ;;
-    false) ;;
-    *)
-      echo "SDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES must be true or false" >&2
-      exit 2
-      ;;
-  esac
   # The reusable dev image may carry generated artifacts from an older
   # sdu_apex_autodrive source tree. In particular, setuptools can retain
   # deleted config/launch files in SOURCES.txt and then fail while copying
@@ -63,8 +51,7 @@ if [[ "${SDU_APEX_BUILD_MOUNTED_SOURCE:-0}" == "1" ]]; then
     --merge-install --symlink-install \
     --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
       "-DSDU_APEX_MPC_NATIVE_TUNING=${native_tuning}" \
-      "-DSDU_APEX_MPC_LTO=${source_mpc_lto}" \
-      "-DSDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES=${parallel_source_sensitivities}"
+      "-DSDU_APEX_MPC_LTO=${source_mpc_lto}" 
   source /workspace/install/setup.bash
 else
   source /workspace/install/setup.bash

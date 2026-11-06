@@ -300,14 +300,8 @@ typedef struct
     int64_t command_epoch_ns;
     double max_cycle_time_us;
     double absolute_deadline_monotonic_us;
-    int source_exact_nlp_live;
-    int source_exact_nlp_constrained_qp;
-    int source_exact_nlp_compact_qp;
-    int source_exact_nlp_full_step_sqp;
-    float source_exact_nlp_qp_soft_weight;
-    float source_exact_nlp_qp_regularization;
-    int source_exact_nlp_iterations;
-    float source_exact_nlp_extra_clearance_m;
+    int sqp_iterations;
+    float sqp_violation_penalty;
     int capture_diagnostic_outputs;
     const MpcRtiObjectiveSchedule_t *objective_schedule;
     int capture_source_benchmark;
@@ -487,7 +481,6 @@ typedef struct
     int source_exact_nlp_initial_source_feasible;
     int source_exact_nlp_final_source_feasible;
     int source_exact_nlp_kkt_converged;
-    int source_exact_nlp_full_step_stalled;
     double source_exact_nlp_initial_source_cost;
     double source_exact_nlp_final_source_cost;
     double source_exact_nlp_final_original_margin_m;

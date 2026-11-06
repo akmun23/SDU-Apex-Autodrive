@@ -1,17 +1,16 @@
 // Offline benchmark of the production SQP on frozen controller problems.
 //
-//   mpc_sqp_bench solve CASE_DIR [ITERATIONS=4] [RADIUS=0.5] [FLOOR=1]
-//       One SQP solve from CASE_DIR/initial.controls; prints per-iteration
+//   mpc_sqp_bench solve CASE [ITERATIONS=4] [RADIUS=0.5]
+//       One SQP solve from the case's nominal controls; prints per-iteration
 //       model-versus-exact data as JSON.
-//   mpc_sqp_bench drive CASE_DIR CYCLES [ITERATIONS=4] [DEADLINE_MS=22]
+//   mpc_sqp_bench drive CASE CYCLES [ITERATIONS=4] [DEADLINE_MS=22]
 //       Closed loop through mpc_rti_solve_cycle on the source plant itself:
 //       the first command of each published plan is applied for 25 ms, a
 //       deferred cycle holds the previous command, and the run ends at the
 //       first wall contact. Wall-clock timing is real.
 //
-// CASE_DIR contains source_context.mctx and initial.controls, as written by
-// the live fixture exporter. This tool never touches ROS or the simulator.
-#include "mpc_qp_failure_context.hpp"
+// CASE is a file written by mpc_export_case. This tool never touches ROS or the simulator.
+#include "mpc_case.hpp"
 #include "mpc_source_sqp.hpp"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -26,37 +25,24 @@
 
 using nlohmann::json;
 namespace fs = std::filesystem;
-using sdu_apex::qp_fixture::FailureReplayContext;
+using sdu_apex::mpc_util::Case;
 
 namespace {
-bool load_case(const fs::path &dir, FailureReplayContext *ctx,
+bool load_case(const fs::path &path, Case *ctx,
                MpcModelControl_t controls[PREDICTION_HORIZON])
 {
-    if (!sdu_apex::qp_fixture::read_failure_context(
-            (dir / "source_context.mctx").string(), ctx))
-        return false;
-    std::ifstream in(dir / "initial.controls");
-    for (int k = 0; k < PREDICTION_HORIZON; ++k)
-        if (!(in >> controls[k].steering_target_rad >> controls[k].throttle_command))
-            return false;
+    if (!sdu_apex::mpc_util::read_case(path.string(), ctx)) return false;
+    std::copy_n(ctx->controls, PREDICTION_HORIZON, controls);
     return true;
 }
 
-MpcRtiCycleConfiguration_t make_configuration(const FailureReplayContext &ctx,
+MpcRtiCycleConfiguration_t make_configuration(const Case &ctx,
                                               int iterations)
 {
     MpcRtiCycleConfiguration_t cfg{};
     cfg.model = ctx.model;
-    cfg.model.world_sweep_check = nullptr;
-    cfg.model.world_sweep_context = nullptr;
-    cfg.model.world_map_rejection_only = 0;
-    cfg.source_exact_nlp_live = 1;
-    cfg.source_exact_nlp_constrained_qp = 1;
-    cfg.source_exact_nlp_compact_qp = 1;
-    cfg.source_exact_nlp_full_step_sqp = 1;
-    cfg.source_exact_nlp_qp_regularization = 1.f;
-    cfg.source_exact_nlp_qp_soft_weight = 1.e6f;
-    cfg.source_exact_nlp_iterations = iterations;
+    cfg.sqp_violation_penalty = 1.e6f;
+    cfg.sqp_iterations = iterations;
     return cfg;
 }
 
@@ -70,7 +56,7 @@ json percentile_summary(std::vector<double> v)
 
 int solve_case(const fs::path &dir, int iterations, double radius)
 {
-    auto ctx = std::make_unique<FailureReplayContext>();
+    auto ctx = std::make_unique<Case>();
     MpcModelControl_t controls[PREDICTION_HORIZON]{};
     if (!load_case(dir, ctx.get(), controls)) return 3;
     auto cfg = make_configuration(*ctx, iterations);
@@ -117,7 +103,7 @@ int solve_case(const fs::path &dir, int iterations, double radius)
 
 int drive(const fs::path &dir, int cycles, int iterations, double deadline_ms)
 {
-    auto ctx = std::make_unique<FailureReplayContext>();
+    auto ctx = std::make_unique<Case>();
     MpcModelControl_t seed[PREDICTION_HORIZON]{};
     if (!load_case(dir, ctx.get(), seed)) return 3;
     auto cfg = make_configuration(*ctx, iterations);
@@ -149,7 +135,9 @@ int drive(const fs::path &dir, int cycles, int iterations, double deadline_ms)
                         status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED;
         degraded += status == MPC_RTI_CYCLE_ACCEPTED_DEGRADED;
         if (ok) {
-            held = result->candidate_controls[0];
+            // Exactly what the controller node would publish.
+            held.steering_target_rad = result->published_steering_command;
+            held.throttle_command = result->published_throttle;
             ++published;
             run = 0;
             unconverged += !result->source_exact_nlp_kkt_converged;
@@ -196,7 +184,7 @@ int drive(const fs::path &dir, int cycles, int iterations, double deadline_ms)
 int main(int argc, char **argv)
 {
     if (argc < 3) {
-        std::cerr << "usage: mpc_sqp_bench {solve|drive} CASE_DIR ...\n";
+        std::cerr << "usage: mpc_sqp_bench {solve|drive} CASE ...\n";
         return 2;
     }
     const std::string mode = argv[1];

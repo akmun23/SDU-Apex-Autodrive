@@ -633,7 +633,7 @@ bool solve(const MpcRtiState_t &initial, double initial_progress,
     if (!result || !trajectory || trajectory_count == 0 || !seed ||
         !configuration.objective_schedule || !configuration.objective_schedule->valid ||
         configuration.objective_schedule->horizon != kStages ||
-        configuration.model.world_sweep_check || options.maximum_iterations < 1 ||
+        options.maximum_iterations < 1 ||
         !(options.minimum_radius > 0.) || options.minimum_radius > options.maximum_radius ||
         !(options.restoration_radius > 0.))
         return false;
@@ -777,7 +777,7 @@ bool solve(const MpcRtiState_t &initial, double initial_progress,
             result->termination = Termination::RadiusCollapsed;
         }
         record.total_ms = elapsed_ms(begin);
-        measured_iteration_us = std::max(measured_iteration_us, 1000. * record.total_ms);
+        measured_iteration_us = 1150. * record.total_ms;  // the next one resembles this one
         result->history.push_back(record);
         if (stop || !accepted) break;
     }

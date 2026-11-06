@@ -29,7 +29,7 @@
     startup_path_heading_tolerance_rad: 0.75
     weight_e_y: 4500.0
     weight_e_psi: 1450.0
-    weight_u: 45.0
+    weight_u: 65.0
     weight_u_overspeed: 20.0
     overspeed_curvature_gain_m: 0.5
     underspeed_curvature_gain_m: 0.6
@@ -49,9 +49,6 @@
     corridor_preview_halfwidth_m: 0.1
     nonlinear_corridor_tolerance_m: 0.0
     rti_cycle_budget_ms: 22.0
-    jacobian_threads: 6
-    reference_clearance_reserve_m: 0.0
-    source_exact_nlp_iterations: 3
-    source_exact_nlp_qp_soft_weight: 1000000.0
-    source_exact_nlp_qp_regularization: 1.0
-    source_exact_nlp_extra_clearance_m: 0.03
+    jacobian_threads: 8
+    sqp_iterations: 4
+    sqp_violation_penalty: 1000000.0

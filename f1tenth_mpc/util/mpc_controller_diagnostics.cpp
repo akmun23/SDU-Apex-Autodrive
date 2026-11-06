@@ -50,8 +50,6 @@ void MpcControllerNode::publish_cycle_diagnostics(
         <<(result.source_exact_nlp_final_source_feasible?"true":"false")
         <<",\"source_exact_nlp_kkt_converged\":"
         <<(result.source_exact_nlp_kkt_converged?"true":"false")
-        <<",\"source_exact_nlp_full_step_stalled\":"
-        <<(result.source_exact_nlp_full_step_stalled?"true":"false")
         <<",\"source_exact_nlp_original_cost_initial\":";
     finite_json(json,result.source_exact_nlp_initial_source_cost);
     json<<",\"source_exact_nlp_original_cost_final\":";
@@ -199,9 +197,7 @@ void MpcControllerNode::publish_cycle_diagnostics(
     if(rti_config_.capture_source_benchmark) {
         // Same-build POD capture retains every frozen reference/weight and
         // constraint setting bit exactly. Pointer callbacks cannot be replayed.
-        auto model=rti_config_.model;
-        const bool world=model.world_sweep_check!=nullptr;
-        model.world_sweep_check=nullptr;model.world_sweep_context=nullptr;
+        const auto model=rti_config_.model;
         const auto hex=[&](const void *object,size_t size) {
             constexpr char digits[]="0123456789abcdef";
             const auto *bytes=static_cast<const unsigned char *>(object);
@@ -209,8 +205,7 @@ void MpcControllerNode::publish_cycle_diagnostics(
             for(size_t i=0;i<size;++i)json<<digits[bytes[i]>>4]<<digits[bytes[i]&15];
             json<<'"';
         };
-        json<<",\"frozen_source_problem\":{\"schema\":\"source-pod/v1\",\"world_sweep_was_configured\":"
-            <<(world?"true":"false")<<",\"model_size\":"<<sizeof(model)
+        json<<",\"frozen_source_problem\":{\"schema\":\"source-pod/v2\",\"model_size\":"<<sizeof(model)
             <<",\"objective_size\":"<<sizeof(result.comparison_objective)
             <<",\"model_pod_hex\":";
         hex(&model,sizeof(model));

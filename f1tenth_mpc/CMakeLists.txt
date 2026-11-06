@@ -71,23 +71,18 @@ target_compile_definitions(mpc_core PRIVATE EIGEN_DONT_PARALLELIZE)
 if(OpenMP_CXX_FOUND)
   target_link_libraries(mpc_core PUBLIC OpenMP::OpenMP_CXX)
 endif()
-option(SDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES
-  "Evaluate independent exact-source derivative batches concurrently" OFF)
-if(SDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES)
-  if(NOT OpenMP_CXX_FOUND)
-    message(FATAL_ERROR "Parallel source sensitivities require OpenMP")
-  endif()
-  target_compile_definitions(mpc_core PRIVATE
-    SDU_APEX_MPC_PARALLEL_SOURCE_SENSITIVITIES=1)
-endif()
-
 set_target_properties(mpc_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# Offline solver benchmark on frozen controller problems. Development only.
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/mpc_sqp_bench.cpp")
-  add_executable(mpc_sqp_bench EXCLUDE_FROM_ALL ../tools/mpc_sqp_bench.cpp)
-  target_link_libraries(mpc_sqp_bench PRIVATE mpc_core Eigen3::Eigen)
-endif()
+# Development utilities (util/): frozen-problem export and solver benchmark.
+# Not part of the controller; build with `--target mpc_sqp_bench mpc_export_case`.
+add_executable(mpc_sqp_bench EXCLUDE_FROM_ALL util/mpc_sqp_bench.cpp)
+target_include_directories(mpc_sqp_bench PRIVATE util include)
+target_link_libraries(mpc_sqp_bench PRIVATE mpc_core Eigen3::Eigen)
+find_package(nlohmann_json REQUIRED)
+target_link_libraries(mpc_sqp_bench PRIVATE nlohmann_json::nlohmann_json)
+add_executable(mpc_export_case EXCLUDE_FROM_ALL util/mpc_export_case.cpp)
+target_include_directories(mpc_export_case PRIVATE util include)
+target_link_libraries(mpc_export_case PRIVATE mpc_core nlohmann_json::nlohmann_json)
 
 # Optional C ABI shared object used by tools/evaluate_mpc_bag.py to replay
 # logged plant states and command queues against the production rollout. It is
@@ -114,9 +109,10 @@ set_target_properties(mpc_control_time PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # normalized-throttle decision through the team actuator command message.
 add_library(mpc_controller_node SHARED
   src/mpc_controller_node.cpp
-  src/mpc_controller_diagnostics.cpp
-  src/mpc_diagnostic_worker.cpp)
+  util/mpc_controller_diagnostics.cpp
+  util/mpc_diagnostic_worker.cpp)
 target_link_libraries(mpc_controller_node mpc_core mpc_state_sync mpc_control_time)
+target_include_directories(mpc_controller_node PRIVATE src util)
 ament_target_dependencies(mpc_controller_node
   ament_index_cpp
   rclcpp
@@ -134,6 +130,11 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   ament_add_gtest(test_mpc_trajectory_io test/test_mpc_trajectory_io.cpp)
+  ament_add_gtest(test_mpc_cycle test/test_mpc_cycle.cpp)
+  target_link_libraries(test_mpc_cycle mpc_core)
+  target_include_directories(test_mpc_cycle PRIVATE include)
+  target_compile_definitions(test_mpc_cycle PRIVATE
+    MPC_TEST_RACELINE="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/autodrive_practice_20260924_b/source_command_4p800.csv")
   ament_add_gtest(test_mpc_source_qp test/test_mpc_source_qp.cpp)
   target_link_libraries(test_mpc_source_qp mpc_core Eigen3::Eigen)
   target_link_libraries(test_mpc_trajectory_io mpc_core)

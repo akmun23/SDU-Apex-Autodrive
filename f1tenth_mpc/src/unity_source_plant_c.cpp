@@ -390,3 +390,20 @@ extern "C" int unity_source_plant_slip_excess_c(
             excess_derivative_wheel_omega);
   return 1;
 }
+
+extern "C" int unity_source_plant_reconcile_suspension_jounce_c(
+    double state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    int *suspension_history_initialized)
+{
+  if (!state || !suspension_history_initialized) return 0;
+  auto plant_state = from_c(state, *suspension_history_initialized);
+  if (!f1tenth_mpc::unity_source_plant_reconcile_suspension_jounce(
+          &plant_state))
+    return 0;
+  std::copy(plant_state.suspension_jounce_m.begin(),
+            plant_state.suspension_jounce_m.end(),
+            state + UNITY_SOURCE_SUSPENSION_JOUNCE_FL);
+  *suspension_history_initialized =
+      plant_state.suspension_history_initialized ? 1 : 0;
+  return 1;
+}

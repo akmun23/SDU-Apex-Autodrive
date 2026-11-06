@@ -329,18 +329,6 @@ static int reference_at_progress_with_sample(
                 contour_steering_correction,
             -configuration->max_steering_rad,configuration->max_steering_rad),
         .source_throttle = (float)sample.source_throttle};
-    if (configuration->reference_clearance_reserve_m > 0.f) {
-        MpcModelState_t target_body{};
-        target_body.e_psi = reference->e_psi;
-        const MpcCorridorMargins body = corridor_margin_for_state(configuration, &target_body, 2);
-        const float lower = body.right - right_bound;
-        const float upper = left_bound - body.left;
-        if (lower < upper) {
-            const float reserve = fminf(configuration->reference_clearance_reserve_m, .5f*(upper-lower));
-            reference->e_y = clampf_rti(
-                reference->e_y, lower+reserve, upper-reserve);
-        }
-    }
     return finite_reference(reference);
 }
 
@@ -459,49 +447,6 @@ int mpc_rti_references_from_exact_nominal(
  * Frenet corridor bounds only after exact map-cell validation. The reference
  * frame is the physical rear axle, not the center of the vehicle rectangle.
  * No map: callback returns false and the rollout fails closed. */
-/* Reuse the source trajectory samples ALREADY calculated by the exact
- * nonlinear rollout. Two redundant binary searches per checked movement
- * were previously performed here. The independent scoring path retains
- * its own sampling wrapper for callers without live rollout samples. */
-static int world_sweep_clearance_from_samples(
-    const MpcRtiConfiguration_t *model,
-    const MpcTrajectorySample_t *r0, const MpcModelState_t *s0,
-    const MpcTrajectorySample_t *r1, const MpcModelState_t *s1,
-    int prediction_index, float *slack_m)
-{
-    if (!model || !model->world_sweep_check || !r0 || !r1 ||
-        !s0 || !s1 || !slack_m) return 0;
-    const double yaw0=r0->heading+s0->e_psi;
-    const double yaw1=r1->heading+s1->e_psi;
-    const double x0=r0->x-sin(r0->heading)*s0->e_y;
-    const double y0=r0->y+cos(r0->heading)*s0->e_y;
-    const double x1=r1->x-sin(r1->heading)*s1->e_y;
-    const double y1=r1->y+cos(r1->heading)*s1->e_y;
-    const double required_margin=prediction_index==1
-        ? model->first_prediction_corridor_margin_m
-        : model->corridor_margin_m;
-    return model->world_sweep_check(model->world_sweep_context,
-        x0,y0,yaw0,x1,y1,yaw1,required_margin,slack_m)==1 &&
-        isfinite(*slack_m) && *slack_m>=0.0f;
-}
-
-static int world_sweep_clearance(
-    const MpcRtiConfiguration_t *model,
-    const MpcTrajectorySample_t *trajectory,size_t count,double lap_length,
-    double p0,const MpcModelState_t *s0,
-    double p1,const MpcModelState_t *s1,
-    int prediction_index,float *slack_m)
-{
-    if (!model || !model->world_sweep_check || !s0 || !s1)
-        return 0;
-    MpcTrajectorySample_t r0{}, r1{};
-    if (!mpc_trajectory_sample(trajectory,count,lap_length,p0,&r0) ||
-        !mpc_trajectory_sample(trajectory,count,lap_length,p1,&r1))
-        return 0;
-    return world_sweep_clearance_from_samples(
-        model,&r0,s0,&r1,s1,prediction_index,slack_m);
-}
-
 static void record_rollout_failure(
     MpcRtiRolloutFailure_t *failure,
     int stage,
@@ -1093,32 +1038,6 @@ static int mpc_rti_build_nominal_impl(
     // the accepted trajectory can still contain full-lock command reversals.
     // Project only the NOMINAL command seed, then evaluate it with the SAME
     // exact nonlinear plant as the candidate. No extra rollout or fallback.
-    if (configuration->command_increment_qp_enabled) {
-        float prev_s=configuration->source_reachable_steering_qp
-            ? current_state->plant.actual_steering_angle
-            : current_state->plant.delayed_steering_command_2;
-        float prev_t=current_state->plant.delayed_throttle_command_2;
-        const float steering_limit=mpc_source_nominal_steering_step_limit(
-            configuration,prediction_dt);
-        for (int k=0;k<horizon;++k) {
-            auto &u=nominal->controls[k];
-            u.steering_target_rad=clampf_rti(
-                u.steering_target_rad,
-                fmaxf(-configuration->max_steering_rad,
-                      prev_s-steering_limit),
-                fminf(configuration->max_steering_rad,
-                      prev_s+steering_limit));
-            u.throttle_command=clampf_rti(
-                u.throttle_command,
-                fmaxf(MPC_THROTTLE_MIN_DRIVE,
-                      prev_t-configuration->max_throttle_command_step),
-                fminf(MPC_THROTTLE_MAX,
-                      prev_t+configuration->max_throttle_command_step));
-            prev_s=u.steering_target_rad;
-            prev_t=u.throttle_command;
-        }
-    }
-
     /* Physical motion no longer depends on an approximate curvature pass.
      * One exact loaded-frame rollout gives both the nominal states and their
      * final progress, so the old reference/second-rollout pass is redundant. */
@@ -1248,11 +1167,10 @@ static MpcRtiRolloutStatus_t rollout_candidate_impl(
     double candidate_progress[PREDICTION_HORIZON + 1] = {0.0};
     candidate_progress[0] = initial_progress;
     MpcRtiReference_t candidate_reference = {};
-    MpcTrajectorySample_t current_world_sample = {};
     if (!reference_at_progress_with_sample(
             trajectory, trajectory_count, lap_length,
             candidate_progress[0], configuration, &candidate_reference,
-            configuration->world_sweep_check ? &current_world_sample : NULL))
+            NULL))
         return MPC_RTI_ROLLOUT_INVALID_INPUT;
     if (nominal_references)
         candidate_reference.u = nominal_references[0].u;
@@ -1354,12 +1272,10 @@ static MpcRtiRolloutStatus_t rollout_candidate_impl(
             if (failure_stage) *failure_stage = k;
             return MPC_RTI_ROLLOUT_STATE_LIMIT;
         }
-        MpcTrajectorySample_t next_world_sample = {};
         if (!reference_at_progress_with_sample(
                 trajectory, trajectory_count, lap_length,
                 candidate_progress[k + 1], configuration, &candidate_reference,
-                configuration->world_sweep_check ? &next_world_sample : NULL,
-                &projected_sample)) {
+                NULL, &projected_sample)) {
             if (failure_stage) *failure_stage = k;
             return MPC_RTI_ROLLOUT_INVALID_INPUT;
         }
@@ -1406,17 +1322,6 @@ static MpcRtiRolloutStatus_t rollout_candidate_impl(
             lower_bound <= upper_bound &&
             states[k + 1].plant.e_y >= lower_bound &&
             states[k + 1].plant.e_y <= upper_bound;
-        if (configuration->world_sweep_check &&
-            (!configuration->world_map_rejection_only || !in_corridor)) {
-            float world_slack=-INFINITY;
-            in_corridor = world_sweep_clearance_from_samples(
-                configuration,&current_world_sample,&states[k].plant,
-                &next_world_sample,&states[k+1].plant,
-                k+1,&world_slack);
-            if (path_delta)
-                path_delta->lower_corridor_slack_m[k+1]=
-                    path_delta->upper_corridor_slack_m[k+1]=world_slack;
-        }
         if (!in_corridor) {
             if (failure_stage) *failure_stage = k;
             record_rollout_failure(failure, k, &states[k + 1],
@@ -1424,10 +1329,6 @@ static MpcRtiRolloutStatus_t rollout_candidate_impl(
                 fmaxf(margin.left, margin.right), lower_bound, upper_bound);
             return MPC_RTI_ROLLOUT_CORRIDOR;
         }
-        /* Preserve the exact interpolated geometry for the next movement.
-         * This copy is small and occurs once per source-plant step. */
-        if (configuration->world_sweep_check)
-            current_world_sample = next_world_sample;
     }
     if (path_delta) path_delta->sampled_references_valid = 1;
     return MPC_RTI_ROLLOUT_OK;
@@ -1488,20 +1389,10 @@ static int valid_cycle_configuration(
 {
     if(!cfg || cfg->command_epoch_ns<0 ||
        !valid_configuration(&cfg->model) ||
-       !cfg->source_exact_nlp_live ||
-       !cfg->source_exact_nlp_constrained_qp ||
-       !cfg->source_exact_nlp_full_step_sqp ||
-       cfg->source_exact_nlp_iterations<1 ||
-       cfg->source_exact_nlp_iterations>8 ||
-       !isfinite(cfg->source_exact_nlp_qp_regularization) ||
-       cfg->source_exact_nlp_qp_regularization<=0.f ||
-       cfg->source_exact_nlp_qp_regularization>100000.f ||
-       !isfinite(cfg->source_exact_nlp_qp_soft_weight) ||
-       cfg->source_exact_nlp_qp_soft_weight<=0.f ||
-       cfg->source_exact_nlp_qp_soft_weight>1.e9f ||
-       !isfinite(cfg->source_exact_nlp_extra_clearance_m) ||
-       cfg->source_exact_nlp_extra_clearance_m<0.f ||
-       cfg->source_exact_nlp_extra_clearance_m>.1f ||
+       cfg->sqp_iterations<1 || cfg->sqp_iterations>8 ||
+       !isfinite(cfg->sqp_violation_penalty) ||
+       cfg->sqp_violation_penalty<=0.f ||
+       cfg->sqp_violation_penalty>1.e9f ||
        !finite_nonnegative(cfg->max_cycle_time_us) ||
        !finite_nonnegative(cfg->absolute_deadline_monotonic_us))
         return 0;
@@ -1657,23 +1548,10 @@ static int evaluate_nonlinear_candidate(
             }
             const int frenet_ok=bounds_ok &&
                 lower_slack>=0.0f && upper_slack>=0.0f;
-            if (model->world_sweep_check &&
-                (!model->world_map_rejection_only || !frenet_ok)) {
-                float world_slack=-INFINITY;
-                if (!world_sweep_clearance(model,trajectory,trajectory_count,
-                        lap_length,candidate->progress[k-1],
-                        &candidate->states[k-1].plant,candidate->progress[k],
-                        &candidate->states[k].plant,k,&world_slack) &&
-                    !allow_hard_constraint_violations_for_metrics)
-                    return 0;
-                stage_corridor_slack=world_slack;
-                min_slack=fminf(min_slack,world_slack);
-            } else {
-                if (!frenet_ok && !allow_hard_constraint_violations_for_metrics)
-                    return 0;
-                stage_corridor_slack=fminf(lower_slack,upper_slack);
-                min_slack=fminf(min_slack,stage_corridor_slack);
-            }
+            if (!frenet_ok && !allow_hard_constraint_violations_for_metrics)
+                return 0;
+            stage_corridor_slack = fminf(lower_slack, upper_slack);
+            min_slack = fminf(min_slack, stage_corridor_slack);
         }
         const MpcModelState_t *state = &candidate->states[k].plant;
         const double terminal_scale = k == candidate->horizon
@@ -1960,14 +1838,14 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     // One anytime trust-region SQP over the exact source rollout. The best
     // exactly verified iterate is always returned; the cycle publishes it
     // when feasible and the publication deadline still holds.
-    constexpr double kPublishReserveUs = 5000.;
+    constexpr double kPublishReserveUs = 3500.;
     constexpr double kFirstIterationEstimateUs = 4000.;
     const double solve_begin = monotonic_microseconds();
 
     sdu_apex::source_sqp::Options options{};
-    options.maximum_iterations = configuration->source_exact_nlp_iterations;
+    options.maximum_iterations = configuration->sqp_iterations;
     options.same_epoch_nominal = &nominal;
-    options.violation_penalty = configuration->source_exact_nlp_qp_soft_weight;
+    options.violation_penalty = configuration->sqp_violation_penalty;
     if (memory->sqp_radius > 0.) options.radius = memory->sqp_radius;
     options.deadline_us = deadline_us > 0.
         ? std::max(0., deadline_us - kPublishReserveUs) : 0.;
@@ -2075,6 +1953,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     result->source_optimized_control_count = horizon;
     std::copy_n(final_controls, horizon, result->source_optimized_controls);
 
+    result->first_control = result->candidate_controls[0];
     result->published_steering_command = result->first_control.steering_target_rad;
     result->published_throttle = result->first_control.throttle_command;
     memory->nominal = *checked;

@@ -244,6 +244,49 @@ public:
             "weight_throttle_command", 0.1f);
         rti_config_.model.weight_steering_slew = declare_weight(
             "weight_steering_slew", 2000.0f);
+        rti_config_.model.weight_throttle_slew = declare_weight(
+            "weight_throttle_slew", 50.0f);
+        rti_config_.model.startup_nominal_throttle_seed = static_cast<float>(
+            declare_parameter<double>("startup_nominal_throttle_seed", 0.25));
+        rti_config_.model.terminal_multiplier = declare_weight(
+            "terminal_multiplier", 3.0f);
+        rti_config_.capture_source_benchmark =
+            declare_parameter<bool>("capture_source_benchmark", false) ? 1 : 0;
+        rti_config_.sqp_iterations = std::clamp<int>(
+            declare_parameter<int>("sqp_iterations", 4), 1, 8);
+        rti_config_.sqp_violation_penalty = static_cast<float>(
+            declare_parameter<double>("sqp_violation_penalty", 1.e6));
+        if (!std::isfinite(rti_config_.sqp_violation_penalty) ||
+            rti_config_.sqp_violation_penalty <= 0.f ||
+            rti_config_.sqp_violation_penalty > 1.e9f)
+            throw std::runtime_error("sqp_violation_penalty must be in (0,1e9]");
+        rti_config_.model.max_speed_mps = static_cast<float>(max_speed_mps_);
+        rti_config_.model.active_speed_ceiling_mps =
+            static_cast<float>(max_speed_mps_);
+        actuator_steering_limit_rad_ = declare_parameter<double>(
+            "max_steering_rad", SOURCE_MAX_STEERING_RAD);
+        rti_config_.model.max_steering_rad = static_cast<float>(
+            actuator_steering_limit_rad_);
+        rti_config_.model.corridor_margin_m = static_cast<float>(
+            declare_parameter<double>("corridor_margin_m",
+                                      MPC_DEFAULT_WALL_CLEARANCE_M));
+        rti_config_.model.first_prediction_corridor_margin_m =
+            static_cast<float>(declare_parameter<double>(
+                "first_prediction_corridor_margin_m",
+                rti_config_.model.corridor_margin_m));
+        rti_config_.model.corridor_preview_halfwidth_m = static_cast<float>(
+            declare_parameter<double>("corridor_preview_halfwidth_m", 0.10));
+        rti_config_.model.nonlinear_corridor_tolerance_m = static_cast<float>(
+            declare_parameter<double>("nonlinear_corridor_tolerance_m", 0.005));
+        rti_config_.model.jacobian_threads = static_cast<int>(std::clamp<long>(
+            declare_parameter<int>("jacobian_threads", 8), 0L,
+            MPC_RTI_MAX_JACOBIAN_THREADS));
+        const double rti_cycle_budget_ms = declare_parameter<double>(
+            "rti_cycle_budget_ms", 22.0);
+        if (!std::isfinite(rti_cycle_budget_ms) || rti_cycle_budget_ms < 0.0) {
+            throw std::runtime_error(
+                "rti_cycle_budget_ms must be finite and nonnegative");
+        }
         rti_config_.max_cycle_time_us = rti_cycle_budget_ms * 1000.0;
         end_to_end_cycle_budget_ms_ = declare_parameter<double>(
             "end_to_end_cycle_budget_ms", 22.0);
@@ -266,18 +309,9 @@ public:
         last_command_publication_lead_ns_ = static_cast<int64_t>(
             std::llround(initial_command_publication_lead_ms * 1.0e6));
         RCLCPP_INFO(get_logger(),
-            "Source-exact full-step SQP: max_iterations=%d "
-            "curvature=%.1f soft_physical_weight=%.1f "
-            "clearance=%.3fm budget=%.1f/%.1fms "
-            "full_command_range=[%.5f,%.5f]",
-            rti_config_.source_exact_nlp_iterations,
-            rti_config_.source_exact_nlp_qp_regularization,
-            rti_config_.source_exact_nlp_qp_soft_weight,
-            rti_config_.source_exact_nlp_extra_clearance_m,
-            rti_config_.max_cycle_time_us/1000.,
-            end_to_end_cycle_budget_ms_,
-            rti_config_.model.max_steering_command_step_rad,
-            rti_config_.model.max_throttle_command_step);
+            "Source SQP: max_iterations=%d violation_penalty=%.3g budget=%.1f/%.1fms",
+            rti_config_.sqp_iterations,rti_config_.sqp_violation_penalty,
+            rti_config_.max_cycle_time_us/1000.,end_to_end_cycle_budget_ms_);
         mpc_rti_memory_reset(&rti_memory_);
         trajectory_loaded_ = load_trajectory(trajectory_file_);
         if (!trajectory_loaded_) {
