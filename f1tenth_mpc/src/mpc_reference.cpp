@@ -357,63 +357,6 @@ int mpc_trajectory_advance_tracking_with_progress(
         progress_seed, next_progress, next_ey, next_epsi, jacobian, nullptr);
 }
 
-int mpc_trajectory_tracking_path_curvature(
-    const MpcTrajectorySample_t *points,size_t count,double length,
-    double progress,float ey,float epsi,const float body[3],
-    double end_progress,float end_ey,
-    const double first[6],const double second[6],
-    double output_first[3],double output_second[3],int *reference_knots)
-{
-    if(!body||!first||!second||!output_first||!output_second||
-       !isfinite(ey)||!isfinite(epsi)||!isfinite(end_ey))return 0;
-    for(int i=0;i<6;++i)
-        if(!isfinite(first[i])||!isfinite(second[i]))return 0;
-    for(int i=0;i<3;++i)if(!isfinite(body[i]))return 0;
-    MpcTrajectorySample_t start{},end{};
-    MpcTrajectoryProgressDifferential_t start_slopes{},end_slopes{};
-    if(!sample_with_frame(points,count,length,progress,&start,nullptr)||
-       !sample_with_frame(points,count,length,end_progress,&end,nullptr)||
-       !mpc_trajectory_sample_progress_differential(points,count,length,progress,&start_slopes)||
-       !mpc_trajectory_sample_progress_differential(points,count,length,end_progress,&end_slopes))return 0;
-    const double start_sign=first[5]!=0.?first[5]:second[5];
-    const auto &slope0=start_sign<0.?start_slopes.backward:start_slopes.forward;
-    const double c0=cos(start.heading),s0=sin(start.heading);
-    const double cb=cos(start.heading+epsi),sb=sin(start.heading+epsi);
-    const double yaw1=slope0.heading*first[5]+first[1];
-    const double yaw2=slope0.heading*second[5]+second[1];
-    const double heading1=slope0.heading*first[5];
-    const double heading2=slope0.heading*second[5];
-    const double bx=cb*body[0]-sb*body[1],by=sb*body[0]+cb*body[1];
-    const double dx1=cb*first[2]-sb*first[3],dy1=sb*first[2]+cb*first[3];
-    const double px1=slope0.x*first[5]-s0*first[0]-c0*ey*heading1+dx1-by*yaw1;
-    const double py1=slope0.y*first[5]+c0*first[0]-s0*ey*heading1+dy1+bx*yaw1;
-    const double px2=slope0.x*second[5]-s0*second[0]-2.*c0*heading1*first[0]+
-        s0*ey*heading1*heading1-c0*ey*heading2+
-        cb*second[2]-sb*second[3]-2.*dy1*yaw1-by*yaw2-bx*yaw1*yaw1;
-    const double py2=slope0.y*second[5]+c0*second[0]-2.*s0*heading1*first[0]-
-        c0*ey*heading1*heading1-s0*ey*heading2+
-        sb*second[2]+cb*second[3]+2.*dx1*yaw1+bx*yaw2-by*yaw1*yaw1;
-    const double c=cos(end.heading),s=sin(end.heading);
-    const double numerator=c*px1+s*py1;
-    const double end_sign=numerator!=0.?numerator:c*px2+s*py2;
-    const auto &slope=end_sign<0.?end_slopes.backward:end_slopes.forward;
-    const double a=c*slope.x+s*slope.y-slope.heading*end_ey;
-    const double b=-s*slope.x+c*slope.y;
-    if(!(a>.05))return 0; // Same invertibility requirement as source projection.
-    const double ds=numerator/a;
-    const double dey=-s*px1+c*py1-b*ds;
-    const double dds=(c*px2+s*py2+2.*slope.heading*ds*dey)/a;
-    output_first[0]=dey;
-    output_first[1]=yaw1+first[4]-slope.heading*ds;
-    output_first[2]=ds;
-    output_second[0]=-s*px2+c*py2+end_ey*pow(slope.heading*ds,2)-b*dds;
-    output_second[1]=yaw2+second[4]-slope.heading*dds;
-    output_second[2]=dds;
-    if(reference_knots)*reference_knots=start_slopes.at_knot+end_slopes.at_knot;
-    for(int i=0;i<3;++i)
-        if(!isfinite(output_first[i])||!isfinite(output_second[i]))return 0;
-    return 1;
-}
 
 int mpc_trajectory_advance_tracking(
     const MpcTrajectorySample_t *points, size_t count, double length,

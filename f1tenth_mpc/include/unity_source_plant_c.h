@@ -106,11 +106,6 @@ int unity_source_plant_step_c(const UnitySourcePlantInputC *input,
                               double duration_s,
                               UnitySourcePlantOutputC *output);
 
-/* Recompute source-geometry suspension jounce after an observer corrects the
- * body state. Mutates only state[14..17] and suspension_history_initialized. */
-int unity_source_plant_reconcile_suspension_jounce_c(
-    double state[UNITY_SOURCE_PLANT_STATE_SIZE],
-    int *suspension_history_initialized);
 
 /* Branch-local forward-mode derivatives of the exact same source plant. Each
  * direction seeds one or more state/command entries; the returned columns
@@ -151,12 +146,6 @@ typedef struct {
   int discrete_substep_schedule_switches;
   int valid_one_sided_directional;
 } UnitySourceDirectionalBranchReportC;
-int unity_source_plant_step_one_sided_directional_c(
-    const UnitySourcePlantInputC *input,double duration_s,
-    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
-    const double direction_control[2],
-    UnitySourcePlantDirectionalCurvatureC *out,
-    UnitySourceDirectionalBranchReportC *report);
 
 /* Includes A*x'' in the same branch-selected Jet2 pass. A null report
  * retains nominal branch selection; otherwise uses one-sided semantics. */
@@ -192,11 +181,6 @@ typedef struct {
   int first_changed_wheel;
   int valid;
 } UnitySourcePhysicalBranchComparisonC;
-int unity_source_plant_compare_physical_branches_c(
-    const UnitySourcePlantInputC *original,
-    const UnitySourcePlantInputC *candidate,
-    double duration_s,
-    UnitySourcePhysicalBranchComparisonC *out);
 
 /* Exact source wheel-contact lateral slip at this state, without
  * advancing the plant. No ABI changes to existing step/sensitivity structs. */
@@ -243,10 +227,6 @@ typedef struct {
     int wheel;
     double positive_excess_mps;
 } UnitySourceSlipSubstepC;
-int unity_source_plant_all_slip_substeps_c(
-    const UnitySourcePlantInputC *input,double duration_s,
-    UnitySourceSlipSubstepC *samples,int capacity,int *count,
-    double exact_source_maximum[4]);
 
 /* Source AD of every ORIGINAL internal tire-slip substep.
  * The caller selects up to 20 independent source-state/command directions.
@@ -258,23 +238,7 @@ typedef struct {
     UnitySourceSlipSubstepC original;
     double derivative[UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH];
 } UnitySourceSlipSubstepSensitivityC;
-int unity_source_plant_all_slip_substep_sensitivity_c(
-    const UnitySourcePlantInputC *input,double duration_s,
-    const UnitySourcePlantSensitivitySeedsC *seeds,
-    UnitySourceSlipSubstepSensitivityC *samples,int capacity,int *count);
 
-/* One authoritative source-plant AD interval simultaneously returns the
- * source-exact 26-state/body/maximum-slip tangent AND every ORIGINAL
- * 0.2ms/1ms tire slip-substep AD row in the same physical source pass.
- * This avoids independent source evaluations choosing inconsistent
- * tire/contact branches for dynamics versus epigraph constraints.
- */
-int unity_source_plant_full_and_substep_sensitivity_c(
-    const UnitySourcePlantInputC *input,double duration_s,
-    const UnitySourcePlantSensitivitySeedsC *seeds,
-    UnitySourcePlantSensitivityC *out,
-    UnitySourceSlipSubstepSensitivityC *samples,
-    int capacity,int *count);
 
 int unity_source_plant_peak_slip_trace_c(
     const UnitySourcePlantInputC *input,double duration_s,

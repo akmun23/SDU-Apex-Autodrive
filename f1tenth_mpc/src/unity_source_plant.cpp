@@ -2396,18 +2396,6 @@ bool unity_source_plant_step_with_directional_curvature(
       state,input,duration_s,ds,{},du,output,nullptr);
 }
 
-bool unity_source_plant_step_one_sided_directional(
-    const UnitySourcePlantState &state,
-    const UnitySourcePlantInput &input,double duration_s,
-    const std::array<double,kUnityPlantSensitivityStateSize> &ds,
-    const std::array<double,2> &du,
-    UnitySourcePlantDirectionalCurvature *output,
-    UnitySourceDirectionalBranchReport *branch_report)
-{
-  if(!branch_report)return false;
-  return source_step_with_directional_curvature_impl(
-      state,input,duration_s,ds,{},du,output,branch_report);
-}
 
 bool unity_source_plant_step_path_curvature(
     const UnitySourcePlantState &state,const UnitySourcePlantInput &input,

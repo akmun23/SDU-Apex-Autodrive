@@ -170,60 +170,15 @@ typedef struct
     double second_slip_excess_mps[4];
 } MpcSourceDirectionalSecondOrder_t;
 
-int vehicle_model_full_source_interval_directional_second_order(
-    const MpcModelState_t *state,const MpcModelControl_t *control,
-    float dt,
-    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
-    const double direction_control[2],double epsilon,
-    MpcSourceDirectionalSecondOrder_t *out);
 
-/* Branch-local analytic second directional source derivative. This is
- * distinct from the three-probe independent FD oracle above. It computes
- * the selected source branch in ONE full interval and keeps both physical
- * steering and throttle directions coupled. No SQP switch or publication. */
-int vehicle_model_full_source_interval_analytic_directional_second_order(
-    const MpcModelState_t *state,const MpcModelControl_t *control,
-    float dt,
-    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
-    const double direction_control[2],
-    MpcSourceDirectionalSecondOrder_t *out);
 
 /* Seed missing wheel/suspension state for explicit cold-start use. */
 int vehicle_model_initialize_plant_state(MpcModelState_t *state);
 
-/* Unity-source tire slip metrics for the current MPC plant state. */
-/* Exact source WheelHit instantaneous lateral-slip directional curvature.
- * Inputs are the 26-source-coordinate first and second horizon tangents
- * (not the reduced state). Uses source contact geometry and Jet2, not FD. */
-/* Exact original substep tire-slip maximum/active-branch trace.
- * Offline diagnostic only. No duplicate source-plant implementation. */
-/* All real internal source substep slip-penalty features. Used for
- * a nonlinear epigraph representation of the actual source maximum. */
-int vehicle_model_source_slip_substeps(
-    const MpcModelState_t *state,const MpcModelControl_t *control,
-    float dt,UnitySourceSlipSubstepC *samples,int capacity,
-    int *count,double source_maximum[4]);
 
-int vehicle_model_source_slip_substep_sensitivities(
-    const MpcModelState_t *state,const MpcModelControl_t *control,
-    float dt,const double seed_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
-    const double seed_control[2][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
-    UnitySourceSlipSubstepSensitivityC *samples,int capacity,int *count);
 
-int vehicle_model_trace_peak_longitudinal_slip(
-    const MpcModelState_t *state,const MpcModelControl_t *control,
-    float dt,UnitySourcePeakSlipTraceC out[4]);
 
-int vehicle_model_source_lateral_slip_second(
-    const MpcModelState_t *state,
-    const double first_source[UNITY_SOURCE_PLANT_STATE_SIZE],
-    const double second_source[UNITY_SOURCE_PLANT_STATE_SIZE],
-    double lateral_slip[4],double first_slip[4],double second_slip[4]);
 
-int vehicle_model_longitudinal_slip_excess(
-    const MpcModelState_t *state,
-    double excess_speed_mps[4],
-    double excess_derivative_wheel_omega[4]);
 
 /* Front/rear lateral tire slip from the EXACT native source wheel-contact
  * geometry at this full physical state. Optional 4x20 Jacobian is with
@@ -272,10 +227,6 @@ int vehicle_model_set_parameters(const VehicleParameters_t *parameters);
 /* Geometric initial steering seed. The four-wheel plant computes yaw response. */
 float vehicle_model_steering_for_curvature(float curvature_radpm);
 
-/* Apply the controller's temporary target-speed ceiling to every nonlinear
- * and linearized model step.  This is a command-policy limit, not a change to
- * the Unity vehicle physics or the project-wide 16 m/s model envelope. */
-float vehicle_model_get_active_target_speed_ceiling(void);
 int vehicle_model_set_active_target_speed_ceiling(float ceiling_mps);
 
 #ifdef __cplusplus

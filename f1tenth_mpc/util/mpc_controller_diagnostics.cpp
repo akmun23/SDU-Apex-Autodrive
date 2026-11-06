@@ -66,39 +66,29 @@ void MpcControllerNode::publish_cycle_diagnostics(
         const auto &in=result.source_iteration_metrics[i];
         json<<"{\"iteration\":"<<i
             <<",\"accepted\":"<<(in.accepted?"true":"false")
-            <<",\"full_step_evaluated\":"<<(in.full_step_evaluated?"true":"false")
-            <<",\"full_step_accepted\":"<<(in.full_step_accepted?"true":"false")
-            <<",\"qp_converged\":"<<(in.qp_converged?"true":"false")
-            <<",\"original_duals_trustworthy\":"<<(in.original_duals_trustworthy?"true":"false")
-            <<",\"invalid_qp_duals_discarded\":"<<(in.invalid_qp_duals_discarded?"true":"false")
-            <<",\"qp_iterations\":"<<in.qp_iterations;
+            <<",\"full_step_evaluated\":"<<(in.trial_evaluated?"true":"false")
+            <<",\"rejected_trials\":"<<in.rejected_trials
+            <<",\"radius_active\":"<<(in.radius_active?"true":"false")
+            <<",\"qp_iterations\":"<<in.qp_iterations
+            <<",\"qp_rounds\":"<<in.qp_rounds
+            <<",\"newly_activated_slip_wheels\":"<<in.newly_activated_slip_wheels;
         const auto field=[&](const char *name,double value) {
             json<<",\""<<name<<"\":";finite_json(json,value);
         };
+        field("radius",in.radius);
         field("linearization_ms",in.linearization_ms);
         field("qp_ms",in.qp_ms);
-        field("source_rollout_ms",in.source_rollout_ms);
+        field("rollout_ms",in.rollout_ms);
         field("total_ms",in.total_ms);
-        field("original_cost_before",in.cost_before);
-        field("original_cost_after",in.cost_after);
-        field("line_search_alpha",in.accepted?in.accepted_step_length:NAN);
-        field("qp_primal_residual",in.qp_converged?in.qp_primal_residual:NAN);
-        field("qp_dual_residual",in.qp_converged?in.qp_dual_residual:NAN);
-        field("initial_nlp_stationarity_inf",in.original_duals_trustworthy?in.stationarity_inf:NAN);
-        field("initial_nlp_complementarity_inf",in.original_duals_trustworthy?in.complementarity_inf:NAN);
-        field("qp_predicted_cost_change",in.full_step_evaluated?in.predicted_cost_change:NAN);
-        field("full_step_original_cost",in.full_step_evaluated?in.full_step_cost:NAN);
-        field("full_step_cost_prediction_error",in.full_step_evaluated?
-            in.full_step_cost-in.cost_before-in.predicted_cost_change:NAN);
-        field("maximum_footprint_prediction_error_m",in.full_step_evaluated?
-            in.maximum_footprint_prediction_error_m:NAN);
-        field("qp_regularization_used",in.qp_regularization_used);
-        field("model_actual_over_predicted_reduction",in.full_step_evaluated?
-            in.model_actual_over_predicted_reduction:NAN);
-        field("source_peak_slip_cost_before",in.source_peak_slip_cost_before);
-        field("source_peak_slip_cost_full_step",in.full_step_evaluated?
-            in.source_peak_slip_cost_full_step:NAN);
-        json<<",\"newly_activated_peak_slip_wheels\":"<<in.newly_activated_peak_slip_wheels;
+        field("cost_before",in.cost_before);
+        field("cost_after",in.cost_after);
+        field("predicted_cost_change",-in.predicted_reduction);
+        field("full_step_cost",in.trial_evaluated?in.cost_trial:NAN);
+        field("full_step_cost_prediction_error",in.trial_evaluated?
+            in.cost_trial-in.cost_before+in.predicted_reduction:NAN);
+        field("actual_over_predicted",in.trial_evaluated?in.actual_over_predicted:NAN);
+        field("slip_cost_before",in.slip_cost_before);
+        field("slip_cost_trial",in.trial_evaluated?in.slip_cost_trial:NAN);
         json<<'}';
     }
     json<<']';
@@ -242,6 +232,12 @@ void MpcControllerNode::publish_cycle_diagnostics(
         <<",\"synchronize\":"<<synchronize_steady_ns<<"}"
         <<",\"solve_us\":";
     finite_json(json,solve_us);
+    json<<",\"nominal_build_us\":";
+    finite_json(json,result.nominal_build_us);
+    json<<",\"sqp_us\":";
+    finite_json(json,result.total_solve_us);
+    json<<",\"validation_us\":";
+    finite_json(json,result.validation_us);
     json<<",\"end_to_end_control_ms\":";
     finite_json(json,
         std::max(0.,double(steady_time_ns()-callback_steady_ns)*1.e-6));

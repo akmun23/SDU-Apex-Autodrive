@@ -4,9 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "mpc_rti_internal.hpp"
-#include "mpc_source_exact_offline_solver.hpp"
-#include "mpc_steering_variation.hpp"
-#include "mpc_tracking_tolerance.h"
+#include "mpc_source_sqp.hpp"
 #include "vehicle_model.h"
 
 #include <algorithm>
@@ -92,8 +90,6 @@ int valid_configuration(const MpcRtiConfiguration_t *configuration)
     const float weights[] = {
         configuration->weight_e_y,
         configuration->weight_e_psi,
-        configuration->tracking_lateral_tolerance_m,
-        configuration->tracking_heading_tolerance_rad,
         configuration->weight_u,
         configuration->weight_u_overspeed,
         configuration->overspeed_curvature_gain_m,
@@ -106,27 +102,17 @@ int valid_configuration(const MpcRtiConfiguration_t *configuration)
         configuration->weight_steering_target,
         configuration->weight_throttle_command,
         configuration->weight_steering_slew,
-        configuration->weight_steering_correction_variation,
         configuration->weight_throttle_slew,
-        configuration->max_steering_command_step_rad,
-        configuration->max_throttle_command_step,
         configuration->startup_nominal_throttle_seed,
         configuration->terminal_multiplier,
         configuration->corridor_margin_m,
         configuration->first_prediction_corridor_margin_m,
         configuration->corridor_preview_halfwidth_m,
-        configuration->reference_clearance_reserve_m,
-        configuration->near_wall_tracking_reserve_m,
-        configuration->weight_source_corridor_reserve,
-        configuration->weight_source_lateral_slip,
         configuration->nonlinear_corridor_tolerance_m};
     for (unsigned int i = 0; i < sizeof(weights) / sizeof(weights[0]); ++i)
         if (!finite_nonnegative(weights[i])) return 0;
 
-    return configuration->tracking_lateral_tolerance_m <= 0.15f &&
-        configuration->tracking_heading_tolerance_rad <= 0.15f &&
-        configuration->near_wall_tracking_reserve_m <= 0.15f &&
-        configuration->overspeed_curvature_gain_m <= 10.0f &&
+    return configuration->overspeed_curvature_gain_m <= 10.0f &&
         configuration->underspeed_curvature_gain_m <= 10.0f &&
         configuration->jacobian_threads >= 0 &&
         configuration->jacobian_threads <= MPC_RTI_MAX_JACOBIAN_THREADS &&
@@ -140,25 +126,6 @@ int valid_configuration(const MpcRtiConfiguration_t *configuration)
             configuration->max_speed_mps &&
         configuration->startup_nominal_throttle_seed <=
             MPC_THROTTLE_MAX &&
-        // These constraints belong to the ORIGINAL source NLP, even
-        // without an incremental QP. A zero (leftover from removing the
-        // old parser) silently prohibits both steering and throttle.
-        configuration->max_steering_command_step_rad > 0.f &&
-        configuration->max_throttle_command_step > 0.f &&
-        (configuration->command_increment_qp_enabled == 0 ||
-         (configuration->command_increment_qp_enabled == 1 &&
-          configuration->max_steering_command_step_rad > 0.f &&
-          configuration->max_steering_command_step_rad <=
-              2.f * configuration->max_steering_rad &&
-          configuration->max_throttle_command_step > 0.f &&
-          configuration->max_throttle_command_step <= 1.f)) &&
-        (configuration->source_reachable_steering_qp == 0 ||
-         (configuration->source_reachable_steering_qp == 1 &&
-          configuration->command_increment_qp_enabled == 1)) &&
-        (configuration->weight_steering_correction_variation == 0.f ||
-         (isfinite(configuration->steering_correction_variation_epsilon_rad) &&
-          configuration->steering_correction_variation_epsilon_rad >= 0.005f &&
-          configuration->steering_correction_variation_epsilon_rad <= 0.10f)) &&
         isfinite(configuration->max_steering_rad) &&
         configuration->max_steering_rad > 0.0f &&
         configuration->max_steering_rad <= vehicle.max_steering_angle &&
@@ -387,34 +354,6 @@ int mpc_rti_reference_at_progress(
     return reference_at_progress_with_sample(
         trajectory, trajectory_count, lap_length, progress,
         configuration, reference, NULL);
-}
-
-int mpc_rti_source_command_rate_margins(
-    const MpcModelState_t *start,const MpcModelControl_t *command,
-    const MpcRtiConfiguration_t *configuration,double out[4])
-{
-    if(!start||!command||!configuration||!out ||
-       !isfinite(start->actual_steering_angle) ||
-       !isfinite(start->delayed_throttle_command_2) ||
-       !isfinite(command->steering_target_rad) ||
-       !isfinite(command->throttle_command) ||
-       !isfinite(configuration->max_steering_command_step_rad) ||
-       !isfinite(configuration->max_throttle_command_step))
-        return 0;
-    const double steering_difference=
-        double(command->steering_target_rad)-
-        double(start->actual_steering_angle);
-    const double throttle_difference=
-        double(command->throttle_command)-
-        double(start->delayed_throttle_command_2);
-    const double physical_steering_limit=
-        configuration->max_steering_command_step_rad;
-    const double throttle_limit=configuration->max_throttle_command_step;
-    out[0]=physical_steering_limit-steering_difference;
-    out[1]=physical_steering_limit+steering_difference;
-    out[2]=throttle_limit-throttle_difference;
-    out[3]=throttle_limit+throttle_difference;
-    return 1;
 }
 
 int mpc_rti_source_exact_stage(
@@ -734,97 +673,6 @@ static int corridor_reference_width_slopes(
            std::isfinite(*right_forward)&&std::isfinite(*right_backward);
 }
 
-int mpc_rti_corridor_differential_at_progress(
-    const MpcModelState_t *state,
-    const MpcTrajectorySample_t *trajectory,
-    size_t trajectory_count,double lap_length,double progress_m,
-    const MpcRtiConfiguration_t *configuration,int prediction_index,
-    MpcRtiCorridorDifferential_t *out)
-{
-    if(!state || !trajectory || !out || !configuration ||
-       !std::isfinite(progress_m) || !std::isfinite(lap_length) ||
-       lap_length<=0. || prediction_index<1 ||
-       prediction_index>PREDICTION_HORIZON ||
-       !std::isfinite(state->e_y) ||
-       !std::isfinite(state->e_psi))
-        return 0;
-
-    // The original corridor is a physical rear-axle rectangle:
-    //   lower = e_y + right_bound + tolerance - margin_right(e_psi)
-    //   upper = left_bound + tolerance - e_y - margin_left(e_psi).
-    // The active front/rear bumper changes at sin(e_psi)=0, while
-    // the lateral width has an |cos(e_psi)| switch at cos=0.
-    // Never pretend a classical derivative exists at those corners.
-    const double psi=state->e_psi;
-    const double sine=std::sin(psi),cosine=std::cos(psi);
-    if(std::abs(sine)<1.e-6 || std::abs(cosine)<1.e-6)
-        return 0;
-    MpcRtiReference_t center{};
-    if(!mpc_rti_reference_at_progress(trajectory,trajectory_count,
-          lap_length,progress_m,configuration,&center))
-        return 0;
-    MpcRtiCorridorDifferential_t result{};
-    float lower=NAN,upper=NAN;
-    if(!mpc_rti_compute_corridor_slack(
-          state,center.left_bound,center.right_bound,
-          configuration,prediction_index,&lower,&upper))
-        return 0;
-    result.margin_lower_m=lower;
-    result.margin_upper_m=upper;
-    result.lower_d_ey=1.;
-    result.upper_d_ey=-1.;
-    const double half_width=.5*double(MPC_CAR_WIDTH_M);
-    const double dcommon=-half_width*sine*(cosine>0.?1.:-1.);
-    const double front=MPC_REAR_AXLE_TO_FRONT_BUMPER_M;
-    const double rear=MPC_REAR_OVERHANG_M;
-    const double dleft=(front*sine > -rear*sine)
-        ?front*cosine:-rear*cosine;
-    const double dright=(-front*sine > rear*sine)
-        ?-front*cosine:rear*cosine;
-    result.lower_d_epsi=-dcommon-dright;
-    result.upper_d_epsi=-dcommon-dleft;
-
-    // Exact one-sided derivatives of the ORIGINAL loaded reference and
-    // preview-width min: the interpolation segment, knot extrema, heading
-    // footprint and physical source progress must be the same as the
-    // original nonlinear scorer. No arbitrary FD step or spline fitting.
-    if(!corridor_reference_width_slopes(
-          trajectory,trajectory_count,lap_length,progress_m,configuration,
-          &center,&result.upper_d_progress_forward,
-          &result.upper_d_progress_backward,
-          &result.lower_d_progress_forward,
-          &result.lower_d_progress_backward))
-        return 0;
-    result.progress_derivative_step_m=0.;
-    result.progress_slope_convergence_error=0.;
-    // Do not classify a true loaded-reference knot as smooth merely
-    // because the two valid segment slopes happen to differ by <0.05.
-    // This flag describes differentiability of the ORIGINAL interpolation,
-    // not an arbitrary engineering threshold for a large cost change.
-    const double lower_jump=std::abs(result.lower_d_progress_forward-
-                                      result.lower_d_progress_backward);
-    const double upper_jump=std::abs(result.upper_d_progress_forward-
-                                      result.upper_d_progress_backward);
-    const double lower_scale=std::max({1.,
-        std::abs(result.lower_d_progress_forward),
-        std::abs(result.lower_d_progress_backward)});
-    const double upper_scale=std::max({1.,
-        std::abs(result.upper_d_progress_forward),
-        std::abs(result.upper_d_progress_backward)});
-    result.progress_reference_kink=
-        lower_jump>1.e-10*lower_scale ||
-        upper_jump>1.e-10*upper_scale;
-    result.source_heading_active_branch=sine>0.?1:-1;
-    if(!std::isfinite(result.lower_d_epsi) ||
-       !std::isfinite(result.upper_d_epsi) ||
-       !std::isfinite(result.lower_d_progress_forward) ||
-       !std::isfinite(result.upper_d_progress_forward) ||
-       !std::isfinite(result.lower_d_progress_backward) ||
-       !std::isfinite(result.upper_d_progress_backward))
-        return 0;
-    *out=result;
-    return 1;
-}
 
 int mpc_rti_source_exact_corridor_corners(
     const MpcModelState_t *state,
@@ -1310,44 +1158,7 @@ static int mpc_rti_build_nominal_impl(
     return 1;
 }
 
-int mpc_rti_build_nominal(
-    const MpcRtiState_t *current_state,
-    double current_progress,
-    const MpcRtiNominal_t *previous_nominal,
-    const MpcTrajectorySample_t *trajectory,
-    size_t trajectory_count,
-    double lap_length,
-    float prediction_dt,
-    int horizon,
-    const MpcRtiConfiguration_t *configuration,
-    MpcRtiNominal_t *nominal,
-    MpcRtiReference_t references[PREDICTION_HORIZON + 1])
-{
-    return mpc_rti_build_nominal_impl(current_state, current_progress,
-        previous_nominal, NULL, 0, 1, 0, trajectory, trajectory_count, lap_length,
-        prediction_dt, horizon, configuration, nominal, references);
-}
 
-int mpc_rti_build_nominal_with_warm_start(
-    const MpcRtiState_t *current_state,
-    double current_progress,
-    const MpcRtiNominal_t *previous_nominal,
-    const MpcModelControl_t *warm_start_controls,
-    int warm_start_control_count,
-    const MpcTrajectorySample_t *trajectory,
-    size_t trajectory_count,
-    double lap_length,
-    float prediction_dt,
-    int horizon,
-    const MpcRtiConfiguration_t *configuration,
-    MpcRtiNominal_t *nominal,
-    MpcRtiReference_t references[PREDICTION_HORIZON + 1])
-{
-    return mpc_rti_build_nominal_impl(current_state, current_progress,
-        previous_nominal, warm_start_controls, warm_start_control_count, 1, 0,
-        trajectory, trajectory_count, lap_length, prediction_dt, horizon,
-        configuration, nominal, references);
-}
 
 int mpc_rti_build_nominal_same_epoch(
     const MpcRtiState_t *current_state,
@@ -1622,29 +1433,6 @@ static MpcRtiRolloutStatus_t rollout_candidate_impl(
     return MPC_RTI_ROLLOUT_OK;
 }
 
-MpcRtiRolloutStatus_t mpc_rti_rollout_candidate(
-    const MpcRtiState_t *initial_state,
-    double initial_progress,
-    const MpcModelControl_t controls[PREDICTION_HORIZON],
-    const MpcTrajectorySample_t *trajectory,
-    size_t trajectory_count,
-    double lap_length,
-    const MpcRtiReference_t nominal_references[PREDICTION_HORIZON + 1],
-    const double nominal_progress[PREDICTION_HORIZON + 1],
-    MpcRtiCandidatePathDelta_t *path_delta,
-    int horizon,
-    float prediction_dt,
-    const MpcRtiConfiguration_t *configuration,
-    MpcRtiState_t states[PREDICTION_HORIZON + 1],
-    double progress[PREDICTION_HORIZON + 1],
-    int *failure_stage)
-{
-    return rollout_candidate_impl(
-        initial_state, initial_progress, controls, trajectory,
-        trajectory_count, lap_length, nominal_references, nominal_progress,
-        path_delta, horizon, prediction_dt, configuration, states,
-        progress, NULL, NULL, failure_stage, NULL, NULL);
-}
 
 void mpc_rti_memory_reset(MpcRtiMemory_t *memory)
 {
@@ -1761,25 +1549,6 @@ int mpc_rti_build_objective_schedule(
     schedule->horizon = nominal->horizon;
     for (int k = 0; k <= nominal->horizon; ++k) {
         schedule->references[k] = references[k];
-        if (k > 0 && configuration->near_wall_tracking_reserve_m > 0.f) {
-            float lower_slack = NAN, upper_slack = NAN;
-            if (!mpc_rti_compute_corridor_slack(
-                    &nominal->states[k].plant, references[k].left_bound,
-                    references[k].right_bound, configuration, k,
-                    &lower_slack, &upper_slack)) return 0;
-            /* Compare with the hard body footprint, NOT the optional
-             * nonlinear-rollout acceptance tolerance. This provides a
-             * continuous inward target as the nominal enters the reserve,
-             * without creating a new hard feasibility boundary. The target
-             * is frozen for R1, R2, line search and source adjoint scoring. */
-            lower_slack -= configuration->nonlinear_corridor_tolerance_m;
-            upper_slack -= configuration->nonlinear_corridor_tolerance_m;
-            const float reserve = configuration->near_wall_tracking_reserve_m;
-            const float lower_deficit = fmaxf(0.f, reserve - lower_slack);
-            const float upper_deficit = fmaxf(0.f, reserve - upper_slack);
-            schedule->references[k].e_y += clampf_rti(
-                lower_deficit - upper_deficit, -reserve, reserve);
-        }
         schedule->speed_weights[k] = nominal->states[k].plant.u > references[k].u
             ? overspeed_weight_for_reference(configuration, &references[k])
             : underspeed_weight_for_reference(configuration, &references[k]);
@@ -1906,25 +1675,12 @@ static int evaluate_nonlinear_candidate(
                 min_slack=fminf(min_slack,stage_corridor_slack);
             }
         }
-        if(k>0 && model->weight_source_corridor_reserve>0.f &&
-           model->near_wall_tracking_reserve_m>0.f) {
-            /* Continuous physical viability pressure: zero inside the
-             * desired reserve, positive on the approach to the original hard
-             * footprint. This same active-plane hinge is linearized as PSD
-             * Gauss-Newton curvature in the normal source SQP. */
-            const double deficit=fmax(0.,
-                double(model->near_wall_tracking_reserve_m)-
-                stage_corridor_slack);
-            cost+=model->weight_source_corridor_reserve*deficit*deficit;
-        }
         const MpcModelState_t *state = &candidate->states[k].plant;
         const double terminal_scale = k == candidate->horizon
             ? model->terminal_multiplier : 1.0;
         const double errors[] = {
-            mpc_tracking_excess(state->e_y - reference->e_y,
-                model->tracking_lateral_tolerance_m),
-            mpc_tracking_excess(state->e_psi - reference->e_psi,
-                model->tracking_heading_tolerance_rad),
+            state->e_y - reference->e_y,
+            state->e_psi - reference->e_psi,
             state->u - reference->u,
             state->v - reference->v,
             state->r - reference->r,
@@ -1942,18 +1698,6 @@ static int evaluate_nonlinear_candidate(
         for (size_t i = 0; i < sizeof(errors) / sizeof(errors[0]); ++i)
             cost += terminal_scale * weights[i] * errors[i] * errors[i];
 
-        if (k > 0 && model->weight_source_lateral_slip>0.f) {
-            double lateral_slip[4]{};
-            if(!vehicle_model_source_lateral_slip(
-                   state,lateral_slip,nullptr))return 0;
-            for(int front=0;front<2;++front) {
-                const double excess=std::max(0.,
-                    std::abs(lateral_slip[front])-
-                    kMpcSourceFrontLateralSlipReserveRad);
-                cost+=terminal_scale*
-                    model->weight_source_lateral_slip*excess*excess;
-            }
-        }
         if (k > 0) {
             for (int wheel = 0; wheel < 4; ++wheel) {
                 const double excess =
@@ -1987,10 +1731,6 @@ static int evaluate_nonlinear_candidate(
                 &objective_references[k + 1]);
         cost += model->weight_steering_slew *
                 steering_correction_delta * steering_correction_delta +
-            mpc_steering_variation_exact_cost(
-                model->weight_steering_correction_variation,
-                model->steering_correction_variation_epsilon_rad,
-                steering_correction_delta) +
             model->weight_throttle_slew *
                 throttle_delta * throttle_delta;
         previous_steering = control->steering_target_rad;
@@ -2004,38 +1744,7 @@ static int evaluate_nonlinear_candidate(
     return 1;
 }
 
-int mpc_rti_score_candidate_plan(
-    MpcRtiNominal_t *candidate,
-    const MpcTrajectorySample_t *trajectory, size_t trajectory_count,
-    double lap_length, const MpcRtiCycleConfiguration_t *configuration)
-{
-    float accel = 0.0f;
-    int stage = 0;
-    float by_stage[PREDICTION_HORIZON + 1] = {};
-    if (!candidate) return 0;
-    return evaluate_nonlinear_candidate(candidate, trajectory, trajectory_count,
-        lap_length, configuration, &candidate->validation_objective,
-        &candidate->validation_minimum_corridor_slack_m, &accel, &stage,
-        by_stage, NULL);
-}
 
-int mpc_rti_score_candidate_plan_for_diagnostics(
-    const MpcRtiNominal_t *candidate,
-    const MpcTrajectorySample_t *trajectory, size_t trajectory_count,
-    double lap_length, const MpcRtiCycleConfiguration_t *configuration,
-    double *objective, float *minimum_corridor_slack_m)
-{
-    if (!candidate || !candidate->valid || !configuration || !objective ||
-        !minimum_corridor_slack_m) return 0;
-    float lateral_accel_proxy = 0.0f;
-    int lateral_accel_proxy_stage = -1;
-    float lateral_accel_proxy_by_stage[PREDICTION_HORIZON + 1] = {};
-    return evaluate_nonlinear_candidate(candidate, trajectory,
-        trajectory_count, lap_length, configuration, objective,
-        minimum_corridor_slack_m, &lateral_accel_proxy,
-        &lateral_accel_proxy_stage, lateral_accel_proxy_by_stage,
-        NULL, NULL, 1);
-}
 
 int mpc_rti_score_candidate_plan_and_corridor_for_diagnostics(
     const MpcRtiNominal_t *candidate,
@@ -2147,32 +1856,32 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         memset(result, 0, sizeof(*result));
         result->status = MPC_RTI_CYCLE_REJECTED_INPUT;
         result->source_solver_status = MPC_SOURCE_INVALID_MODEL;
-        result->admm_status = -1;
-        result->nonlinear_failure_reason = -1;
-        result->nonlinear_failure_stage = -1;
-        result->line_search_full_step_failure_reason = -1;
-        result->line_search_full_step_failure_stage = -1;
-        result->line_search_last_failure_reason = -1;
-        result->line_search_last_failure_stage = -1;
-        result->line_search_nominal_objective = NAN;
-        result->linearization_failure_stage = -1;
-        result->linearization_failure_index = -1;
-        result->state_primal_stage = -1;
-        result->state_primal_index = -1;
-        result->state_dual_stage = -1;
-        result->state_dual_index = -1;
-        result->input_primal_stage = -1;
-        result->input_primal_index = -1;
-        result->input_dual_stage = -1;
-        result->input_dual_index = -1;
-        result->minimum_predicted_corridor_slack_m = NAN;
-        result->lateral_accel_proxy_mps2 = NAN;
-        result->lateral_accel_proxy_stage = -1;
-        result->nonlinear_objective = NAN;
-        result->first_pass_objective=NAN;
-        result->second_pass_objective=NAN;
-        result->refinement_first_prefix_objective = NAN;
-        result->refinement_second_prefix_objective = NAN;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
         result->total_cycle_us = 0.0;
     }
     if (!result || !memory || !finite_rti_state(current_state) ||
@@ -2182,14 +1891,14 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         horizon != PREDICTION_HORIZON || !isfinite(prediction_dt) ||
         prediction_dt <= 0.0f) {
         if (result)
-            result->input_failure_reason = MPC_RTI_INPUT_FAILURE_CYCLE_ARGUMENTS;
+
         if (result) result->total_cycle_us = monotonic_microseconds() - cycle_start_us;
         return MPC_RTI_CYCLE_REJECTED_INPUT;
     }
 
     MpcRtiState_t prepared_state = *current_state;
     if (!vehicle_model_initialize_plant_state(&prepared_state.plant)) {
-        result->input_failure_reason = MPC_RTI_INPUT_FAILURE_PLANT_STATE;
+
         result->total_cycle_us = monotonic_microseconds() - cycle_start_us;
         return MPC_RTI_CYCLE_REJECTED_INPUT;
     }
@@ -2199,7 +1908,7 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
         ? mpc_rti_command_epoch_shift(memory->command_epoch_ns,
             configuration->command_epoch_ns,prediction_dt) : 1;
     if(epoch_shift<0) mpc_rti_memory_reset(memory);
-    result->command_epoch_shift_stages=epoch_shift;
+
     MpcRtiCycleConfiguration_t aligned_configuration=*configuration;
     configuration=&aligned_configuration;
     const double deadline_us =
@@ -2224,24 +1933,21 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     // Record these common measurements for both success and failure; only
     // failure diagnostics need an early return below.
     result->nominal_build_us = monotonic_microseconds() - nominal_start_us;
-    result->reference_seed_us = nominal.reference_seed_us;
-    result->cold_start_queue_seed_us = nominal.cold_start_queue_seed_us;
-    result->nominal_rollout_a_us = nominal.nominal_rollout_a_us;
-    result->progress_reference_resampling_us =
-        nominal.progress_reference_resampling_us;
+
+
+
+
     if (!nominal_built) {
-        result->input_failure_reason = MPC_RTI_INPUT_FAILURE_NOMINAL_BUILD;
-        result->nominal_build_failure_stage = nominal.build_failure_stage;
-        result->nominal_build_failure_constraint =
-            nominal.build_failure_constraint;
-        result->nominal_build_failure_index = nominal.build_failure_index;
+
+
+
+
         result->total_cycle_us = monotonic_microseconds() - cycle_start_us;
         return MPC_RTI_CYCLE_REJECTED_INPUT;
     }
     result->nominal_first_control = nominal.controls[0];
     result->nominal_control_count = horizon;
-    result->nominal_control_seed_source = warm_controls_valid ? 2 :
-        (memory->nominal.valid ? 1 : 0);
+
     memcpy(result->nominal_controls, nominal.controls,
         (size_t)horizon * sizeof(result->nominal_controls[0]));
 
@@ -2251,213 +1957,139 @@ MpcRtiCycleStatus_t mpc_rti_solve_cycle(
     MpcRtiCycleConfiguration_t comparison_configuration = *configuration;
     comparison_configuration.objective_schedule = &result->comparison_objective;
 
-    {
-        // One isolated source-exact optimization cycle. Source dynamics,
-        // objective, active tire/contact branches and ORIGINAL physical
-        // footprint/actuator inequalities come from the same sparse
-        // 29-state NLP. Unlike the older native reduced source QP, no
-        // quadratic racing cost determines the accepted command.
-        //
-        // This is explicitly opt-in and is NOT qualified for 40Hz yet.
-        // If a 25ms deadline is missed, publish no stale candidate and
-        // restore the previous warm-start memory without modifying the
-        // established practice/competition controller.
-        const double solve_begin=monotonic_microseconds();
-        result->source_exact_nlp_active=1;
-        sdu_apex::source_nlp::OfflineOptions opts{};
-        // The canonical source MPC preparation already integrated the
-        // identical 30-stage nominal in this command epoch; the exact
-        // optimizer can reuse its verified original physical prefix.
-        opts.initial_same_epoch_source_nominal=&nominal;
-        opts.record_primal_trace=configuration->capture_source_benchmark!=0;
-        opts.maximum_iterations=
-            configuration->source_exact_nlp_iterations;
-        opts.use_source_compact_qp_linearization=
-            configuration->source_exact_nlp_compact_qp!=0;
-        opts.source_qp_curvature_regularization=
-            configuration->source_exact_nlp_qp_regularization>0.f?
-            configuration->source_exact_nlp_qp_regularization:10000.;
-        opts.source_qp_soft_physical_weight=
-            configuration->source_exact_nlp_qp_soft_weight>0.f?
-            configuration->source_exact_nlp_qp_soft_weight:1.e6;
-        opts.minimum_source_clearance_m=
-            configuration->source_exact_nlp_extra_clearance_m;
-        // Exact source physics still enforces its ORIGINAL nonnegative
-        // body-corner corridor. The optional EXTRA clearance is stored
-        // in float geometry; ~0.2 micron rounding produced a spurious
-        // complete-corner rejection in a real Unity race. Only the extra
-        // reserve admits a submicron (0.5 um) numerical tolerance.
-        opts.allowable_corridor_violation_m=
-            opts.minimum_source_clearance_m>0.?5.e-7:0.;
-        // Do not start a complete source-AD iteration unless its normal
-        // execution budget remains. An exact-source-feasible current
-        // iterate is retained as the same NLP's latest verified solution.
-        opts.minimum_remaining_us_for_new_iteration=
-            deadline_us>0.?10500.:0.;
-        // A 3ms reserved interval covers independently re-simulating
-        // the final exact-source horizon and publishing its command.
-        // This deliberately avoids starting expensive late SQP work.
-        opts.absolute_deadline_monotonic_us=
-            deadline_us>0. ? std::max(0.,deadline_us-3000.):0.;
-        auto optimized=std::make_unique<sdu_apex::source_nlp::OfflineResult>();
-        const bool completed=
-            sdu_apex::source_nlp::optimize_offline_exact_source(
-                prepared_state,current_progress,trajectory,
-                trajectory_count,lap_length,prediction_dt,
-                comparison_configuration,nominal.controls,opts,
-                optimized.get());
-        result->total_solve_us=monotonic_microseconds()-solve_begin;
-        result->source_exact_nlp_deadline_exhausted=
-            optimized->deadline_exhausted;
-        result->source_solver_status=optimized->solver_status;
-        result->source_linearization_failed=optimized->linearization_failed;
-        result->source_qp_failed=optimized->qp_failed;
-        result->source_iteration_admission_stopped=optimized->iteration_admission_stopped;
-        result->source_exact_nlp_source_trial_evaluations=
-            optimized->source_trial_evaluations;
-        result->source_exact_nlp_accepted_iterations=
-            optimized->accepted_iterations;
-        result->source_exact_nlp_initial_source_feasible=
-            optimized->initial_source_feasible;
-        result->source_exact_nlp_final_source_feasible=
-            optimized->final_source_feasible;
-        result->source_exact_nlp_kkt_converged=
-            optimized->source_nlp_kkt_converged;
-        result->source_exact_nlp_full_step_stalled=
-            optimized->full_step_sqp_stalled;
-        result->source_exact_nlp_initial_source_cost=
-            optimized->initial_source_cost;
-        result->source_exact_nlp_final_source_cost=
-            optimized->final_source_cost;
-        result->source_exact_nlp_final_original_margin_m=
-            optimized->final_minimum_corridor_slack;
-        result->source_exact_nlp_final_original_violation=
-            optimized->final_exact_constraint_violation;
-        result->source_iteration_metrics_count=static_cast<int>(std::min(
-            optimized->history.size(),size_t(MPC_RTI_SOURCE_TRACE_CAPACITY)));
-        for(int i=0;i<result->source_iteration_metrics_count;++i) {
-            const auto &in=optimized->history[i];
-            auto &out=result->source_iteration_metrics[i];
-            out.accepted=in.accepted;
-            out.full_step_evaluated=in.full_step_evaluated;
-            out.full_step_accepted=in.full_step_accepted;
-            out.qp_converged=in.qp_converged;
-            out.original_duals_trustworthy=in.original_duals_trustworthy;
-            out.qp_iterations=in.qp_iterations;
-            out.linearization_ms=in.linearization_wall_ms;
-            out.qp_ms=in.qp_wall_ms;
-            out.source_rollout_ms=in.source_rollout_wall_ms;
-            out.total_ms=in.iteration_wall_ms;
-            out.cost_before=in.cost_before;
-            out.predicted_cost_change=in.predicted_cost_change;
-            out.full_step_cost=in.cost_trial;
-            out.cost_after=in.cost_after;
-            out.accepted_step_length=in.safeguarded_step_length;
-            out.qp_primal_residual=in.qp_primal_residual;
-            out.qp_dual_residual=in.qp_dual_residual;
-            out.stationarity_inf=in.source_nlp_stationarity_inf;
-            out.complementarity_inf=in.source_nlp_complementarity_inf;
-            out.maximum_footprint_prediction_error_m=in.model_maximum_hard_constraint_error;
-            out.model_actual_over_predicted_reduction=in.model_actual_over_predicted_reduction;
-            out.source_peak_slip_cost_before=in.source_peak_slip_cost_before;
-            out.source_peak_slip_cost_full_step=in.source_peak_slip_cost_full_step;
-            out.newly_activated_peak_slip_wheels=in.newly_activated_peak_slip_wheels;
-            out.qp_regularization_used=in.qp_regularization_used;
-            out.invalid_qp_duals_discarded=in.invalid_qp_duals_discarded;
-        }
-        if(completed) {
-            result->source_optimized_control_count=horizon;
-            std::copy_n(optimized->optimized.controls,horizon,
-                        result->source_optimized_controls);
-        }
-        result->source_primal_trace_count=static_cast<int>(std::min(
-            optimized->primal_trace.size(),size_t(MPC_RTI_SOURCE_TRACE_CAPACITY)));
-        result->source_primal_trace_truncated=optimized->primal_trace.size()>
-            MPC_RTI_SOURCE_TRACE_CAPACITY;
-        for(int i=0;i<result->source_primal_trace_count;++i) {
-            const auto &in=optimized->primal_trace[i];
-            auto &out=result->source_primal_trace[i];
-            out.iteration=in.iteration;out.accepted=in.accepted;
-            out.trial_evaluated=in.trial_evaluated;
-            out.correction_evaluated=in.correction_evaluated;
-            out.correction_accepted=in.correction_accepted;
-            out.normal_accepted=in.normal_accepted;out.filter_accepted=in.safeguarded_accepted;
-            const auto &accepted=in.normal_accepted?in.normal:
-                in.safeguarded_accepted?in.safeguarded_trials.back():
-                in.correction_accepted?in.correction:in.trial;
-            if(in.accepted)std::copy_n(accepted.controls,horizon,out.accepted_controls);
-            std::copy_n(in.warm_start.controls,horizon,out.warm_start);
-            std::copy_n(in.trial.controls,horizon,out.trial);
-            std::copy_n(in.correction.controls,horizon,out.correction);
-        }
-        result->first_pass_objective=optimized->initial_source_cost;
-        result->second_pass_objective=optimized->final_source_cost;
-        result->nonlinear_objective=optimized->final_source_cost;
-        result->exact_objective_improvement=
-            optimized->initial_source_cost-optimized->final_source_cost;
-        result->sqp_iterations_attempted=
-            static_cast<int>(optimized->history.size());
-        result->sqp_iterations_completed=
-            result->sqp_iterations_attempted;
-        result->sqp_iterations_accepted=
-            optimized->accepted_iterations;
-        result->exact_rollout_us=result->total_solve_us;
-        result->minimum_predicted_corridor_slack_m=static_cast<float>(
-            optimized->final_minimum_corridor_slack);
-        result->total_cycle_us=monotonic_microseconds()-cycle_start_us;
-        if(!completed || !optimized->final_source_feasible) {
-            *memory=memory_before;
-            result->status=
-                !completed ? MPC_RTI_CYCLE_REJECTED_SOLVER :
-                optimized->deadline_exhausted
-                  ? MPC_RTI_CYCLE_WAITING_FOR_SOLVER_BUDGET :
-                    MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT;
-            return result->status;
-        }
-        auto checked=std::make_unique<MpcRtiNominal_t>();
-        int failure_stage=-1;
-        const auto original_validation=mpc_rti_validate_candidate_plan(
-            &prepared_state,current_progress,optimized->optimized.controls,
-            trajectory,trajectory_count,lap_length,horizon,prediction_dt,
-            &comparison_configuration,checked.get(),&failure_stage);
-        result->nonlinear_failure_stage=failure_stage;
-        result->total_cycle_us=monotonic_microseconds()-cycle_start_us;
-        if(original_validation!=MPC_RTI_ROLLOUT_OK || !checked->valid) {
-            *memory=memory_before;
-            result->status=MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT;
-            return result->status;
-        }
-        if(deadline_us>0. &&
-           monotonic_microseconds()>=deadline_us) {
-            // An accurate but late control is NOT the control actually
-            // applied in the corresponding original source epoch.
-            *memory=memory_before;
-            result->source_exact_nlp_deadline_exhausted=1;
-            result->source_solver_status=MPC_SOURCE_DEADLINE_EXCEEDED;
-            result->status=MPC_RTI_CYCLE_WAITING_FOR_SOLVER_BUDGET;
-            return result->status;
-        }
-        result->candidate_control_count=horizon;
-        std::copy_n(optimized->optimized.controls,horizon,
-                    result->candidate_controls);
-        result->first_control=result->candidate_controls[0];
-        result->published_steering_command=
-            result->first_control.steering_target_rad;
-        result->published_throttle=
-            result->first_control.throttle_command;
-        memory->nominal=*checked;
-        memory->solver_nominal_progress_valid=0;
-        if(!mpc_rti_memory_set_warm_start_controls_at_epoch(
-            memory,result->candidate_controls,horizon,
-            configuration->command_epoch_ns)) {
-            *memory=memory_before;
-            result->candidate_control_count=0;
-            result->status=MPC_RTI_CYCLE_REJECTED_INPUT;
-            return result->status;
-        }
-        result->total_cycle_us=monotonic_microseconds()-cycle_start_us;
-        result->status=MPC_RTI_CYCLE_ACCEPTED_FEASIBLE;
-        return result->status;
+    // One anytime trust-region SQP over the exact source rollout. The best
+    // exactly verified iterate is always returned; the cycle publishes it
+    // when feasible and the publication deadline still holds.
+    constexpr double kPublishReserveUs = 5000.;
+    constexpr double kFirstIterationEstimateUs = 4000.;
+    const double solve_begin = monotonic_microseconds();
+
+    sdu_apex::source_sqp::Options options{};
+    options.maximum_iterations = configuration->source_exact_nlp_iterations;
+    options.same_epoch_nominal = &nominal;
+    options.violation_penalty = configuration->source_exact_nlp_qp_soft_weight;
+    if (memory->sqp_radius > 0.) options.radius = memory->sqp_radius;
+    options.deadline_us = deadline_us > 0.
+        ? std::max(0., deadline_us - kPublishReserveUs) : 0.;
+    options.minimum_iteration_us = deadline_us > 0. ? kFirstIterationEstimateUs : 0.;
+    auto solved = std::make_unique<sdu_apex::source_sqp::Result>();
+    const bool seeded = sdu_apex::source_sqp::solve(
+        prepared_state, current_progress, trajectory, trajectory_count,
+        lap_length, prediction_dt, comparison_configuration,
+        nominal.controls, options, solved.get());
+    result->total_solve_us = monotonic_microseconds() - solve_begin;
+    result->source_exact_nlp_deadline_exhausted =
+        solved->termination == sdu_apex::source_sqp::Termination::Deadline;
+    result->source_solver_status = !seeded ? MPC_SOURCE_INVALID_MODEL :
+        solved->termination == sdu_apex::source_sqp::Termination::Deadline
+            ? MPC_SOURCE_DEADLINE_EXCEEDED :
+        solved->final_feasible ? (solved->converged
+            ? MPC_SOURCE_FEASIBLE_SOLUTION_AVAILABLE : MPC_SOURCE_KKT_NOT_CONVERGED)
+            : MPC_SOURCE_PRIMAL_INFEASIBLE;
+    result->source_exact_nlp_source_trial_evaluations = solved->rollouts;
+    result->source_exact_nlp_accepted_iterations = solved->accepted_iterations;
+    result->source_exact_nlp_initial_source_feasible = solved->initial_feasible;
+    result->source_exact_nlp_final_source_feasible = solved->final_feasible;
+    result->source_exact_nlp_kkt_converged = solved->converged;
+    result->source_exact_nlp_initial_source_cost = solved->initial_cost;
+    result->source_exact_nlp_final_source_cost = solved->final_cost;
+    result->source_exact_nlp_final_original_margin_m = solved->final_minimum_corridor_m;
+    result->source_exact_nlp_final_original_violation = solved->final_violation;
+    result->source_iteration_metrics_count = static_cast<int>(std::min(
+        solved->history.size(), size_t(MPC_RTI_SOURCE_TRACE_CAPACITY)));
+    for (int i = 0; i < result->source_iteration_metrics_count; ++i) {
+        const auto &in = solved->history[i];
+        auto &out = result->source_iteration_metrics[i];
+        out.accepted = in.accepted;
+        out.trial_evaluated = in.cost_trial > 0.;
+        out.rejected_trials = in.rejected_trials;
+        out.qp_rounds = in.qp_rounds;
+        out.qp_iterations = in.qp_iterations;
+        out.newly_activated_slip_wheels = in.newly_active_slip;
+        out.radius = in.radius;
+        out.radius_active = in.radius_active;
+        out.linearization_ms = in.linearization_ms;
+        out.qp_ms = in.qp_ms;
+        out.rollout_ms = in.rollout_ms;
+        out.total_ms = in.total_ms;
+        out.cost_before = in.cost_before;
+        out.cost_trial = in.cost_trial;
+        out.cost_after = in.accepted ? in.cost_trial : in.cost_before;
+        out.predicted_reduction = in.predicted_reduction;
+        out.actual_over_predicted = in.ratio;
+        out.slip_cost_before = in.slip_cost_before;
+        out.slip_cost_trial = in.slip_cost_trial;
     }
 
+
+
+
+    result->sqp_iterations_attempted = static_cast<int>(solved->history.size());
+
+
+
+
+    result->total_cycle_us = monotonic_microseconds() - cycle_start_us;
+    if (!seeded) {
+        *memory = memory_before;
+        result->status = MPC_RTI_CYCLE_REJECTED_SOLVER;
+        return result->status;
+    }
+    // A feasible iterate is re-integrated by the independent validator before
+    // it is published. An iterate that still violates a wall after a full
+    // restoration effort is published as the least-violating plan the solver
+    // verified (never worse than the seed): holding an older command, as a
+    // missing publication does, is strictly worse.
+    const bool feasible = solved->final_feasible != 0;
+    const auto &final_controls = solved->optimal.controls;
+    auto checked = std::make_unique<MpcRtiNominal_t>();
+    if (feasible) {
+        int failure_stage = -1;
+        const double validation_begin = monotonic_microseconds();
+        const auto original_validation = mpc_rti_validate_candidate_plan(
+            &prepared_state, current_progress, final_controls, trajectory,
+            trajectory_count, lap_length, horizon, prediction_dt,
+            &comparison_configuration, checked.get(), &failure_stage);
+
+        result->validation_us = monotonic_microseconds() - validation_begin;
+        if (original_validation != MPC_RTI_ROLLOUT_OK || !checked->valid) {
+            *memory = memory_before;
+            result->total_cycle_us = monotonic_microseconds() - cycle_start_us;
+            result->status = MPC_RTI_CYCLE_REJECTED_NONLINEAR_ROLLOUT;
+            return result->status;
+        }
+    } else {
+        *checked = solved->optimal;
+    }
+    result->total_cycle_us = monotonic_microseconds() - cycle_start_us;
+    if (deadline_us > 0. && monotonic_microseconds() >= deadline_us) {
+        // A late control is not the control applied in its source epoch.
+        *memory = memory_before;
+        result->source_exact_nlp_deadline_exhausted = 1;
+        result->source_solver_status = MPC_SOURCE_DEADLINE_EXCEEDED;
+        result->status = MPC_RTI_CYCLE_WAITING_FOR_SOLVER_BUDGET;
+        return result->status;
+    }
+    result->candidate_control_count = horizon;
+    std::copy_n(final_controls, horizon, result->candidate_controls);
+    result->source_optimized_control_count = horizon;
+    std::copy_n(final_controls, horizon, result->source_optimized_controls);
+
+    result->published_steering_command = result->first_control.steering_target_rad;
+    result->published_throttle = result->first_control.throttle_command;
+    memory->nominal = *checked;
+    memory->solver_nominal_progress_valid = 0;
+    memory->sqp_radius = solved->radius;
+    if (!mpc_rti_memory_set_warm_start_controls_at_epoch(
+            memory, result->candidate_controls, horizon,
+            configuration->command_epoch_ns)) {
+        *memory = memory_before;
+        result->candidate_control_count = 0;
+        result->status = MPC_RTI_CYCLE_REJECTED_INPUT;
+        return result->status;
+    }
+    result->total_cycle_us = monotonic_microseconds() - cycle_start_us;
+    result->status = feasible ? MPC_RTI_CYCLE_ACCEPTED_FEASIBLE
+                              : MPC_RTI_CYCLE_ACCEPTED_DEGRADED;
+    return result->status;
 }

@@ -157,14 +157,6 @@ struct UnitySourceDirectionalBranchReport {
   int discrete_substep_schedule_switches{};
   int valid_one_sided_directional{};
 };
-bool unity_source_plant_step_one_sided_directional(
-    const UnitySourcePlantState &state,
-    const UnitySourcePlantInput &input,
-    double duration_s,
-    const std::array<double,kUnityPlantSensitivityStateSize> &direction_state,
-    const std::array<double,2> &direction_control,
-    UnitySourcePlantDirectionalCurvature *output,
-    UnitySourceDirectionalBranchReport *branch_report);
 
 bool unity_source_plant_step_with_directional_curvature(
     const UnitySourcePlantState &state,

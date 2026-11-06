@@ -90,16 +90,6 @@ int mpc_trajectory_sample_progress_differential(
     const MpcTrajectorySample_t *points,size_t point_count,
     double lap_length,double s,MpcTrajectoryProgressDifferential_t *out);
 
-/* Chain path tangents through the original implicit tracking projection.
- * Input order matches its Jacobian: ey,epsi,dx,dy,dyaw,progress.
- * Output order: ey,epsi,progress. Reference knots use the segment reached
- * for positive path parameter, selected by first then second tangent. */
-int mpc_trajectory_tracking_path_curvature(
-    const MpcTrajectorySample_t *points,size_t count,double length,
-    double progress,float ey,float epsi,const float body[3],
-    double end_progress,float end_ey,
-    const double first[6],const double second[6],
-    double output_first[3],double output_second[3],int *reference_knots);
 
 /* Advance the physical body displacement through the actual loaded path
  * frame. Optional Jacobian columns are e_y, e_psi, body dx, body dy, body yaw.

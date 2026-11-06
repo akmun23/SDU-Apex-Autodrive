@@ -53,5 +53,5 @@
     reference_clearance_reserve_m: 0.0
     source_exact_nlp_iterations: 3
     source_exact_nlp_qp_soft_weight: 1000000.0
-    source_exact_nlp_qp_regularization: 1000.0
+    source_exact_nlp_qp_regularization: 1.0
     source_exact_nlp_extra_clearance_m: 0.03

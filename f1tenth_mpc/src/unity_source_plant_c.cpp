@@ -158,18 +158,6 @@ extern "C" int unity_source_plant_step_directional_curvature_c(
     return 1;
 }
 
-extern "C" int unity_source_plant_step_one_sided_directional_c(
-    const UnitySourcePlantInputC *input,double duration_s,
-    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
-    const double direction_control[2],
-    UnitySourcePlantDirectionalCurvatureC *out,
-    UnitySourceDirectionalBranchReportC *report)
-{
-    if(!report)return 0;
-    const double second_state[UNITY_SOURCE_PLANT_STATE_SIZE]{};
-    return unity_source_plant_step_path_curvature_c(input,duration_s,
-        direction_state,second_state,direction_control,out,report);
-}
 
 extern "C" int unity_source_plant_step_path_curvature_c(
     const UnitySourcePlantInputC *input,double duration_s,
@@ -225,100 +213,6 @@ extern "C" int unity_source_plant_step_path_curvature_c(
     return 1;
 }
 
-extern "C" int unity_source_plant_compare_physical_branches_c(
-    const UnitySourcePlantInputC *original,
-    const UnitySourcePlantInputC *candidate,
-    double duration_s,UnitySourcePhysicalBranchComparisonC *out)
-{
-    if(!original||!candidate||!out)return 0;
-    *out={};
-    out->first_changed_fixed_tick=-1;
-    out->first_changed_vehicle_substep=-1;
-    out->first_changed_wheel=-1;
-    const auto build=[&](
-        const UnitySourcePlantInputC *input,
-        std::vector<f1tenth_mpc::UnitySourceBranchObservation> *trace) {
-        auto state=from_c(input->state,
-            input->suspension_history_initialized);
-        std::copy_n(input->wheel_rotation_angle_rad,4,
-                    state.wheel_rotation_angle_rad.begin());
-        const f1tenth_mpc::UnitySourcePlantInput command{
-            input->steering_target_rad,input->throttle_normalized};
-        return f1tenth_mpc::unity_source_plant_trace_branches(
-            state,command,duration_s,trace);
-    };
-    using Observation=f1tenth_mpc::UnitySourceBranchObservation;
-    std::vector<Observation> a,b;
-    if(!build(original,&a)||!build(candidate,&b))return 0;
-    out->original_internal_events=static_cast<int>(a.size());
-    out->perturbed_internal_events=static_cast<int>(b.size());
-    using Key=std::tuple<int,int,int>;
-    std::map<Key,const Observation*> measured;
-    for(const auto &record:b)
-        measured[{record.fixed_tick,record.vehicle_substep,
-                  record.wheel}]=&record;
-    for(const auto &src:a) {
-        const Key key{src.fixed_tick,src.vehicle_substep,src.wheel};
-        auto it=measured.find(key);
-        if(it==measured.end()) {
-            ++out->mismatched_substep_schedule_events;
-            if(out->first_changed_fixed_tick<0) {
-                out->first_changed_fixed_tick=src.fixed_tick;
-                out->first_changed_vehicle_substep=src.vehicle_substep;
-                out->first_changed_wheel=src.wheel;
-            }
-            continue;
-        }
-        const auto &dst=*it->second;
-        bool changed=false;
-        const auto check=[&](bool different,int &counter) {
-            if(different) {++counter;changed=true;}
-        };
-        check(src.vehicle_substep_count!=dst.vehicle_substep_count,
-              out->mismatched_substep_schedule_events);
-        check(src.grounded!=dst.grounded,
-              out->contact_grounded_changes);
-        check(src.sticky_forward!=dst.sticky_forward,
-              out->sticky_forward_changes);
-        check(src.sticky_side!=dst.sticky_side,
-              out->sticky_side_changes);
-        check(src.longitudinal_curve_region!=
-              dst.longitudinal_curve_region,
-              out->longitudinal_spline_region_changes);
-        check(src.lateral_curve_region!=dst.lateral_curve_region,
-              out->lateral_spline_region_changes);
-        check(src.tire_load_filter_region!=dst.tire_load_filter_region,
-              out->tire_load_filter_changes);
-        check(src.combined_slip_saturated!=dst.combined_slip_saturated,
-              out->combined_slip_saturation_changes);
-        check(src.suspension_jounce_region!=
-              dst.suspension_jounce_region,
-              out->suspension_jounce_region_changes);
-        check(src.longitudinal_slip_denominator_region!=
-              dst.longitudinal_slip_denominator_region,
-              out->slip_denominator_region_changes);
-        check(src.steering_target_reached!=dst.steering_target_reached,
-              out->steering_target_reached_changes);
-        check(src.zero_throttle_brake_mode!=dst.zero_throttle_brake_mode,
-              out->throttle_brake_mode_changes);
-        if(changed && out->first_changed_fixed_tick<0) {
-            out->first_changed_fixed_tick=src.fixed_tick;
-            out->first_changed_vehicle_substep=src.vehicle_substep;
-            out->first_changed_wheel=src.wheel;
-        }
-        measured.erase(it);
-    }
-    out->mismatched_substep_schedule_events+=
-        static_cast<int>(measured.size());
-    if(out->first_changed_fixed_tick<0&&!measured.empty()) {
-        const auto &src=*measured.begin()->second;
-        out->first_changed_fixed_tick=src.fixed_tick;
-        out->first_changed_vehicle_substep=src.vehicle_substep;
-        out->first_changed_wheel=src.wheel;
-    }
-    out->valid=1;
-    return 1;
-}
 
 extern "C" int unity_source_plant_instantaneous_lateral_slip_c(
     const double state[UNITY_SOURCE_PLANT_STATE_SIZE], double slip[4])
@@ -371,139 +265,8 @@ extern "C" int unity_source_plant_instantaneous_lateral_slip_second_c(
     return 1;
 }
 
-extern "C" int unity_source_plant_full_and_substep_sensitivity_c(
-    const UnitySourcePlantInputC *input,double duration_s,
-    const UnitySourcePlantSensitivitySeedsC *seeds,
-    UnitySourcePlantSensitivityC *out,
-    UnitySourceSlipSubstepSensitivityC *samples,
-    int capacity,int *count)
-{
-    if(!input||!seeds||!out||!count||capacity<0||
-       (capacity>0&&!samples))return 0;
-    auto physical=from_c(input->state,
-        input->suspension_history_initialized);
-    std::copy_n(input->wheel_rotation_angle_rad,4,
-        physical.wheel_rotation_angle_rad.begin());
-    const f1tenth_mpc::UnitySourcePlantInput control{
-        input->steering_target_rad,input->throttle_normalized};
-    f1tenth_mpc::UnitySourcePlantSensitivitySeeds seeded{};
-    for(int src=0;src<UNITY_SOURCE_PLANT_STATE_SIZE;++src)
-        for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane)
-            seeded.state[src][lane]=seeds->state[src][lane];
-    for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane) {
-        seeded.steering_target[lane]=seeds->steering_target[lane];
-        seeded.throttle[lane]=seeds->throttle[lane];
-    }
-    f1tenth_mpc::UnitySourcePlantSensitivity complete{};
-    std::vector<f1tenth_mpc::UnitySourceSlipSubstepSensitivity> rows;
-    if(!f1tenth_mpc::unity_source_plant_step_with_sensitivities(
-        physical,control,duration_s,seeded,&complete,&rows))
-        return 0;
-    *count=static_cast<int>(rows.size());
-    if(*count>capacity)return 0;
-    for(int wheel=0;wheel<4;++wheel) {
-        out->maximum_longitudinal_slip_residual_mps[wheel]=
-            complete.maximum_longitudinal_slip_residual_mps[wheel];
-        for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane)
-            out->maximum_longitudinal_slip_residual_derivative[wheel][lane]=
-                complete.maximum_longitudinal_slip_residual_derivative[wheel][lane];
-    }
-    for(int src=0;src<UNITY_SOURCE_PLANT_STATE_SIZE;++src)
-        for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane)
-            out->state[src][lane]=complete.state[src][lane];
-    for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane) {
-        out->body_forward_displacement[lane]=
-            complete.body_forward_displacement[lane];
-        out->body_lateral_displacement[lane]=
-            complete.body_lateral_displacement[lane];
-        out->yaw_delta[lane]=complete.yaw_delta[lane];
-    }
-    for(int i=0;i<*count;++i) {
-        const auto &r=rows[i];
-        samples[i].original={
-            r.fixed_tick,r.vehicle_substep,r.wheel,r.positive_excess_mps};
-        std::copy(r.derivative.begin(),r.derivative.end(),
-                  samples[i].derivative);
-    }
-    return 1;
-}
 
-extern "C" int unity_source_plant_all_slip_substep_sensitivity_c(
-    const UnitySourcePlantInputC *input,double duration_s,
-    const UnitySourcePlantSensitivitySeedsC *seeds,
-    UnitySourceSlipSubstepSensitivityC *samples,int capacity,int *count)
-{
-    if(!input||!seeds||!count||capacity<0||
-       (capacity>0&&!samples))return 0;
-    auto physical=from_c(input->state,
-        input->suspension_history_initialized);
-    std::copy_n(input->wheel_rotation_angle_rad,4,
-        physical.wheel_rotation_angle_rad.begin());
-    const f1tenth_mpc::UnitySourcePlantInput control{
-        input->steering_target_rad,input->throttle_normalized};
-    f1tenth_mpc::UnitySourcePlantSensitivitySeeds seeded{};
-    for(int src=0;src<UNITY_SOURCE_PLANT_STATE_SIZE;++src)
-        for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane)
-            seeded.state[src][lane]=seeds->state[src][lane];
-    for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane) {
-        seeded.steering_target[lane]=seeds->steering_target[lane];
-        seeded.throttle[lane]=seeds->throttle[lane];
-    }
-    f1tenth_mpc::UnitySourcePlantSensitivity source_jacobian{};
-    std::vector<f1tenth_mpc::UnitySourceSlipSubstepSensitivity> all;
-    if(!f1tenth_mpc::unity_source_plant_step_with_sensitivities(
-        physical,control,duration_s,seeded,&source_jacobian,&all))
-        return 0;
-    *count=static_cast<int>(all.size());
-    if(*count>capacity)return 0;
-    for(int i=0;i<*count;++i) {
-        const auto &original=all[i];
-        samples[i].original={original.fixed_tick,
-            original.vehicle_substep,original.wheel,
-            original.positive_excess_mps};
-        std::copy(original.derivative.begin(),
-            original.derivative.end(),samples[i].derivative);
-    }
-    return 1;
-}
 
-extern "C" int unity_source_plant_all_slip_substeps_c(
-    const UnitySourcePlantInputC *input,double duration_s,
-    UnitySourceSlipSubstepC *samples,int capacity,int *count,
-    double exact_source_maximum[4])
-{
-    if(!input||!count||!exact_source_maximum||capacity<0||
-       (capacity>0&&!samples))return 0;
-    auto physical=from_c(input->state,
-        input->suspension_history_initialized);
-    std::copy_n(input->wheel_rotation_angle_rad,4,
-        physical.wheel_rotation_angle_rad.begin());
-    const f1tenth_mpc::UnitySourcePlantInput control{
-        input->steering_target_rad,input->throttle_normalized};
-    std::vector<f1tenth_mpc::UnitySourceBranchObservation> events;
-    f1tenth_mpc::UnitySourcePlantOutput source{};
-    if(!f1tenth_mpc::unity_source_plant_trace_branches(
-        physical,control,duration_s,&events,&source))return 0;
-    *count=static_cast<int>(events.size());
-    if(*count>capacity)return 0;
-    for(int wheel=0;wheel<4;++wheel)
-        exact_source_maximum[wheel]=
-            source.maximum_longitudinal_slip_excess_mps[wheel];
-    double observed_max[4]{};
-    for(int i=0;i<*count;++i) {
-        const auto &e=events[i];
-        if(e.wheel<0||e.wheel>=4)return 0;
-        const double excess=e.grounded?
-            e.positive_longitudinal_slip_excess_mps:0.;
-        if(!std::isfinite(excess)||excess<0.)return 0;
-        samples[i]={e.fixed_tick,e.vehicle_substep,e.wheel,excess};
-        observed_max[e.wheel]=std::max(observed_max[e.wheel],excess);
-    }
-    for(int wheel=0;wheel<4;++wheel)
-        if(std::abs(observed_max[wheel]-
-                    exact_source_maximum[wheel])>1.e-10)return 0;
-    return 1;
-}
 
 extern "C" int unity_source_plant_peak_slip_trace_c(
     const UnitySourcePlantInputC *input,double duration_s,
@@ -559,22 +322,6 @@ extern "C" int unity_source_plant_peak_slip_trace_c(
     return 1;
 }
 
-extern "C" int unity_source_plant_reconcile_suspension_jounce_c(
-    double state[UNITY_SOURCE_PLANT_STATE_SIZE],
-    int *suspension_history_initialized)
-{
-  if (!state || !suspension_history_initialized) return 0;
-  auto plant_state = from_c(state, *suspension_history_initialized);
-  if (!f1tenth_mpc::unity_source_plant_reconcile_suspension_jounce(
-          &plant_state))
-    return 0;
-  std::copy(plant_state.suspension_jounce_m.begin(),
-            plant_state.suspension_jounce_m.end(),
-            state + UNITY_SOURCE_SUSPENSION_JOUNCE_FL);
-  *suspension_history_initialized =
-      plant_state.suspension_history_initialized ? 1 : 0;
-  return 1;
-}
 
 extern "C" int unity_source_plant_step_sensitivity_c(
     const UnitySourcePlantInputC *input, double duration_s,

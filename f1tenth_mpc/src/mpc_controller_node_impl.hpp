@@ -12,8 +12,6 @@
 #include "mpc_state_synchronizer.hpp"
 #include "mpc_trajectory_io.hpp"
 #include "mpc_speed_envelope.hpp"
-#include "mpc_robust_contour.hpp"
-#include "mpc_world_footprint.hpp"
 #include "unity_source_plant.hpp"
 #include "vehicle_model.h"
 
@@ -129,15 +127,6 @@ public:
         path_frame_ = declare_parameter<std::string>("path_frame", "map");
         // Experimental physical map authority. Disabled by default. Unknown
         // cells and a missing/invalid occupancy map never authorize driving.
-        world_map_authority_enabled_ = declare_parameter<bool>(
-            "world_map_authority_enabled", false);
-        world_map_rejection_only_ = declare_parameter<bool>(
-            "world_map_rejection_only", false);
-        world_map_additional_uncertainty_m_ = std::clamp(
-            declare_parameter<double>(
-                "world_map_additional_uncertainty_m", 0.005), 0.0, 0.10);
-        world_map_topic_ = declare_parameter<std::string>(
-            "world_map_topic", "/map");
         command_frame_ = declare_parameter<std::string>("command_frame", "base_link");
         trajectory_file_ = declare_parameter<std::string>("trajectory_file", "");
         max_speed_mps_ = clamp(declare_parameter<double>("max_speed_mps", 16.0), 0.0, 16.0);
@@ -224,14 +213,6 @@ public:
                         message->steering_angle_rad,
                         message->throttle_normalized, true});
                 });
-        if (world_map_authority_enabled_) {
-            // Nav2 publishes a transient-local map; only the subscriber
-            // callback builds EDT. Never allocate or recompute it in MPC.
-            world_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
-                world_map_topic_,rclcpp::QoS(1).reliable().transient_local(),
-                std::bind(&MpcControllerNode::world_map_callback,this,
-                          std::placeholders::_1));
-        }
         auto declare_weight = [this](const char * name, float fallback) {
             return static_cast<float>(declare_parameter<double>(name, fallback));
         };
@@ -240,10 +221,6 @@ public:
          * steering/yaw objective than saved-state replay and production. */
         rti_config_.model.weight_e_y = declare_weight("weight_e_y", 4000.0f);
         rti_config_.model.weight_e_psi = declare_weight("weight_e_psi", 1500.0f);
-        rti_config_.model.tracking_lateral_tolerance_m =
-            declare_weight("tracking_lateral_tolerance_m", 0.0f);
-        rti_config_.model.tracking_heading_tolerance_rad =
-            declare_weight("tracking_heading_tolerance_rad", 0.0f);
         rti_config_.model.weight_u = declare_weight("weight_u", 35.0f);
         rti_config_.model.weight_u_overspeed = declare_weight(
             "weight_u_overspeed", 20.0f);
@@ -267,119 +244,6 @@ public:
             "weight_throttle_command", 0.1f);
         rti_config_.model.weight_steering_slew = declare_weight(
             "weight_steering_slew", 2000.0f);
-        rti_config_.model.weight_steering_correction_variation =
-            declare_weight("weight_steering_correction_variation",0.0f);
-        rti_config_.model.steering_correction_variation_epsilon_rad =
-            static_cast<float>(declare_parameter<double>(
-                "steering_correction_variation_epsilon_rad",0.02));
-        if (!(rti_config_.model.steering_correction_variation_epsilon_rad
-                >=0.005f &&
-              rti_config_.model.steering_correction_variation_epsilon_rad
-                <=0.10f))
-            throw std::runtime_error(
-                "steering_correction_variation_epsilon_rad must be in [0.005,0.10]");
-        rti_config_.model.weight_throttle_slew = declare_weight(
-            "weight_throttle_slew", 50.0f);
-        rti_config_.model.startup_nominal_throttle_seed = static_cast<float>(
-            declare_parameter<double>("startup_nominal_throttle_seed", 0.25));
-        rti_config_.model.terminal_multiplier = declare_weight(
-            "terminal_multiplier", 3.0f);
-        // Source-exact nonlinear SQP is the only controller, not a plugin.
-        rti_config_.source_exact_nlp_live=1;
-        rti_config_.source_exact_nlp_constrained_qp=1;
-        rti_config_.source_exact_nlp_compact_qp=1;
-        rti_config_.source_exact_nlp_full_step_sqp=1;
-        rti_config_.capture_source_benchmark=
-            declare_parameter<bool>("capture_source_benchmark",false)?1:0;
-        rti_config_.source_exact_nlp_qp_soft_weight=
-            static_cast<float>(declare_parameter<double>(
-                "source_exact_nlp_qp_soft_weight",1000000.));
-        rti_config_.source_exact_nlp_qp_regularization=
-            static_cast<float>(declare_parameter<double>(
-                "source_exact_nlp_qp_regularization",1000.));
-        rti_config_.source_exact_nlp_iterations=std::clamp<int>(
-            declare_parameter<int>("source_exact_nlp_iterations",3),1,8);
-        rti_config_.source_exact_nlp_extra_clearance_m=static_cast<float>(
-            declare_parameter<double>(
-                "source_exact_nlp_extra_clearance_m",0.03));
-        if(!std::isfinite(
-               rti_config_.source_exact_nlp_qp_soft_weight) ||
-           rti_config_.source_exact_nlp_qp_soft_weight<=0.f ||
-           rti_config_.source_exact_nlp_qp_soft_weight>1.e9f)
-            throw std::runtime_error(
-                "source_exact_nlp_qp_soft_weight must be in (0,1e9]");
-        if(!std::isfinite(
-               rti_config_.source_exact_nlp_qp_regularization) ||
-           rti_config_.source_exact_nlp_qp_regularization<=0.f ||
-           rti_config_.source_exact_nlp_qp_regularization>100000.f)
-            throw std::runtime_error(
-                "source_exact_nlp_qp_regularization must be in (0,100000]");
-        if(!std::isfinite(
-               rti_config_.source_exact_nlp_extra_clearance_m) ||
-           rti_config_.source_exact_nlp_extra_clearance_m<0.f ||
-           rti_config_.source_exact_nlp_extra_clearance_m>.1f)
-            throw std::runtime_error(
-                "source_exact_nlp_extra_clearance_m must be in [0,0.1]");
-        rti_config_.model.max_speed_mps = static_cast<float>(max_speed_mps_);
-        rti_config_.model.active_speed_ceiling_mps =
-            static_cast<float>(max_speed_mps_);
-        actuator_steering_limit_rad_ = declare_parameter<double>(
-            "max_steering_rad", SOURCE_MAX_STEERING_RAD);
-        rti_config_.model.max_steering_rad = static_cast<float>(
-            actuator_steering_limit_rad_);
-        // The source NLP evaluates original actuator command-rate
-        // inequalities even though the retired incremental Riccati QP
-        // is gone. These two limits MUST NOT remain zero-initialized:
-        // zero makes every nonzero cold-start control source-infeasible.
-        // Full command-domain differences are nonrestrictive, while
-        // physical actuator rate/lag remains in the exact Unity plant.
-        // These are NOT trust regions around an SQP iterate.
-        rti_config_.model.max_steering_command_step_rad =
-            2.f * rti_config_.model.max_steering_rad;
-        rti_config_.model.max_throttle_command_step =
-            MPC_THROTTLE_MAX - MPC_THROTTLE_MIN_DRIVE;
-        rti_config_.model.corridor_margin_m = static_cast<float>(
-            declare_parameter<double>("corridor_margin_m",
-                                      MPC_DEFAULT_WALL_CLEARANCE_M));
-        rti_config_.model.first_prediction_corridor_margin_m =
-            static_cast<float>(declare_parameter<double>(
-                "first_prediction_corridor_margin_m",
-                rti_config_.model.corridor_margin_m));
-        rti_config_.model.corridor_preview_halfwidth_m = static_cast<float>(
-            declare_parameter<double>("corridor_preview_halfwidth_m", 0.10));
-        rti_config_.model.reference_clearance_reserve_m = static_cast<float>(
-            declare_parameter<double>("reference_clearance_reserve_m", 0.0));
-        rti_config_.model.near_wall_tracking_reserve_m = static_cast<float>(
-            declare_parameter<double>("near_wall_tracking_reserve_m", 0.0));
-        rti_config_.model.weight_source_corridor_reserve =
-            static_cast<float>(declare_parameter<double>(
-                "weight_source_corridor_reserve",0.0));
-        rti_config_.model.weight_source_lateral_slip =
-            static_cast<float>(declare_parameter<double>(
-                "weight_source_lateral_slip",0.0));
-        robust_contour_extra_clearance_m_ = std::clamp(
-            declare_parameter<double>(
-                "robust_contour_extra_clearance_m",0.0),0.0,0.20);
-        robust_contour_max_offset_m_ = std::clamp(
-            declare_parameter<double>(
-                "robust_contour_max_offset_m",0.10),0.0,0.20);
-        robust_contour_smoothing_sigma_m_ = std::clamp(
-            declare_parameter<double>(
-                "robust_contour_smoothing_sigma_m",0.70),0.2,2.5);
-        robust_contour_forward_preview_m_ = std::clamp(
-            declare_parameter<double>(
-                "robust_contour_forward_preview_m",0.45),0.0,2.0);
-        rti_config_.model.nonlinear_corridor_tolerance_m = static_cast<float>(
-            declare_parameter<double>("nonlinear_corridor_tolerance_m", 0.005));
-        rti_config_.model.jacobian_threads = static_cast<int>(std::clamp<long>(
-            declare_parameter<int>("jacobian_threads", 8), 0L,
-            MPC_RTI_MAX_JACOBIAN_THREADS));
-        const double rti_cycle_budget_ms = declare_parameter<double>(
-            "rti_cycle_budget_ms", 22.0);
-        if (!std::isfinite(rti_cycle_budget_ms) || rti_cycle_budget_ms < 0.0) {
-            throw std::runtime_error(
-                "rti_cycle_budget_ms must be finite and nonnegative");
-        }
         rti_config_.max_cycle_time_us = rti_cycle_budget_ms * 1000.0;
         end_to_end_cycle_budget_ms_ = declare_parameter<double>(
             "end_to_end_cycle_budget_ms", 22.0);
@@ -415,13 +279,6 @@ public:
             rti_config_.model.max_steering_command_step_rad,
             rti_config_.model.max_throttle_command_step);
         mpc_rti_memory_reset(&rti_memory_);
-        if (world_map_authority_enabled_) {
-            rti_config_.model.world_sweep_check =
-                &MpcControllerNode::world_map_sweep_check;
-            rti_config_.model.world_sweep_context=this;
-            rti_config_.model.world_map_rejection_only=
-                world_map_rejection_only_?1:0;
-        }
         trajectory_loaded_ = load_trajectory(trajectory_file_);
         if (!trajectory_loaded_) {
             RCLCPP_ERROR(get_logger(),
@@ -524,19 +381,6 @@ private:
                     summary.reduced_points, trajectory_.size(),
                     summary.minimum_speed_mps, summary.maximum_speed_mps,
                     summary.witness_invalidated ? "true" : "false");
-            }
-            if (robust_contour_extra_clearance_m_>0.0) {
-                const auto contour=f1tenth_mpc::precompute_robust_contour(
-                    trajectory_,track_length_m_,
-                    rti_config_.model.corridor_margin_m,
-                    robust_contour_extra_clearance_m_,
-                    robust_contour_max_offset_m_,
-                    robust_contour_smoothing_sigma_m_,
-                    robust_contour_forward_preview_m_);
-                RCLCPP_INFO(get_logger(),
-                    "Smooth robust contour: adjusted=%zu/%zu max_offset=%.3fm max_slope=%.4f",
-                    contour.affected_knots,trajectory_.size(),
-                    contour.max_abs_offset_m,contour.max_neighbor_slope);
             }
         } catch (const std::exception &error) {
             RCLCPP_ERROR(get_logger(), "Invalid MPC trajectory '%s': %s",
@@ -775,6 +619,7 @@ private:
         case MPC_RTI_CYCLE_ACCEPTED_CANDIDATE_PREFIX:
             return "accepted_candidate_prefix";
         case MPC_RTI_CYCLE_ACCEPTED_PRIOR_PLAN: return "accepted_prior_plan";
+        case MPC_RTI_CYCLE_ACCEPTED_DEGRADED: return "accepted_degraded";
         case MPC_RTI_CYCLE_ACCEPTED_VIABILITY_RECOVERY:
             return "accepted_viability_recovery";
         case MPC_RTI_CYCLE_DEFERRED_DEADLINE:
@@ -861,64 +706,7 @@ private:
         int64_t candidate_command_stamp_ns,
         int64_t callback_steady_ns, int64_t synchronize_steady_ns);
 
-    static int world_map_sweep_check(
-        void *context,double x0,double y0,double yaw0,
-        double x1,double y1,double yaw1,double required_margin_m,
-        float *minimum_slack_m)
-    {
-        if (!context || !minimum_slack_m) return 0;
-        const auto *node=static_cast<const MpcControllerNode*>(context);
-        // The control callback retains ONE immutable geometry snapshot
-        // throughout its R1, R2, line searches and independently validated
-        // recovery rollouts. A new map cannot silently change the rules
-        // between stages. No per-sweep shared_ptr atomic acquisition.
-        const auto &grid=node->world_sweep_snapshot_;
-        if (!grid) return 0;
-        // Physical source rear-axle body + exact occupancy EDT,
-        // interpolated segment, and explicitly budgeted uncertainty.
-        double slack=-INFINITY;
-        const bool safe=grid->interpolated_sweep_passes(
-            {x0,y0,yaw0},{x1,y1,yaw1},
-            required_margin_m+node->world_map_additional_uncertainty_m_,
-            &slack);
-        *minimum_slack_m=static_cast<float>(slack);
-        return safe?1:0;
-    }
 
-    void world_map_callback(
-        const nav_msgs::msg::OccupancyGrid::SharedPtr message)
-    {
-        if (!message || message->header.frame_id!=path_frame_) {
-            // Do not continue using an obsolete accepted map after the
-            // provider starts publishing geometry for another frame.
-            std::atomic_store(&world_grid_,
-                std::shared_ptr<const MpcWorldFootprint>{});
-            RCLCPP_ERROR_THROTTLE(get_logger(),*get_clock(),5000,
-                "MPC map geometry not certified: occupancy frame mismatch");
-            return;
-        }
-        const auto &pose=message->info.origin;
-        const auto &q=pose.orientation;
-        const double map_yaw=std::atan2(
-            2.0*(q.w*q.z+q.x*q.y),1.0-2.0*(q.y*q.y+q.z*q.z));
-        const auto grid=MpcWorldFootprint::from_occupancy(
-            static_cast<int>(message->info.width),
-            static_cast<int>(message->info.height),
-            message->info.resolution,pose.position.x,pose.position.y,
-            map_yaw,message->data);
-        if (!grid) {
-            std::atomic_store(&world_grid_,
-                std::shared_ptr<const MpcWorldFootprint>{});
-            RCLCPP_ERROR(get_logger(),
-                "MPC map geometry not certified: invalid occupancy grid");
-            return;
-        }
-        std::atomic_store(&world_grid_,grid);
-        RCLCPP_INFO(get_logger(),
-            "MPC map world/body authority ready: resolution=%.4fm "
-            "extra uncertainty=%.3fm",grid->resolution(),
-            world_map_additional_uncertainty_m_);
-    }
 
     void pose_callback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr message)
     {
@@ -1068,14 +856,6 @@ private:
         // authoritative on the NEXT control cycle. This pins every sweep
         // of one two-pass SQP to the identical map and removes repeated
         // shared_ptr atomics from the nonlinear simulation inner loop.
-        if (world_map_authority_enabled_) {
-            world_sweep_snapshot_ = std::atomic_load(&world_grid_);
-            if (!world_sweep_snapshot_) {
-                RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),1000,
-                    "MPC awaiting authoritative occupancy map; no commands");
-                return;
-            }
-        }
 
         const auto handle_stale_state = [this](
             const MpcSynchronizedState &stale_state,
@@ -1553,7 +1333,8 @@ private:
         const double solve_us=std::chrono::duration<double,std::micro>(
             std::chrono::steady_clock::now()-solve_begin).count();
         record_cycle_health(status,result,solve_us);
-        if(status!=MPC_RTI_CYCLE_ACCEPTED_FEASIBLE) {
+        if(status!=MPC_RTI_CYCLE_ACCEPTED_FEASIBLE &&
+           status!=MPC_RTI_CYCLE_ACCEPTED_DEGRADED) {
             record_no_publication();
             // An unsuccessful solve never issues an unchecked or stale
             // command. It also never latches a permanent fault, so the
@@ -1690,10 +1471,6 @@ private:
 
     double curvature_speed_envelope_lateral_accel_mps2_{0.0};
     double curvature_speed_envelope_braking_mps2_{5.0};
-    double robust_contour_extra_clearance_m_{};
-    double robust_contour_max_offset_m_{0.10};
-    double robust_contour_smoothing_sigma_m_{0.70};
-    double robust_contour_forward_preview_m_{0.45};
     bool source_plant_handoff_valid_{};
     bool unity_plant_state_used_{};
     int64_t source_plant_handoff_stamp_ns_{};
@@ -1725,15 +1502,6 @@ private:
         drive_command_pub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
-    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr world_map_sub_;
-    std::shared_ptr<const MpcWorldFootprint> world_grid_;
-    // Control-thread-owned immutable map generation. It must never be
-    // written from the asynchronous ROS map subscription callback.
-    std::shared_ptr<const MpcWorldFootprint> world_sweep_snapshot_;
-    bool world_map_authority_enabled_{};
-    bool world_map_rejection_only_{};
-    std::string world_map_topic_{"/map"};
-    double world_map_additional_uncertainty_m_{0.005};
     rclcpp::Subscription<sdu_apex_msgs::msg::UnityPlantState>::SharedPtr
         unity_plant_state_sub_;
     rclcpp::Subscription<sdu_apex_msgs::msg::DriveCommand>::SharedPtr

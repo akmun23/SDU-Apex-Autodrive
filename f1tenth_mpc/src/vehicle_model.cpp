@@ -7,6 +7,7 @@
  * is layered on top of those dynamics.
  */
 
+#include <cstdint>
 #include "vehicle_model.h"
 
 #include <algorithm>
@@ -90,10 +91,6 @@ int vehicle_model_set_parameters(const VehicleParameters_t *parameters)
     return 1;
 }
 
-float vehicle_model_get_active_target_speed_ceiling(void)
-{
-    return active_target_speed_ceiling_mps;
-}
 
 int vehicle_model_set_active_target_speed_ceiling(float ceiling_mps)
 {
@@ -246,155 +243,7 @@ int vehicle_model_inject_source_state(
            std::isfinite(state->actual_steering_angle);
 }
 
-int vehicle_model_full_source_interval_analytic_directional_second_order(
-    const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
-    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
-    const double direction_control[2],
-    MpcSourceDirectionalSecondOrder_t *out)
-{
-    if(!state||!control||!out||!direction_state||!direction_control||
-       !state->source_plant_initialized||!std::isfinite(dt)||dt<=0.f||
-       !std::isfinite(control->steering_target_rad)||
-       !std::isfinite(control->throttle_command)||
-       control->steering_target_rad < -active_parameters.max_steering_angle||
-       control->steering_target_rad > active_parameters.max_steering_angle||
-       control->throttle_command < MPC_THROTTLE_MIN_DRIVE||
-       control->throttle_command > MPC_THROTTLE_MAX)return 0;
-    for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i)
-        if(!std::isfinite(direction_state[i]))return 0;
-    if(!std::isfinite(direction_control[0])||
-       !std::isfinite(direction_control[1]))return 0;
-    UnitySourcePlantInputC input{};
-    write_source_plant_state(state,input.state);
-    input.steering_target_rad=clamp_source_steering_target(
-        control->steering_target_rad);
-    input.throttle_normalized=control->throttle_command;
-    input.suspension_history_initialized=
-        state->source_suspension_history_initialized;
-    UnitySourcePlantDirectionalCurvatureC analytic{};
-    if(!unity_source_plant_step_directional_curvature_c(
-          &input,dt,direction_state,direction_control,&analytic))
-        return 0;
-    MpcSourceDirectionalSecondOrder_t result{};
-    for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i) {
-        result.first_source[i]=analytic.first_state[i];
-        result.second_source[i]=analytic.second_state[i];
-    }
-    for(int i=0;i<3;++i) {
-        result.first_body[i]=analytic.first_body[i];
-        result.second_body[i]=analytic.second_body[i];
-    }
-    for(int i=0;i<4;++i) {
-        result.first_slip_excess_mps[i]=analytic.first_slip_excess[i];
-        result.second_slip_excess_mps[i]=analytic.second_slip_excess[i];
-    }
-    *out=result;
-    return 1;
-}
 
-int vehicle_model_full_source_interval_directional_second_order(
-    const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
-    const double direction_state[UNITY_SOURCE_PLANT_STATE_SIZE],
-    const double direction_control[2],double epsilon,
-    MpcSourceDirectionalSecondOrder_t *out)
-{
-    // This path uses the exact 26-state source plant also consumed by the
-    // original MPC propagation. Hidden wheel/suspension/contact memories
-    // are never discarded. No loss approximation or control fallback.
-    if(!state||!control||!out||!direction_state||!direction_control||
-       !state->source_plant_initialized||
-       !std::isfinite(dt)||dt<=0.f||
-       !std::isfinite(epsilon)||epsilon<=0.||epsilon>.2||
-       !std::isfinite(control->steering_target_rad)||
-       !std::isfinite(control->throttle_command))
-        return 0;
-    for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i)
-        if(!std::isfinite(direction_state[i]))return 0;
-    if(!std::isfinite(direction_control[0])||
-       !std::isfinite(direction_control[1]))return 0;
-
-    UnitySourcePlantInputC baseline{};
-    write_source_plant_state(state,baseline.state);
-    baseline.steering_target_rad=clamp_source_steering_target(
-        control->steering_target_rad);
-    baseline.throttle_normalized=control->throttle_command;
-    baseline.suspension_history_initialized=
-        state->source_suspension_history_initialized;
-    // The source transition clamps the real legal steering bounds.
-    // Do NOT silently differentiate a clipped/out-of-range perturbation:
-    // the corresponding Taylor derivative is undefined at that edge.
-    if(baseline.throttle_normalized<MPC_THROTTLE_MIN_DRIVE ||
-       baseline.throttle_normalized>MPC_THROTTLE_MAX)
-        return 0;
-    UnitySourcePlantInputC plus=baseline,minus=baseline;
-    for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i) {
-        plus.state[i]+=epsilon*direction_state[i];
-        minus.state[i]-=epsilon*direction_state[i];
-    }
-    plus.steering_target_rad+=epsilon*direction_control[0];
-    minus.steering_target_rad-=epsilon*direction_control[0];
-    plus.throttle_normalized+=epsilon*direction_control[1];
-    minus.throttle_normalized-=epsilon*direction_control[1];
-    if(plus.steering_target_rad>UNITY_SOURCE_MAX_STEERING_RAD||
-       plus.steering_target_rad<-UNITY_SOURCE_MAX_STEERING_RAD||
-       minus.steering_target_rad>UNITY_SOURCE_MAX_STEERING_RAD||
-       minus.steering_target_rad<-UNITY_SOURCE_MAX_STEERING_RAD||
-       plus.throttle_normalized<MPC_THROTTLE_MIN_DRIVE||
-       plus.throttle_normalized>MPC_THROTTLE_MAX||
-       minus.throttle_normalized<MPC_THROTTLE_MIN_DRIVE||
-       minus.throttle_normalized>MPC_THROTTLE_MAX)
-        return 0;
-
-    UnitySourcePlantOutputC center{},positive{},negative{};
-    if(!unity_source_plant_step_c(&baseline,dt,&center)||
-       !unity_source_plant_step_c(&plus,dt,&positive)||
-       !unity_source_plant_step_c(&minus,dt,&negative))
-        return 0;
-    MpcSourceDirectionalSecondOrder_t result{};
-    const double inverse_first=.5/epsilon;
-    const double inverse_second=1./(epsilon*epsilon);
-    for(int i=0;i<UNITY_SOURCE_PLANT_STATE_SIZE;++i) {
-        result.first_source[i]=
-            (positive.state[i]-negative.state[i])*inverse_first;
-        result.second_source[i]=
-            (positive.state[i]-2.*center.state[i]+negative.state[i])*
-                inverse_second;
-        if(!std::isfinite(result.first_source[i])||
-           !std::isfinite(result.second_source[i]))return 0;
-    }
-    const double body_center[3]={
-        center.integrated_body_forward_displacement_m,
-        center.integrated_body_lateral_displacement_m,
-        center.integrated_yaw_delta_rad};
-    const double body_positive[3]={
-        positive.integrated_body_forward_displacement_m,
-        positive.integrated_body_lateral_displacement_m,
-        positive.integrated_yaw_delta_rad};
-    const double body_negative[3]={
-        negative.integrated_body_forward_displacement_m,
-        negative.integrated_body_lateral_displacement_m,
-        negative.integrated_yaw_delta_rad};
-    for(int i=0;i<3;++i) {
-        result.first_body[i]=(body_positive[i]-body_negative[i])*
-            inverse_first;
-        result.second_body[i]=
-            (body_positive[i]-2.*body_center[i]+body_negative[i])*
-            inverse_second;
-        if(!std::isfinite(result.first_body[i])||
-           !std::isfinite(result.second_body[i]))return 0;
-    }
-    for(int i=0;i<4;++i) {
-        const double a=positive.maximum_longitudinal_slip_excess_mps[i];
-        const double b=center.maximum_longitudinal_slip_excess_mps[i];
-        const double c=negative.maximum_longitudinal_slip_excess_mps[i];
-        result.first_slip_excess_mps[i]=(a-c)*inverse_first;
-        result.second_slip_excess_mps[i]=(a-2.*b+c)*inverse_second;
-        if(!std::isfinite(result.first_slip_excess_mps[i])||
-           !std::isfinite(result.second_slip_excess_mps[i]))return 0;
-    }
-    *out=result;
-    return 1;
-}
 
 int vehicle_model_full_source_interval_sensitivities(
     const MpcModelState_t *state,const MpcModelControl_t *control,float dt,
@@ -476,104 +325,10 @@ int vehicle_model_full_source_interval_sensitivities(
     return 1;
 }
 
-int vehicle_model_source_slip_substep_sensitivities(
-    const MpcModelState_t *state,const MpcModelControl_t *control,
-    float dt,const double seed_state[26][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
-    const double seed_control[2][UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH],
-    UnitySourceSlipSubstepSensitivityC *samples,int capacity,int *count)
-{
-    if(!state||!control||!seed_state||!seed_control||!count||
-       !state->source_plant_initialized||!std::isfinite(dt)||dt<=0.f)
-        return 0;
-    UnitySourcePlantInputC original{};
-    write_source_plant_state(state,original.state);
-    original.steering_target_rad=clamp_source_steering_target(
-        control->steering_target_rad);
-    original.throttle_normalized=control->throttle_command;
-    original.suspension_history_initialized=
-        state->source_suspension_history_initialized;
-    UnitySourcePlantSensitivitySeedsC seeds{};
-    for(int row=0;row<26;++row)
-        for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane)
-            seeds.state[row][lane]=seed_state[row][lane];
-    for(int row=0;row<2;++row)
-        for(int lane=0;lane<UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH;++lane) {
-            if(row==0)seeds.steering_target[lane]=
-                seed_control[row][lane];
-            else seeds.throttle[lane]=seed_control[row][lane];
-        }
-    return unity_source_plant_all_slip_substep_sensitivity_c(
-        &original,dt,&seeds,samples,capacity,count);
-}
 
-int vehicle_model_source_slip_substeps(
-    const MpcModelState_t *state,const MpcModelControl_t *control,
-    float dt,UnitySourceSlipSubstepC *samples,int capacity,
-    int *count,double source_maximum[4])
-{
-    if(!state||!control||!state->source_plant_initialized||
-       !std::isfinite(dt)||dt<=0.f)return 0;
-    UnitySourcePlantInputC original{};
-    write_source_plant_state(state,original.state);
-    original.steering_target_rad=clamp_source_steering_target(
-        control->steering_target_rad);
-    original.throttle_normalized=control->throttle_command;
-    original.suspension_history_initialized=
-        state->source_suspension_history_initialized;
-    return unity_source_plant_all_slip_substeps_c(
-        &original,dt,samples,capacity,count,source_maximum);
-}
 
-int vehicle_model_trace_peak_longitudinal_slip(
-    const MpcModelState_t *state,const MpcModelControl_t *control,
-    float dt,UnitySourcePeakSlipTraceC out[4])
-{
-    if(!state||!control||!out||!state->source_plant_initialized||
-       !std::isfinite(dt)||dt<=0.f)return 0;
-    UnitySourcePlantInputC original{};
-    write_source_plant_state(state,original.state);
-    original.steering_target_rad=clamp_source_steering_target(
-        control->steering_target_rad);
-    original.throttle_normalized=control->throttle_command;
-    original.suspension_history_initialized=
-        state->source_suspension_history_initialized;
-    return unity_source_plant_peak_slip_trace_c(
-        &original,dt,out);
-}
 
-int vehicle_model_source_lateral_slip_second(
-    const MpcModelState_t *state,
-    const double first_source[UNITY_SOURCE_PLANT_STATE_SIZE],
-    const double second_source[UNITY_SOURCE_PLANT_STATE_SIZE],
-    double lateral_slip[4],double first_slip[4],double second_slip[4])
-{
-    if(!state || !first_source || !second_source ||
-       !lateral_slip || !first_slip || !second_slip)return 0;
-    MpcModelState_t prepared=*state;
-    if(!vehicle_model_initialize_plant_state(&prepared))return 0;
-    double source[UNITY_SOURCE_PLANT_STATE_SIZE]{};
-    write_source_plant_state(&prepared,source);
-    return unity_source_plant_instantaneous_lateral_slip_second_c(
-        source,first_source,second_source,lateral_slip,
-        first_slip,second_slip);
-}
 
-int vehicle_model_longitudinal_slip_excess(
-    const MpcModelState_t *state,
-    double excess_speed_mps[4],
-    double excess_derivative_wheel_omega[4])
-{
-    if (!state || !excess_speed_mps || !excess_derivative_wheel_omega)
-        return 0;
-    MpcModelState_t prepared = *state;
-    if (!vehicle_model_initialize_plant_state(&prepared)) return 0;
-    double source_state[UNITY_SOURCE_PLANT_STATE_SIZE] = {};
-    double slip[4] = {};
-    write_source_plant_state(&prepared, source_state);
-    return unity_source_plant_slip_excess_c(
-        source_state, slip, excess_speed_mps,
-        excess_derivative_wheel_omega);
-}
 
 int vehicle_model_source_lateral_slip(
     const MpcModelState_t *state, double slip[4],
@@ -843,128 +598,9 @@ static int vehicle_model_step_scalar(
     return stage->valid;
 }
 
-static float mpc_state_component(const MpcModelState_t *state, int index)
-{
-    switch (index) {
-    case MPC_STATE_IDX_EY: return state->e_y;
-    case MPC_STATE_IDX_EPSI: return state->e_psi;
-    case MPC_STATE_IDX_U: return state->u;
-    case MPC_STATE_IDX_V: return state->v;
-    case MPC_STATE_IDX_R: return state->r;
-    case MPC_STATE_IDX_DELAYED_STEERING_COMMAND_1:
-        return state->delayed_steering_command_1;
-    case MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2:
-        return state->delayed_steering_command_2;
-    case MPC_STATE_IDX_ACTUAL_STEERING_ANGLE:
-        return state->actual_steering_angle;
-    case MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1:
-        return state->delayed_throttle_command_1;
-    case MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2:
-        return state->delayed_throttle_command_2;
-    case MPC_STATE_IDX_WHEEL_OMEGA_FL:
-        return (float)state->source_plant_internal_state[
-            MPC_PLANT_STATE_WHEEL_OMEGA_FL];
-    case MPC_STATE_IDX_WHEEL_OMEGA_FR:
-        return (float)state->source_plant_internal_state[
-            MPC_PLANT_STATE_WHEEL_OMEGA_FR];
-    case MPC_STATE_IDX_WHEEL_OMEGA_RL:
-        return (float)state->source_plant_internal_state[
-            MPC_PLANT_STATE_WHEEL_OMEGA_RL];
-    case MPC_STATE_IDX_WHEEL_OMEGA_RR:
-        return (float)state->source_plant_internal_state[
-            MPC_PLANT_STATE_WHEEL_OMEGA_RR];
-    case MPC_STATE_IDX_BODY_HEIGHT:
-        return (float)state->source_plant_internal_state[
-            MPC_PLANT_STATE_BODY_HEIGHT];
-    case MPC_STATE_IDX_BODY_HEIGHT_RATE:
-        return (float)state->source_plant_internal_state[
-            MPC_PLANT_STATE_BODY_HEIGHT_RATE];
-    case MPC_STATE_IDX_ROLL:
-        return (float)state->source_plant_internal_state[MPC_PLANT_STATE_ROLL];
-    case MPC_STATE_IDX_ROLL_RATE:
-        return (float)state->source_plant_internal_state[
-            MPC_PLANT_STATE_ROLL_RATE];
-    case MPC_STATE_IDX_PITCH:
-        return (float)state->source_plant_internal_state[MPC_PLANT_STATE_PITCH];
-    case MPC_STATE_IDX_PITCH_RATE:
-        return (float)state->source_plant_internal_state[
-            MPC_PLANT_STATE_PITCH_RATE];
-    case MPC_STATE_IDX_SUSPENSION_JOUNCE_FL:
-        return (float)state->source_plant_internal_state[
-            MPC_PLANT_STATE_SUSPENSION_JOUNCE_FL];
-    case MPC_STATE_IDX_SUSPENSION_JOUNCE_FR:
-        return (float)state->source_plant_internal_state[
-            MPC_PLANT_STATE_SUSPENSION_JOUNCE_FR];
-    case MPC_STATE_IDX_SUSPENSION_JOUNCE_RL:
-        return (float)state->source_plant_internal_state[
-            MPC_PLANT_STATE_SUSPENSION_JOUNCE_RL];
-    case MPC_STATE_IDX_SUSPENSION_JOUNCE_RR:
-        return (float)state->source_plant_internal_state[
-            MPC_PLANT_STATE_SUSPENSION_JOUNCE_RR];
-    default: return NAN;
-    }
-}
 
-static void mpc_state_perturb(MpcModelState_t *state, int index, float amount)
-{
-    switch (index) {
-    case MPC_STATE_IDX_EY: state->e_y += amount; break;
-    case MPC_STATE_IDX_EPSI: state->e_psi += amount; break;
-    case MPC_STATE_IDX_U: state->u += amount; break;
-    case MPC_STATE_IDX_V: state->v += amount; break;
-    case MPC_STATE_IDX_R: state->r += amount; break;
-    case MPC_STATE_IDX_DELAYED_STEERING_COMMAND_1:
-        state->delayed_steering_command_1 += amount; break;
-    case MPC_STATE_IDX_DELAYED_STEERING_COMMAND_2:
-        state->delayed_steering_command_2 += amount; break;
-    case MPC_STATE_IDX_ACTUAL_STEERING_ANGLE:
-        state->actual_steering_angle += amount; break;
-    case MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_1:
-        state->delayed_throttle_command_1 += amount; break;
-    case MPC_STATE_IDX_DELAYED_THROTTLE_COMMAND_2:
-        state->delayed_throttle_command_2 += amount; break;
-    case MPC_STATE_IDX_WHEEL_OMEGA_FL:
-        state->source_plant_internal_state[MPC_PLANT_STATE_WHEEL_OMEGA_FL] += amount; break;
-    case MPC_STATE_IDX_WHEEL_OMEGA_FR:
-        state->source_plant_internal_state[MPC_PLANT_STATE_WHEEL_OMEGA_FR] += amount; break;
-    case MPC_STATE_IDX_WHEEL_OMEGA_RL:
-        state->source_plant_internal_state[MPC_PLANT_STATE_WHEEL_OMEGA_RL] += amount; break;
-    case MPC_STATE_IDX_WHEEL_OMEGA_RR:
-        state->source_plant_internal_state[MPC_PLANT_STATE_WHEEL_OMEGA_RR] += amount; break;
-    case MPC_STATE_IDX_BODY_HEIGHT:
-        state->source_plant_internal_state[MPC_PLANT_STATE_BODY_HEIGHT] += amount; break;
-    case MPC_STATE_IDX_BODY_HEIGHT_RATE:
-        state->source_plant_internal_state[MPC_PLANT_STATE_BODY_HEIGHT_RATE] += amount; break;
-    case MPC_STATE_IDX_ROLL:
-        state->source_plant_internal_state[MPC_PLANT_STATE_ROLL] += amount; break;
-    case MPC_STATE_IDX_ROLL_RATE:
-        state->source_plant_internal_state[MPC_PLANT_STATE_ROLL_RATE] += amount; break;
-    case MPC_STATE_IDX_PITCH:
-        state->source_plant_internal_state[MPC_PLANT_STATE_PITCH] += amount; break;
-    case MPC_STATE_IDX_PITCH_RATE:
-        state->source_plant_internal_state[MPC_PLANT_STATE_PITCH_RATE] += amount; break;
-    case MPC_STATE_IDX_SUSPENSION_JOUNCE_FL:
-        state->source_plant_internal_state[MPC_PLANT_STATE_SUSPENSION_JOUNCE_FL] += amount; break;
-    case MPC_STATE_IDX_SUSPENSION_JOUNCE_FR:
-        state->source_plant_internal_state[MPC_PLANT_STATE_SUSPENSION_JOUNCE_FR] += amount; break;
-    case MPC_STATE_IDX_SUSPENSION_JOUNCE_RL:
-        state->source_plant_internal_state[MPC_PLANT_STATE_SUSPENSION_JOUNCE_RL] += amount; break;
-    case MPC_STATE_IDX_SUSPENSION_JOUNCE_RR:
-        state->source_plant_internal_state[MPC_PLANT_STATE_SUSPENSION_JOUNCE_RR] += amount; break;
-    default: break;
-    }
-}
 
-static float mpc_stage_component(const MpcStageResult_t *stage, int index)
-{
-    return mpc_state_component(&stage->next, index);
-}
 
-static float mpc_component_delta(int row, float lhs, float rhs)
-{
-    return row == 1 ? remainderf(lhs - rhs, 6.2831853071795864769f)
-                    : lhs - rhs;
-}
 
 
 MpcStageResult_t mpc_vehicle_model_step(
