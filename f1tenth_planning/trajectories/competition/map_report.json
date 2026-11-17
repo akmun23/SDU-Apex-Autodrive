@@ -1,0 +1,68 @@
+{
+  "ax_mps2": 0.0,
+  "between_pose_motion_bound_m": 0.007218850677177997,
+  "direction": "counterclockwise",
+  "direction_evidence": {
+    "trace_backward_progress_m": 45.19332856669152,
+    "trace_coordinate_note": "sensor odometry treated as approximate map-frame x,y",
+    "trace_direction_confidence": 1.0,
+    "trace_forward_progress_m": 0.0,
+    "trace_points_projected": 427,
+    "trace_resampling_spacing_m": 0.1,
+    "track_extractor_direction": "clockwise"
+  },
+  "direction_reason": "inferred from projected sensor odometry trace",
+  "footprint_check_pose_spacing_m": 0.008333077287888492,
+  "footprint_check_poses": 5608,
+  "footprint_margin_m": 0.05,
+  "footprint_source": "map_track production rear-axle footprint probes; 0.510 x 0.273 m body",
+  "geometry_extraction": {
+    "eroded_clearance_threshold_m": 0.2,
+    "map_track_rejection": "No safe closed centerline extracted from PGM. This usually means the skeleton selected a wrong/spurious loop, not that the vehicle itself cannot clear the track. Pass --centerline path/to/same-map-raceline.csv or provide a track-specific centerline. Checked candidates: map skeleton: candidate centerline crosses occupied/unknown or out-of-bounds cells (minimum interpolated clearance 0.000 m, required 0.150 m). | map skeleton without smoothing: candidate centerline crosses occupied/unknown or out-of-bounds cells (minimum interpolated clearance 0.012 m, required 0.150 m).",
+    "method": "clearance-eroded free-space skeleton"
+  },
+  "geometry_optimization": {
+    "helper_footprint_check": {
+      "clearance_test_spacing_m": 0.0125,
+      "extra_wall_margin_m": 0.05,
+      "minimum_centerline_distance_to_occupied_cells_m": 0.2351489563859218,
+      "minimum_vehicle_perimeter_clearance_after_margin_m": 0.01734501527249538,
+      "pass": true
+    },
+    "helper_mesh": {
+      "length_m": 46.73189743047866,
+      "nodes": 779,
+      "source_length_m": 45.89333069313378,
+      "spacing_m": 0.05998959875542832
+    },
+    "input_peak_abs_curvature_inv_m": 3.617914923745156,
+    "length_penalty_per_m2": 0.0,
+    "method": "min_curvature_seed.generate",
+    "objective": "minimum curvature within explicit full-footprint-safe offsets",
+    "optimizer_status": "Solve_Succeeded",
+    "peak_abs_curvature_inv_m": 1.4672233514178061,
+    "preserve_source_geometry": true
+  },
+  "map_image": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/f1tenth_planning/maps/autodrive_iros_2026_compete.pgm",
+  "map_plot_png": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/f1tenth_planning/trajectories/autodrive_iros_2026_compete/map.png",
+  "map_resolution_m": 0.025,
+  "map_yaml": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/f1tenth_planning/maps/autodrive_iros_2026_compete.yaml",
+  "minimum_signed_footprint_clearance_m": 0.010149574129583127,
+  "physical_limits": "No tire, acceleration, friction, or lap-time limits guessed or applied.",
+  "raceline_csv": "/home/akselmo/Documents/GitHub/SDU-Apex-Autodrive/f1tenth_planning/trajectories/autodrive_iros_2026_compete/initial_raceline.csv",
+  "rear_axle_footprint_margin_safe": true,
+  "result": "completed",
+  "sample_count": 779,
+  "speed_mps": 1.2,
+  "speed_profile": "constant requested baseline; not a lap-time optimum",
+  "steering_check": {
+    "equivalent_abs_curvature_limit_inv_m": 1.781942083515505,
+    "maximum_abs_curvature_inv_m": 1.467223351,
+    "maximum_required_bicycle_steering_rad": 0.44375863496048334,
+    "source_steering_limit_rad": 0.523598,
+    "source_steering_wheelbase_m": 0.324,
+    "within_source_steering_limit": true
+  },
+  "track_length_m": 46.73189743047866,
+  "wall_distances": "raw map distances along path normals; no car width or margin subtracted"
+}

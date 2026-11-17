@@ -1,0 +1,28 @@
+# ROS / colcon
+build/
+install/
+log/
+build-*/
+install-*/
+log-*/
+
+# Kernels the optimizer compiles on first use
+/build_task/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Editors and local environment
+.idea/
+.vscode/
+.env
+
+# Closed-loop trial output, bags and local analysis
+/live_runs/
+/artifacts/
+*.bag
+*.db3
+*.csv.tmp
