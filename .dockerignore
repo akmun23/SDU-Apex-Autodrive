@@ -1,0 +1,22 @@
+.git
+**/build
+build-*
+**/install
+install-*
+**/log
+log-*
+**/.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+artifacts
+live_runs
+tools
+docs
+README.md
+
+# Simulator source references are development material only;
+# runtime packages build from the ROS/C++ sources, so keep them out of the
+# Docker build context.
+third_party
+

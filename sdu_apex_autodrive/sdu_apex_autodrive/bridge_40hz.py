@@ -1,0 +1,1062 @@
+"""Pace the official AutoDRIVE bridge at 40 Hz and stamp responses by FIFO request order."""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import signal
+import threading
+import time
+from collections import deque
+from copy import copy
+from typing import Any
+
+import gevent
+import rclpy
+from gevent.event import Event
+from gevent.lock import Semaphore
+from std_msgs.msg import Bool
+from std_msgs.msg import String
+from sdu_apex_msgs.msg import DriveCommand
+from rclpy.qos import (
+    QoSDurabilityPolicy,
+    QoSHistoryPolicy,
+    QoSProfile,
+    QoSReliabilityPolicy,
+)
+
+from autodrive_roboracer import autodrive_bridge as official_bridge
+
+
+EXPECTED_RATE_HZ = 40.0
+DEFAULT_RATE_HZ = EXPECTED_RATE_HZ
+PACKET_TIMING_TOPIC = "/autodrive/roboracer_1/bridge_packet_timing"
+# Team-generated, request-stamped source of truth for actuator input.
+BRIDGE_REQUEST_COMMAND_TOPIC = "/odom/bridge_request_command"
+BRIDGE_ACTUATOR_FEEDBACK_TOPIC = "/odom/bridge_actuator_feedback"
+_bridge_actuator_feedback_publisher: Any = None
+TIMING_FAULT_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault"
+TIMING_FAULT_DETAIL_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault_detail"
+DEV_SIM_RESET_ENABLE_ENV = "SDU_APEX_DEV_SIM_RESET_ENABLED"
+DEV_PACKET_DIAGNOSTICS_ENABLE_ENV = "SDU_APEX_DEV_PACKET_DIAGNOSTICS_ENABLED"
+DEV_SIM_RESET_TOPIC = "/autodrive/reset_command"
+_development_packet_diagnostics_enabled = False
+
+# Requests are paced on a 25 ms host-clock grid. Receive times remain in
+# diagnostics, while source headers use request time so network jitter does
+# not masquerade as simulator sample spacing.
+MIN_REQUEST_SPACING_S = 0.024
+
+
+def _next_request_deadline(next_deadline: float, emitted_at: float,
+                           period: float) -> float:
+    """Limit phase catch-up to a small, bounded request-rate correction."""
+    minimum_spacing = min(period, MIN_REQUEST_SPACING_S)
+    return max(next_deadline, emitted_at + minimum_spacing)
+
+
+def _env_enabled(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+# This state is shared by the gevent request sender and the native ROS
+# command-listener thread. Use an OS-thread lock at that boundary; the other
+# bridge locks remain gevent-local.
+_command_lock = threading.Lock()
+_latest_command: dict[str, str] = {
+    "V1 Throttle": "0.0",
+    "V1 Steering": "0.0",
+    "V1 Reset": "False",
+}
+_latest_steering_update_monotonic_ns: int | None = None
+_reset_level = False
+_reset_deadline_monotonic: float | None = None
+_RESET_HOLD_SEC = 0.75
+# Socket.OnConnect can emit one unsolicited telemetry packet. Keep the request
+# FIFO empty long enough for that packet to be discarded before the first
+# command/response pair; otherwise it can shift every request timestamp by one
+# epoch until a later missing packet happens to resynchronize the stream.
+_CONNECT_BOOTSTRAP_SETTLE_SEC = 0.1
+_stop_sender = Event()
+_emit_lock = Semaphore()
+_client_connected = Event()
+
+_packet_stamp_lock = Semaphore()
+_packet_stamp: Any = None
+_packet_timestamp_patch_installed = False
+
+_pending_request_lock = Semaphore()
+_connection_generation = 0
+_bridge_request_sequence = 0
+_pending_requests: deque[
+    tuple[Any, int, Semaphore | None, int, int, dict[str, str], int | None]
+] = deque()
+_pending_request_started_ns: int | None = None
+_first_request_sent = False
+_first_valid_packet = False
+_valid_packet_count = 0
+_bootstrap_packet_seen = Event()
+_last_packet_arrival_ns: int | None = None
+_active_request_stamp: Any = None
+_active_packet_stamp: Any = None
+_active_request_monotonic_ns: int | None = None
+_active_packet_arrival_ns: int | None = None
+_active_request_sequence: int | None = None
+_active_command: dict[str, str] = {}
+_active_steering_update_monotonic_ns: int | None = None
+_active_simulator_packet: dict[str, float | int | None] = {}
+_active_request_slot_pool: Semaphore | None = None
+
+_command_listener_stop = threading.Event()
+_command_listener_thread: threading.Thread | None = None
+_command_listener_executor: Any = None
+_command_listener_node: Any = None
+
+_packet_timing_lock = Semaphore()
+_packet_handler_lock = Semaphore(1)
+_packet_timing_publisher: Any = None
+_bridge_request_command_publisher: Any = None
+_timing_fault_publisher: Any = None
+_timing_fault_detail_publisher: Any = None
+_packet_sequence = 0
+_packet_contract_installed = False
+_timing_fault = False
+_timing_fault_reason = ""
+_shutdown_requested = False
+
+# Unity can emit one startup packet before its LiDAR range buffer has been
+# populated.  The official decoder treats that optional field as mandatory and
+# raises KeyError, which otherwise stops the request/response loop forever.
+# Drop only that incomplete packet and request the next one; no ROS sensor
+# message is published and no value is invented.
+_STARTUP_REQUIRED_KEYS = ("V1 LIDAR Range Array",)
+
+
+def _copy_stamp(stamp: Any) -> Any:
+    """Copy a ROS time value without sharing a mutable message object."""
+    return copy(stamp)
+
+
+def _set_pending_request(
+        slot_pool: Semaphore | None,
+        generation: int,
+        request_sequence: int,
+        command: dict[str, str],
+        steering_update_monotonic_ns: int | None) -> Any | None:
+    """Record one request boundary for FIFO response association."""
+    global _pending_request_started_ns, _first_request_sent
+    node = getattr(official_bridge, "autodrive_bridge", None)
+    if node is None:
+        return None
+    try:
+        stamp = node.get_clock().now().to_msg()
+    except Exception:
+        return None
+    request_ns = time.monotonic_ns()
+    with _pending_request_lock:
+        if (not _client_connected.is_set() or
+                generation != _connection_generation):
+            return None
+        _pending_requests.append((_copy_stamp(stamp), request_ns, slot_pool,
+                                  generation, request_sequence, dict(command),
+                                  steering_update_monotonic_ns))
+        _pending_request_started_ns = _pending_requests[0][1]
+        _first_request_sent = True
+    return _copy_stamp(stamp)
+
+
+def _discard_pending_request() -> None:
+    """Remove the newest request context when sending the request failed."""
+    global _pending_request_started_ns
+    with _pending_request_lock:
+        if _pending_requests:
+            _pending_requests.pop()
+        _pending_request_started_ns = (
+            _pending_requests[0][1] if _pending_requests else None)
+
+
+def _next_request_sequence() -> int:
+    """Allocate a unique sequence for one emitted Bridge request."""
+    global _bridge_request_sequence
+    with _pending_request_lock:
+        _bridge_request_sequence += 1
+        return _bridge_request_sequence
+
+
+def _reset_request_pipeline() -> None:
+    """Drop requests belonging to a closed Unity socket.
+
+    A late callback from an old socket cannot retain request metadata across
+    the new connection generation.
+    """
+    global _connection_generation
+    global _pending_request_started_ns
+    global _first_request_sent, _first_valid_packet, _valid_packet_count
+    global _last_packet_arrival_ns
+    global _active_request_stamp, _active_packet_stamp
+    global _active_request_monotonic_ns, _active_packet_arrival_ns
+    global _active_request_sequence, _active_command
+    global _active_steering_update_monotonic_ns
+    global _active_simulator_packet
+    global _active_request_slot_pool, _packet_stamp
+    with _pending_request_lock:
+        _connection_generation += 1
+        _pending_requests.clear()
+        _pending_request_started_ns = None
+        _first_request_sent = False
+        _first_valid_packet = False
+        _valid_packet_count = 0
+        _last_packet_arrival_ns = None
+        _active_request_stamp = None
+        _active_packet_stamp = None
+        _active_request_monotonic_ns = None
+        _active_packet_arrival_ns = None
+        _active_request_sequence = None
+        _active_command = {}
+        _active_steering_update_monotonic_ns = None
+        _active_simulator_packet = {}
+        _active_request_slot_pool = None
+    _bootstrap_packet_seen.clear()
+    with _packet_stamp_lock:
+        _packet_stamp = None
+
+
+def _finish_packet() -> None:
+    """Clear packet state and return the response's bounded pipeline slot."""
+    global _packet_stamp, _active_request_stamp, _active_packet_stamp
+    global _active_request_monotonic_ns, _active_packet_arrival_ns
+    global _active_request_sequence, _active_command
+    global _active_steering_update_monotonic_ns
+    global _active_simulator_packet
+    global _active_request_slot_pool, _pending_request_started_ns
+    with _packet_stamp_lock:
+        _packet_stamp = None
+    with _pending_request_lock:
+        slot_pool = _active_request_slot_pool
+        _active_request_stamp = None
+        _active_packet_stamp = None
+        _active_request_monotonic_ns = None
+        _active_packet_arrival_ns = None
+        _active_request_sequence = None
+        _active_command = {}
+        _active_steering_update_monotonic_ns = None
+        _active_simulator_packet = {}
+        _active_request_slot_pool = None
+        _pending_request_started_ns = (
+            _pending_requests[0][1] if _pending_requests else None)
+    if slot_pool is not None:
+        slot_pool.release()
+
+
+def _packet_timing_pub() -> Any:
+    """Create the bridge-side timing publisher after the official node exists."""
+    global _packet_timing_publisher, _timing_fault_publisher
+    global _timing_fault_detail_publisher
+    node = getattr(official_bridge, "autodrive_bridge", None)
+    if node is None:
+        return None
+    with _packet_timing_lock:
+        if _packet_timing_publisher is None:
+            try:
+                _packet_timing_publisher = node.create_publisher(
+                    String, PACKET_TIMING_TOPIC, 100)
+            except Exception as exc:
+                print(f"[autodrive_bridge_40hz] timing publisher unavailable: {exc}")
+                return None
+        if _timing_fault_publisher is None:
+            _timing_fault_publisher = node.create_publisher(
+                Bool, TIMING_FAULT_TOPIC, 10)
+        if _timing_fault_detail_publisher is None:
+            _timing_fault_detail_publisher = node.create_publisher(
+                String, TIMING_FAULT_DETAIL_TOPIC, 10)
+        return _packet_timing_publisher
+
+
+def _publish_exact_request_command(stamp: Any, command: dict[str, str]) -> None:
+    """Publish the same discretized command the Bridge is sending to Unity.
+
+    This runs before the Socket.IO request, giving the sensor odometry
+    subscriber the same request stamp and values before the response arrives.
+    The message uses DriveCommand's established physical-steering convention.
+    Unlike the development-only packet timing stream this is always enabled.
+    """
+    global _bridge_request_command_publisher, _bridge_actuator_feedback_publisher
+    node = getattr(official_bridge, "autodrive_bridge", None)
+    if node is None:
+        raise RuntimeError("cannot publish request command without Bridge node")
+    if _bridge_request_command_publisher is None:
+        _bridge_request_command_publisher = node.create_publisher(
+            DriveCommand, BRIDGE_REQUEST_COMMAND_TOPIC, 100)
+    # Discover the feedback endpoint before the first sensor response. Lazy
+    # creation at that response loses initial samples in volatile recorders.
+    if _bridge_actuator_feedback_publisher is None:
+        _bridge_actuator_feedback_publisher = node.create_publisher(
+            DriveCommand, BRIDGE_ACTUATOR_FEEDBACK_TOPIC, 100)
+    steering_normalized = float(command["V1 Steering"])
+    throttle_normalized = float(command["V1 Throttle"])
+    if (not math.isfinite(steering_normalized) or
+            not math.isfinite(throttle_normalized) or
+            abs(steering_normalized) > 1.0 or
+            not 0.0 <= throttle_normalized <= 1.0):
+        raise RuntimeError("Bridge command outside source-model input range")
+    message = DriveCommand()
+    message.header.stamp = _copy_stamp(stamp)
+    message.steering_angle_rad = steering_normalized * (math.pi / 6.0)
+    message.throttle_normalized = throttle_normalized
+    _bridge_request_command_publisher.publish(message)
+
+
+def _publish_packet_actuator_feedback(stamp: Any, data: dict[str, Any]) -> None:
+    """Preserve legal actuator feedback at its associated sensor epoch.
+
+    The stock Float32 topics lose this association. Publish before the stock
+    decoder emits encoder/IMU messages; odometry also joins by exact stamp so
+    independent DDS callback ordering cannot substitute a later sample.
+    """
+    global _bridge_actuator_feedback_publisher
+    steering = float(data["V1 Steering"])
+    throttle = float(data["V1 Throttle"])
+    # Unlike the normalized outgoing command, V1 Steering feedback is in
+    # radians. The official decoder publishes this value unchanged and uses
+    # it directly in its wheel-angle tan() calculation.
+    # Socket.cs emits CurrentSteeringAngle.ToString("F4"). The legal physical
+    # limit pi/6 rounds from 0.5235987756 to 0.5236; testing F4 feedback
+    # against a 1e-6 tolerance falsely kills the entire 40 Hz sensor stream
+    # precisely when the car reaches steering saturation in a corner. Accept
+    # half of the 1e-4 serialization quantum; still reject a genuine excess.
+    feedback_quantization_tolerance_rad = 0.5e-4 + 1e-7
+    if (not math.isfinite(steering) or
+            abs(steering) > math.pi / 6.0 + feedback_quantization_tolerance_rad or
+            not math.isfinite(throttle) or not 0.0 <= throttle <= 1.0):
+        raise RuntimeError(
+            f"Bridge actuator feedback outside physical range "
+            f"(steering_rad={steering:.9g}, throttle={throttle:.9g})")
+    node = getattr(official_bridge, "autodrive_bridge", None)
+    if node is None:
+        raise RuntimeError("cannot publish actuator feedback without Bridge node")
+    if _bridge_actuator_feedback_publisher is None:
+        _bridge_actuator_feedback_publisher = node.create_publisher(
+            DriveCommand, BRIDGE_ACTUATOR_FEEDBACK_TOPIC, 100)
+    message = DriveCommand()
+    message.header.stamp = _copy_stamp(stamp)
+    message.header.frame_id = "actuator_feedback"
+    message.steering_angle_rad = max(-math.pi / 6.0, min(math.pi / 6.0, steering))
+    message.throttle_normalized = throttle
+    _bridge_actuator_feedback_publisher.publish(message)
+
+
+def _trigger_timing_fault(reason: str) -> None:
+    """Fail closed when the native 40 Hz source contract is broken."""
+    global _timing_fault, _timing_fault_reason
+    global _timing_fault_detail_publisher
+    # An already-buffered Socket.IO response can arrive after orderly ROS
+    # teardown has cleared the request FIFO. That is not a source-timing
+    # fault, and must not publish a false fatal condition while stopping.
+    if _shutdown_requested:
+        return
+    with _pending_request_lock:
+        if _timing_fault:
+            return
+        _timing_fault = True
+        _timing_fault_reason = reason
+    with _command_lock:
+        _latest_command["V1 Throttle"] = "0.0"
+        _latest_command["V1 Steering"] = "0.0"
+        _latest_command["V1 Reset"] = "False"
+    _stop_sender.set()
+    print(
+        "[autodrive_bridge_40hz] FATAL timing fault: " + reason +
+        "; stream stopped and neutral command latched",
+        flush=True,
+    )
+    node = getattr(official_bridge, "autodrive_bridge", None)
+    publisher = _timing_fault_publisher
+    if publisher is None and node is not None:
+        try:
+            publisher = node.create_publisher(Bool, TIMING_FAULT_TOPIC, 10)
+        except Exception as exc:
+            print(
+                f"[autodrive_bridge_40hz] timing fault publication failed: {exc}",
+                flush=True,
+            )
+    if publisher is not None:
+        try:
+            publisher.publish(Bool(data=True))
+        except Exception as exc:
+            print(
+                f"[autodrive_bridge_40hz] timing fault publication failed: {exc}",
+                flush=True,
+            )
+    detail_publisher = _timing_fault_detail_publisher
+    if detail_publisher is None and node is not None:
+        try:
+            detail_publisher = node.create_publisher(
+                String, TIMING_FAULT_DETAIL_TOPIC, 10)
+            _timing_fault_detail_publisher = detail_publisher
+        except Exception as exc:
+            print(
+                f"[autodrive_bridge_40hz] timing fault detail publication failed: {exc}",
+                flush=True,
+            )
+    if detail_publisher is not None:
+        try:
+            detail = String()
+            detail.data = reason
+            detail_publisher.publish(detail)
+        except Exception as exc:
+            print(
+                f"[autodrive_bridge_40hz] timing fault detail publication failed: {exc}",
+                flush=True,
+            )
+
+
+def _on_reset_command(message: Bool) -> None:
+    """Apply a reset level with a bounded safety timeout.
+
+    The calibration harness normally sends an explicit true/false pulse, but
+    a one-shot ``ros2 topic pub ... true`` must not leave Unity in a permanent
+    reset loop.  Repeated true messages extend the pulse; an explicit false
+    still releases it immediately.
+    """
+    global _reset_level, _reset_deadline_monotonic
+    global _first_valid_packet, _last_packet_arrival_ns, _valid_packet_count
+    next_level = bool(message.data)
+    with _command_lock:
+        changed = next_level != _reset_level
+        _reset_level = next_level
+        _reset_deadline_monotonic = (
+            time.monotonic() + _RESET_HOLD_SEC if _reset_level else None)
+        _latest_command["V1 Reset"] = "True" if _reset_level else "False"
+    if changed and next_level:
+        # Do not publish packets while reset is asserted. The first matched
+        # packet after release starts a fresh request-time epoch.
+        with _pending_request_lock:
+            _first_valid_packet = False
+            _last_packet_arrival_ns = None
+            _valid_packet_count = 0
+    if changed:
+        print(
+            f"[autodrive_bridge_40hz] reset ROS callback: {next_level}",
+            flush=True,
+        )
+
+
+def _development_packet_details(data: dict[str, Any]) -> dict[str, Any]:
+    """Extract scoring telemetry only during explicitly enabled development.
+
+    The competition path must not even inspect these packet fields. Keeping
+    this boundary ahead of parsing also removes all vector/string work from
+    the normal bridge hot path.
+    """
+    if not _development_packet_diagnostics_enabled:
+        return {}
+
+    def parse_float(value: Any) -> float | None:
+        try:
+            return None if value in (None, "") else float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def parse_vector(value: Any, size: int) -> list[float | None]:
+        try:
+            values = [float(item) for item in str(value).split()]
+        except (TypeError, ValueError):
+            values = []
+        return [values[index] if index < len(values) else None
+                for index in range(size)]
+
+    result = {}
+    vector_fields = (
+        ("simulator_position", "V1 Position", ("x", "y", "z")),
+        ("simulator_orientation_quaternion", "V1 Orientation Quaternion",
+         ("x", "y", "z", "w")),
+        ("simulator_orientation_euler", "V1 Orientation Euler Angles",
+         ("x", "y", "z")),
+        ("simulator_linear_velocity", "V1 Linear Velocity", ("x", "y", "z")),
+        ("simulator_angular_velocity", "V1 Angular Velocity", ("x", "y", "z")),
+        ("simulator_linear_acceleration", "V1 Linear Acceleration", ("x", "y", "z")),
+        ("simulator_encoder_angles", "V1 Encoder Angles", ("left", "right")),
+    )
+    for prefix, key, suffixes in vector_fields:
+        for suffix, value in zip(suffixes, parse_vector(data.get(key), len(suffixes))):
+            result[f"{prefix}_{suffix}"] = value
+    result.update({
+        "simulator_feedback_throttle_norm": parse_float(data.get("V1 Throttle")),
+        "simulator_feedback_steering_norm": parse_float(data.get("V1 Steering")),
+        "simulator_collision_count": _parse_optional_int(data.get("V1 Collisions")),
+        "simulator_development_telemetry_event_id": _parse_optional_int(
+            data.get("V1 Development Telemetry Event ID")),
+        "simulator_development_command_sequence": _parse_optional_int(
+            data.get("V1 Development Command Sequence")),
+    })
+    return result
+
+
+def _capture_competition_packet(data: Any) -> bool:
+    """Pair a stock-image telemetry packet with the oldest pending request.
+
+    Responses with a matching request are associated by FIFO order. An
+    unsolicited bootstrap/stale packet has no causal command or request time,
+    so it is rejected before any sensor publisher sees it. No Unity clock,
+    frame counter, or echoed request identifier is read.
+    """
+    global _active_request_stamp, _active_packet_stamp
+    global _active_request_monotonic_ns, _active_packet_arrival_ns
+    global _active_request_sequence, _active_command
+    global _active_steering_update_monotonic_ns
+    global _active_simulator_packet, _active_request_slot_pool
+    global _pending_request_started_ns
+
+    if not isinstance(data, dict):
+        _trigger_timing_fault("non-dictionary simulator packet")
+        return False
+
+    with _pending_request_lock:
+        has_pending_request = bool(_pending_requests)
+        bootstrap_already_seen = _bootstrap_packet_seen.is_set()
+        connected = _client_connected.is_set()
+        if not has_pending_request and connected and not bootstrap_already_seen:
+            bootstrap_packet = True
+        else:
+            bootstrap_packet = False
+
+    if not has_pending_request:
+        if bootstrap_packet:
+            _bootstrap_packet_seen.set()
+            print(
+                "[autodrive_bridge_40hz] dropping unsolicited connection "
+                "bootstrap packet; publishing starts with a paced Bridge request",
+                flush=True,
+            )
+        return False
+
+    node = getattr(official_bridge, "autodrive_bridge", None)
+    if node is None:
+        _trigger_timing_fault("cannot timestamp packet: official ROS node unavailable")
+        return False
+    try:
+        receive_stamp = node.get_clock().now().to_msg()
+    except Exception as exc:
+        _trigger_timing_fault(f"cannot timestamp received packet: {exc}")
+        return False
+    arrival_ns = time.monotonic_ns()
+
+    simulator_packet = _development_packet_details(data)
+
+    with _pending_request_lock:
+        (request_stamp, request_ns, slot_pool, _, request_sequence,
+         command, steering_update_monotonic_ns) = _pending_requests.popleft()
+        _pending_request_started_ns = (
+            _pending_requests[0][1] if _pending_requests else None)
+        _active_request_slot_pool = slot_pool
+        _active_request_stamp = request_stamp
+        _active_packet_stamp = receive_stamp
+        _active_request_monotonic_ns = request_ns
+        _active_packet_arrival_ns = arrival_ns
+        _active_request_sequence = request_sequence
+        _active_command = command
+        _active_steering_update_monotonic_ns = steering_update_monotonic_ns
+        _active_simulator_packet = simulator_packet
+    return True
+
+
+def _validate_received_packet() -> bool:
+    """Validate local transport cadence without requiring simulator metadata."""
+    global _first_valid_packet, _valid_packet_count, _last_packet_arrival_ns
+    with _pending_request_lock:
+        arrival_ns = _active_packet_arrival_ns
+    if arrival_ns is None:
+        # The packet was already timestamped at callback entry; keep a host
+        # receive-time fallback instead of converting missing diagnostics into
+        # a fatal timing gate.
+        arrival_ns = time.monotonic_ns()
+
+    with _command_lock:
+        reset_active = _reset_level
+    if reset_active:
+        return False
+
+    with _pending_request_lock:
+        _last_packet_arrival_ns = arrival_ns
+        _first_valid_packet = True
+        _valid_packet_count += 1
+    return True
+
+
+def _parse_command_float(command: dict[str, str], key: str) -> float | None:
+    try:
+        return float(command[key])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _parse_optional_int(value: Any) -> int | None:
+    try:
+        return None if value in (None, "") else int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_packet_arrival() -> None:
+    """Publish one diagnostic event at the start of each decoded packet."""
+    if not _development_packet_diagnostics_enabled:
+        return
+    global _packet_sequence
+    arrival_ns = _active_packet_arrival_ns or time.monotonic_ns()
+    with _pending_request_lock:
+        request_ns = _active_request_monotonic_ns
+        request_sequence = _active_request_sequence
+        command = dict(_active_command)
+        steering_update_ns = _active_steering_update_monotonic_ns
+        simulator_packet = dict(_active_simulator_packet)
+        connection_generation = _connection_generation
+        receive_stamp = _active_packet_stamp
+        request_stamp = _active_request_stamp
+    with _packet_timing_lock:
+        _packet_sequence += 1
+        sequence = _packet_sequence
+    publisher = _packet_timing_pub()
+    if publisher is None:
+        return
+    message = String()
+    message.data = json.dumps({
+        "schema_version": 5,
+        "packet_sequence": sequence,
+        "bridge_arrival_monotonic_ns": arrival_ns,
+        "bridge_receive_ros_stamp_ns": (
+            None if receive_stamp is None else
+            int(receive_stamp.sec) * 1_000_000_000 + int(receive_stamp.nanosec)),
+        "bridge_request_ros_stamp_ns": (
+            None if request_stamp is None else
+            int(request_stamp.sec) * 1_000_000_000 + int(request_stamp.nanosec)),
+        "request_monotonic_ns": request_ns,
+        "request_sequence": request_sequence,
+        "steering_command_update_age_ms": (
+            None if request_ns is None or steering_update_ns is None else
+            (request_ns - steering_update_ns) / 1.0e6),
+        "connection_generation": connection_generation,
+        "sent_throttle_norm": _parse_command_float(command, "V1 Throttle"),
+        "sent_steering_norm": _parse_command_float(command, "V1 Steering"),
+        "sent_reset": command.get("V1 Reset"),
+        **simulator_packet,
+    }, separators=(",", ":"))
+    try:
+        publisher.publish(message)
+    except Exception as exc:
+        print(f"[autodrive_bridge_40hz] timing event publish failed: {exc}")
+
+
+def _install_packet_timestamp_patch() -> None:
+    """Stamp packet messages at the associated Bridge request boundary."""
+    global _packet_timestamp_patch_installed
+    if _packet_timestamp_patch_installed:
+        return
+
+    def stamped_creator(original: Any) -> Any:
+        def create(*args: Any, **kwargs: Any) -> Any:
+            global _packet_stamp
+            message = original(*args, **kwargs)
+            if not hasattr(message, "header"):
+                return message
+            with _packet_stamp_lock:
+                if _packet_stamp is None:
+                    with _pending_request_lock:
+                        pending = (_active_request_stamp
+                                   if _active_request_stamp is not None
+                                   else _active_packet_stamp)
+                    _packet_stamp = _copy_stamp(
+                        pending if pending is not None else message.header.stamp)
+                message.header.stamp = _copy_stamp(_packet_stamp)
+            return message
+        return create
+
+    for name in (
+        "create_joint_state_msg", "create_imu_msg", "create_odom_msg",
+        "create_laserscan_msg", "create_image_msg",
+    ):
+        if hasattr(official_bridge, name):
+            setattr(official_bridge, name, stamped_creator(
+                getattr(official_bridge, name)))
+
+    original_encoder_publish = official_bridge.publish_encoder_data
+
+    def begin_packet(*args: Any, **kwargs: Any) -> Any:
+        global _packet_stamp
+        with _packet_stamp_lock:
+            _packet_stamp = None
+        _record_packet_arrival()
+        return original_encoder_publish(*args, **kwargs)
+
+    official_bridge.publish_encoder_data = begin_packet
+    _packet_timestamp_patch_installed = True
+
+
+def _rate_hz() -> float:
+    value = os.environ.get("AUTODRIVE_BRIDGE_RATE_HZ", str(DEFAULT_RATE_HZ))
+    try:
+        rate = float(value)
+    except ValueError as exc:
+        raise RuntimeError("AUTODRIVE_BRIDGE_RATE_HZ must be exactly 40 Hz") from exc
+    if not math.isclose(rate, EXPECTED_RATE_HZ, rel_tol=0.0, abs_tol=1e-9):
+        raise RuntimeError(
+            f"AUTODRIVE_BRIDGE_RATE_HZ must be exactly {EXPECTED_RATE_HZ:g} Hz")
+    return rate
+
+
+def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
+    """Keep the nominal request cadence without response-age stop gates."""
+    global _connection_generation
+    period = 1.0 / rate_hz
+    next_send = time.monotonic()
+    settled_generation: int | None = None
+    settle_until = 0.0
+    while not _stop_sender.is_set():
+        now = time.monotonic()
+        if _timing_fault:
+            return
+        wait_time = next_send - now
+        if wait_time > 0.0:
+            gevent.sleep(wait_time)
+            continue
+
+        next_send += period
+        if next_send < now:
+            missed = int((now - next_send) / period) + 1
+            next_send += missed * period
+
+        if not _client_connected.is_set():
+            gevent.sleep(period)
+            continue
+        with _pending_request_lock:
+            generation = _connection_generation
+        if generation != settled_generation:
+            settled_generation = generation
+            settle_until = now + _CONNECT_BOOTSTRAP_SETTLE_SEC
+        if now < settle_until:
+            # Do not block connection callbacks: the inbound packet handler
+            # must be able to drop the unsolicited bootstrap while the FIFO is
+            # empty. This is a one-time delay per socket generation; after it,
+            # the normal 40 Hz request schedule is unchanged.
+            gevent.sleep(min(period, settle_until - now))
+            continue
+
+        with _command_lock:
+            global _reset_level, _reset_deadline_monotonic
+            if (_reset_level and _reset_deadline_monotonic is not None and
+                    now >= _reset_deadline_monotonic):
+                _reset_level = False
+                _reset_deadline_monotonic = None
+                _latest_command["V1 Reset"] = "False"
+            command = dict(_latest_command)
+            steering_update_monotonic_ns = (
+                _latest_steering_update_monotonic_ns)
+            command["V1 Reset"] = "True" if _reset_level else "False"
+
+        request_sequence = _next_request_sequence()
+        request_stamp = _set_pending_request(
+            None, generation, request_sequence, command,
+            steering_update_monotonic_ns)
+        if request_stamp is None:
+            continue
+        try:
+            # The exact payload snapshot, and the same integer ROS stamp as
+            # the forthcoming IMU/encoder packet, are emitted before the
+            # request. A later arrival-time command may differ at a corner.
+            _publish_exact_request_command(request_stamp, command)
+            # Keep all outgoing Socket.IO calls serialized. The official bridge
+            # runs a gevent server and this pacing loop is a greenlet.
+            with _emit_lock:
+                emitted_at = time.monotonic()
+                original_emit("Bridge", data=command)
+                # Keep the nominal 25 ms phase schedule, but do not issue a
+                # catch-up request less than 24 ms after an actual send. This
+                # avoids the observed 16--20 ms bursts without accumulating
+                # timer oversleep into a permanently slower cadence.
+                next_send = _next_request_deadline(
+                    next_send, emitted_at, period)
+        except Exception as exc:
+            _discard_pending_request()
+            _trigger_timing_fault(f"Bridge request send failed: {exc}")
+            return
+
+
+def _install_packet_contract() -> None:
+    """Accept simulator packets with or without optional camera fields."""
+    global _packet_contract_installed
+    if _packet_contract_installed:
+        return
+
+    handlers = official_bridge.sio.handlers.get("/", {})
+    original_handler = handlers.get("Bridge")
+    if original_handler is None:
+        raise RuntimeError("official AutoDRIVE bridge has no Bridge handler")
+
+    def packet_handler(sid: Any, data: Any) -> Any:
+        # Socket.IO may schedule event callbacks concurrently. Keep the
+        # source packet contract and official decoder in arrival order so the
+        # shared timing state cannot observe packet N+1 before packet N has
+        # finished decoding/publication.
+        with _packet_handler_lock:
+            return _packet_handler_body(sid, data)
+
+    def _packet_handler_body(sid: Any, data: Any) -> Any:
+        try:
+            if _shutdown_requested:
+                return None
+            if _timing_fault:
+                return None
+            if not _capture_competition_packet(data):
+                return None
+            if not _validate_received_packet():
+                return None
+            if isinstance(data, dict):
+                # The official bridge accesses this key unconditionally.
+                # Injecting an empty placeholder keeps its numeric decoder
+                # compatible with the source-disabled packet and replaces an
+                # optional image field before base64/PIL work can happen.
+                data = dict(data)
+                data["V1 Front Camera Image"] = ""
+            if isinstance(data, dict) and any(
+                    key not in data for key in _STARTUP_REQUIRED_KEYS):
+                missing = ", ".join(
+                    key for key in _STARTUP_REQUIRED_KEYS if key not in data)
+                print(
+                    "[autodrive_bridge_40hz] dropping incomplete startup packet "
+                    f"(missing {missing})",
+                    flush=True,
+                )
+                return None
+            try:
+                _publish_packet_actuator_feedback(_active_request_stamp, data)
+                result = original_handler(sid, data)
+            except Exception as exc:
+                # Report decoder failures explicitly so a partial recording cannot
+                # appear complete after the Socket.IO callback stops.
+                _trigger_timing_fault(
+                    "simulator packet decode/publication failed: "
+                    f"{type(exc).__name__}: {exc}")
+                return None
+            return result
+        finally:
+            _finish_packet()
+
+    handlers["Bridge"] = packet_handler
+    _packet_contract_installed = True
+
+
+def _disable_camera_path() -> None:
+    """Avoid camera decode/publication while retaining numeric telemetry."""
+    official_bridge.publish_camera_images = lambda *_args, **_kwargs: None
+    official_bridge.Image.open = lambda *_args, **_kwargs: (
+        official_bridge.np.empty((1, 1, 3), dtype=official_bridge.np.uint8))
+
+
+def _force_ipv4_server() -> None:
+    """Make the SDK bridge reachable by the prebuilt Unity player.
+
+    The SDK calls ``WSGIServer(("", 4567), ...)``.  On this host gevent
+    resolves that wildcard to an IPv6-only listener, while the Unity player
+    is launched with its documented IPv4 loopback endpoint ``127.0.0.1``.
+    Bind its wildcard listener to IPv4 so the player can connect.
+    """
+    original_server = official_bridge.pywsgi.WSGIServer
+
+    class IPv4WSGIServer(original_server):
+        def __init__(self, listener, *args, **kwargs):
+            if isinstance(listener, tuple) and len(listener) >= 2 and listener[0] == "":
+                listener = ("0.0.0.0", listener[1], *listener[2:])
+            super().__init__(listener, *args, **kwargs)
+
+    official_bridge.pywsgi.WSGIServer = IPv4WSGIServer
+
+
+def _disable_restricted_bridge_subscriptions() -> None:
+    """Keep the stock bridge from owning control-input subscriptions.
+
+    The official bridge's default configuration includes a reset subscriber
+    and handles actuator command callbacks in the same ROS executor that is
+    fed by the large numeric packet decoder.  Under load that executor can
+    make legal steering/throttle commands stale.  Remove all three stock
+    subscribers; the small dedicated command listener below owns the atomic
+    validated actuator command topic, while reset control remains disabled.
+    """
+    config = getattr(official_bridge, "config", None)
+    pub_sub_dict = getattr(config, "pub_sub_dict", None)
+    subscribers = getattr(pub_sub_dict, "subscribers", None)
+    if subscribers is None:
+        raise RuntimeError(
+            "official AutoDRIVE bridge configuration has no subscriber list")
+    restricted = {
+        "/autodrive/reset_command",
+        "/autodrive/roboracer_1/throttle_command",
+        "/autodrive/roboracer_1/steering_command",
+    }
+    pub_sub_dict.subscribers = [
+        entry for entry in subscribers if entry.topic not in restricted
+    ]
+    if any(entry.topic in restricted for entry in pub_sub_dict.subscribers):
+        raise RuntimeError("stock bridge control subscription remained in bridge config")
+
+
+def _update_drive_command(message: Any) -> None:
+    """Capture one validated physical command pair under the request lock."""
+    global _latest_steering_update_monotonic_ns
+    steering = float(message.steering_angle_rad)
+    throttle = float(message.throttle_normalized)
+    maximum_steering = math.pi / 6.0
+    if (not math.isfinite(steering) or abs(steering) > maximum_steering + 1.e-6 or
+            not math.isfinite(throttle) or not 0.0 <= throttle <= 1.0):
+        return
+    with _command_lock:
+        _latest_command["V1 Steering"] = str(round(
+            max(-1.0, min(1.0, steering / maximum_steering)), 3))
+        _latest_command["V1 Throttle"] = str(round(throttle, 3))
+        _latest_steering_update_monotonic_ns = time.monotonic_ns()
+
+
+def _run_command_listener() -> None:
+    """Receive atomic actuator command pairs separately from the numeric decoder."""
+    global _command_listener_executor, _command_listener_node
+    while not _command_listener_stop.is_set():
+        if not rclpy.ok():
+            time.sleep(0.01)
+            continue
+        try:
+            node = rclpy.create_node("autodrive_bridge_command_input")
+            qos = QoSProfile(
+                depth=1,
+                # These are latest-value actuator setpoints, not an event
+                # history. If the listener is briefly delayed, retransmitting
+                # an old steering/throttle sample is less safe than taking the
+                # newest one on the next bridge request.
+                reliability=QoSReliabilityPolicy.BEST_EFFORT,
+                durability=QoSDurabilityPolicy.VOLATILE,
+                history=QoSHistoryPolicy.KEEP_LAST,
+            )
+            node.create_subscription(
+                DriveCommand, "/actuators/drive_command", _update_drive_command, qos)
+            if _env_enabled(DEV_SIM_RESET_ENABLE_ENV, False):
+                node.create_subscription(
+                    Bool, DEV_SIM_RESET_TOPIC, _on_reset_command, qos)
+                print(
+                    "[autodrive_bridge_40hz] development simulator reset input enabled",
+                    flush=True,
+                )
+            executor = rclpy.executors.SingleThreadedExecutor()
+            executor.add_node(node)
+            _command_listener_node = node
+            _command_listener_executor = executor
+            executor.spin()
+            executor.shutdown()
+            node.destroy_node()
+            return
+        except Exception as exc:
+            if not _command_listener_stop.is_set() and rclpy.ok():
+                print(
+                    "[autodrive_bridge_40hz] command listener failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+            return
+        finally:
+            _command_listener_executor = None
+            _command_listener_node = None
+
+
+def _handle_shutdown_signal(signum: int, _frame: Any) -> None:
+    """Enter normal bridge cleanup instead of tearing ROS down mid-packet."""
+    global _shutdown_requested
+    _shutdown_requested = True
+    _command_listener_stop.set()
+    _stop_sender.set()
+    raise SystemExit(128 + signum)
+
+
+def main() -> None:
+    global _shutdown_requested, _development_packet_diagnostics_enabled
+    _shutdown_requested = False
+    _development_packet_diagnostics_enabled = _env_enabled(
+        DEV_PACKET_DIAGNOSTICS_ENABLE_ENV, False)
+    signal.signal(signal.SIGINT, _handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    rate_hz = _rate_hz()
+    _force_ipv4_server()
+    _install_packet_timestamp_patch()
+    _install_packet_contract()
+    _disable_camera_path()
+    original_emit = official_bridge.sio.emit
+
+    original_connect = official_bridge.sio.handlers.get("/", {}).get("connect")
+    original_disconnect = official_bridge.sio.handlers.get("/", {}).get("disconnect")
+    # The stock bridge includes a restricted reset-command subscriber. Remove
+    # it before the bridge creates its ROS node; no runtime node in this stack
+    # may consume simulator reset control.
+    _disable_restricted_bridge_subscriptions()
+
+    def mark_connected(sid: Any, environ: Any) -> Any:
+        _reset_request_pipeline()
+        _client_connected.set()
+        if original_connect is not None:
+            return original_connect(sid, environ)
+        return None
+
+    def mark_disconnected(sid: Any) -> Any:
+        had_active_session = _client_connected.is_set() or _first_request_sent
+        _client_connected.clear()
+        _reset_request_pipeline()
+        if had_active_session and not _shutdown_requested:
+            _trigger_timing_fault("simulator Socket.IO connection lost")
+        if original_disconnect is not None:
+            return original_disconnect(sid)
+        return None
+
+    official_bridge.sio.handlers.setdefault("/", {})["connect"] = mark_connected
+    official_bridge.sio.handlers.setdefault("/", {})["disconnect"] = mark_disconnected
+
+    def intercept_emit(event: str, data: Any = None, *args: Any, **kwargs: Any) -> Any:
+        if event == "Bridge":
+            return None
+        return original_emit(event, data, *args, **kwargs)
+
+    official_bridge.sio.emit = intercept_emit
+    _command_listener_stop.clear()
+    _command_listener_thread = threading.Thread(
+        target=_run_command_listener,
+        name="autodrive-command-input",
+        daemon=True,
+    )
+    _command_listener_thread.start()
+    _stop_sender.clear()
+    _client_connected.clear()
+    _reset_request_pipeline()
+    # The official server runs on gevent.  Keep the pacing loop in that same
+    # event loop; calling Server.emit from a native thread can leave the
+    # Socket.IO connection established while silently dropping the outbound
+    # Bridge event that starts telemetry.
+    sender = official_bridge.sio.start_background_task(
+        _run_command_sender, original_emit, rate_hz)
+    print(
+        f"[autodrive_bridge_40hz] nominal request pacing enabled at {rate_hz:g} Hz "
+        "with non-blocking response timing and stock-image FIFO association")
+    try:
+        official_bridge.main()
+    finally:
+        _shutdown_requested = True
+        _command_listener_stop.set()
+        if _command_listener_executor is not None:
+            _command_listener_executor.shutdown()
+        if _command_listener_thread is not None:
+            _command_listener_thread.join(timeout=1.0)
+        _stop_sender.set()
+        _client_connected.clear()
+        _reset_request_pipeline()
+        sender.join(timeout=max(1.0, 2.0 / rate_hz))
+        official_bridge.sio.emit = original_emit
+
+
+if __name__ == "__main__":
+    main()
