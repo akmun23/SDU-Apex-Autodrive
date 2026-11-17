@@ -1,0 +1,125 @@
+#ifndef MPC_STATE_SYNCHRONIZER_HPP
+#define MPC_STATE_SYNCHRONIZER_HPP
+
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+
+namespace f1tenth_mpc {
+
+struct MpcOdomSample {
+    int64_t stamp_ns{};
+    double x{};
+    double y{};
+    double yaw{};
+    double u{};
+    double v{};
+    double yaw_rate{};
+};
+
+struct MpcMapPoseAnchor {
+    int64_t stamp_ns{};
+    double x{};
+    double y{};
+    double yaw{};
+};
+
+struct MpcSynchronizedState {
+    int64_t source_stamp_ns{};
+    int64_t odom_source_stamp_ns{};
+    int64_t map_pose_source_stamp_ns{};
+    double map_x{};
+    double map_y{};
+    double map_yaw{};
+    double u{};
+    double v{};
+    double yaw_rate{};
+    double source_age_s{};
+    double pose_odom_skew_s{};
+};
+
+enum class MpcSyncStatus {
+    kOk,
+    kMissingOdom,
+    kMissingMapPose,
+    kInvalidInput,
+    kNoOdomBracket,
+    kMapPoseFutureOfOdom,
+    kPoseOdomSkewExceeded,
+    kStateTooOld,
+    kCommandTimeBeforeState,
+};
+
+enum class MpcFreshnessDecision {
+    kReady,
+    kWaitForFreshState,
+    kFault,
+};
+
+/* A brief transport backlog should not permanently latch the controller.
+ * Stale samples remain unusable; this guard only allows time for a newer
+ * sample to arrive while the node continues the validated command plan. */
+class MpcStateFreshnessGuard {
+public:
+    explicit MpcStateFreshnessGuard(double stale_fault_grace_s = 0.5);
+
+    MpcFreshnessDecision observe(MpcSyncStatus status, int64_t steady_now_ns);
+    double stale_duration_s(int64_t steady_now_ns) const;
+    void reset();
+
+private:
+    double stale_fault_grace_s_{};
+    int64_t stale_since_steady_ns_{};
+};
+
+struct MpcSyncConfig {
+    double max_pose_odom_skew_s{0.120};
+    double max_state_age_s{0.120};
+    std::size_t odom_buffer_capacity{64};
+    /* Each map pose is blended into the odometry-propagated previous pose by
+     * this gain. Localization error is nearly white (about 1-2 cm per pose)
+     * while odometry is accurate over a fraction of a second, so a gain well
+     * below 1 removes jitter the controller would otherwise react to. A gain
+     * of 1 uses every pose as measured. */
+    double map_pose_gain{0.2};
+    /* A pose farther than this from the propagated one is a relocalization
+     * jump, not noise, and replaces the filtered pose. */
+    double map_pose_reset_distance_m{0.3};
+};
+
+/* A plant-state topic may be delivered one packet behind its matching odom
+ * callback because ROS topics are scheduled independently. Accept only a
+ * causal snapshot at or before both the current odom epoch and fused state,
+ * bounded by the caller's existing extrapolation-age limit. */
+bool is_causal_plant_state_usable(bool received,
+                                  int64_t plant_stamp_ns,
+                                  int64_t odom_stamp_ns,
+                                  int64_t synchronized_stamp_ns,
+                                  double maximum_age_s);
+
+class MpcStateSynchronizer {
+public:
+    explicit MpcStateSynchronizer(const MpcSyncConfig &config = {});
+
+    MpcSyncStatus push_odometry(const MpcOdomSample &sample);
+    MpcSyncStatus set_map_pose(const MpcMapPoseAnchor &anchor);
+    MpcSyncStatus synchronize(int64_t command_time_ns,
+                              MpcSynchronizedState *state) const;
+    /* Apply the current map/odom rigid transform to an explicitly bracketed
+     * historical odometry epoch. Used to place delayed mechanical snapshots
+     * in tracking coordinates at their timestamp, before propagation. */
+    MpcSyncStatus state_at_odometry_epoch(int64_t stamp_ns,
+                                         MpcSynchronizedState *state) const;
+    void reset();
+    static const char *status_name(MpcSyncStatus status);
+
+private:
+    MpcSyncConfig config_;
+    std::deque<MpcOdomSample> odometry_;
+    MpcMapPoseAnchor map_pose_{};
+    bool map_pose_valid_{false};
+};
+
+}  // namespace f1tenth_mpc
+
+#endif

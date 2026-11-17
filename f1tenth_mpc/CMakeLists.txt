@@ -1,0 +1,198 @@
+cmake_minimum_required(VERSION 3.16)
+project(f1tenth_mpc LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+if(NOT MSVC)
+  # Keep IEEE floating-point behaviour for the core's non-finite checks.
+  add_compile_options(-Wall -Wextra -Wpedantic -O3)
+endif()
+
+set(SDU_APEX_MPC_HORIZON 30 CACHE STRING
+  "Prediction horizon in 25 ms stages (a compile-time size of every solver array)")
+if(NOT SDU_APEX_MPC_HORIZON MATCHES "^[0-9]+$" OR
+   SDU_APEX_MPC_HORIZON LESS 10 OR SDU_APEX_MPC_HORIZON GREATER 80)
+  message(FATAL_ERROR "SDU_APEX_MPC_HORIZON must be an integer in [10, 80]")
+endif()
+add_compile_definitions(PREDICTION_HORIZON=${SDU_APEX_MPC_HORIZON})
+
+option(SDU_APEX_MPC_NATIVE_TUNING
+  "Build this MPC for the CPU doing the build (not portable to other CPUs)"
+  OFF)
+if(SDU_APEX_MPC_NATIVE_TUNING)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(FATAL_ERROR
+      "SDU_APEX_MPC_NATIVE_TUNING requires GCC or Clang for C++")
+  endif()
+  # Disable contraction: FMA changes borderline QP statuses and commands
+  # on the fixed replay corpus.
+  add_compile_options(-march=native -ffp-contract=off)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64" AND
+       CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  # AVX2/FMA target: 9.58 ms per SQP iteration; native: 9.34 ms; SSE2: 11.54 ms.
+  # Contraction stays off for replay parity.
+  add_compile_options(-march=x86-64-v3 -mtune=native -ffp-contract=off)
+endif()
+
+# Whole-program optimization of source AD, QP and rollout.
+# Require byte-for-byte cost/command replay parity before enabling in a simulator image.
+option(SDU_APEX_MPC_LTO
+  "Enable link-time optimization for native original-source MPC builds"
+  ${SDU_APEX_MPC_NATIVE_TUNING})
+if(SDU_APEX_MPC_LTO)
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT mpc_ipo_ok OUTPUT mpc_ipo_reason)
+  if(NOT mpc_ipo_ok)
+    message(FATAL_ERROR "MPC link-time optimization unavailable: ${mpc_ipo_reason}")
+  endif()
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_components REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(sdu_apex_msgs REQUIRED)
+find_package(OpenMP QUIET COMPONENTS CXX)
+
+# The MPC numerical runtime: trust-region SQP over the source-derived Unity
+# plant (mpc_source_sqp) with a primal-dual convex QP for each local model.
+add_library(mpc_core STATIC
+  src/mpc_reference.cpp
+  src/mpc_source_objective_weights.cpp
+  src/vehicle_model.cpp
+  src/unity_source_plant.cpp
+  src/unity_source_plant_c.cpp
+  src/mpc_cycle.cpp
+  src/mpc_source_qp.cpp
+  src/mpc_source_sqp.cpp)
+target_include_directories(mpc_core PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_link_libraries(mpc_core PUBLIC m PRIVATE Eigen3::Eigen)
+# A 60-control KKT solve must not create an Eigen/OpenMP worker team for
+# every small Gram product. Source stage AD retains its own explicit workers.
+target_compile_definitions(mpc_core PRIVATE EIGEN_DONT_PARALLELIZE)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(mpc_core PUBLIC OpenMP::OpenMP_CXX)
+endif()
+set_target_properties(mpc_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# Development utilities (util/): frozen-problem export, solver benchmark and QP check.
+# Not part of the controller; build with `--target mpc_sqp_bench mpc_export_case mpc_qp_check`.
+add_executable(mpc_sqp_bench EXCLUDE_FROM_ALL util/mpc_sqp_bench.cpp)
+target_include_directories(mpc_sqp_bench PRIVATE util include)
+target_link_libraries(mpc_sqp_bench PRIVATE mpc_core Eigen3::Eigen)
+find_package(nlohmann_json REQUIRED)
+target_link_libraries(mpc_sqp_bench PRIVATE nlohmann_json::nlohmann_json)
+add_executable(plant_derivative_bench EXCLUDE_FROM_ALL util/plant_derivative_bench.cpp)
+target_include_directories(plant_derivative_bench PRIVATE include)
+target_link_libraries(plant_derivative_bench PRIVATE mpc_core)
+add_executable(mpc_export_case EXCLUDE_FROM_ALL util/mpc_export_case.cpp)
+target_include_directories(mpc_export_case PRIVATE util include)
+target_link_libraries(mpc_export_case PRIVATE mpc_core nlohmann_json::nlohmann_json)
+add_executable(mpc_qp_check EXCLUDE_FROM_ALL util/mpc_qp_check.cpp)
+target_link_libraries(mpc_qp_check PRIVATE mpc_core Eigen3::Eigen nlohmann_json::nlohmann_json)
+
+# Optional C ABI shared object used by tools/analysis/evaluate_mpc_bag.py to replay
+# logged plant states and command queues against the production rollout. It is
+# not linked into or installed with the controller runtime.
+add_library(unity_source_plant_eval SHARED EXCLUDE_FROM_ALL
+  src/unity_source_plant.cpp
+  src/unity_source_plant_c.cpp)
+target_include_directories(unity_source_plant_eval PRIVATE include)
+
+add_library(mpc_state_sync STATIC src/mpc_state_synchronizer.cpp)
+target_include_directories(mpc_state_sync PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+set_target_properties(mpc_state_sync PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+add_library(mpc_control_time STATIC src/mpc_control_time_predictor.cpp)
+target_include_directories(mpc_control_time PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_link_libraries(mpc_control_time PUBLIC mpc_core mpc_state_sync)
+set_target_properties(mpc_control_time PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# The only ROS layer in this package. It publishes the MPC's steering and
+# normalized-throttle decision through the team actuator command message.
+add_library(mpc_controller_node SHARED
+  src/mpc_controller_node.cpp
+  src/mpc_controller_diagnostics.cpp
+  src/mpc_diagnostic_worker.cpp)
+target_link_libraries(mpc_controller_node mpc_core mpc_state_sync mpc_control_time)
+target_include_directories(mpc_controller_node PRIVATE src)
+ament_target_dependencies(mpc_controller_node
+  ament_index_cpp
+  rclcpp
+  rclcpp_components
+  nav_msgs
+  geometry_msgs
+  std_msgs
+  sdu_apex_msgs)
+target_include_directories(mpc_controller_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+rclcpp_components_register_nodes(mpc_controller_node "f1tenth_mpc::MpcControllerNode")
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_mpc_trajectory_io test/test_mpc_trajectory_io.cpp)
+  ament_add_gtest(test_mpc_cycle test/test_mpc_cycle.cpp)
+  target_link_libraries(test_mpc_cycle mpc_core)
+  target_include_directories(test_mpc_cycle PRIVATE include)
+  target_compile_definitions(test_mpc_cycle PRIVATE
+    MPC_TEST_RACELINE="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/practice/raceline.csv")
+  ament_add_gtest(test_mpc_source_sqp test/test_mpc_source_sqp.cpp)
+  target_link_libraries(test_mpc_source_sqp mpc_core Eigen3::Eigen)
+  target_compile_definitions(test_mpc_source_sqp PRIVATE EIGEN_DONT_PARALLELIZE
+    MPC_TEST_RACELINE="${CMAKE_CURRENT_SOURCE_DIR}/../f1tenth_planning/trajectories/practice/raceline.csv")
+  ament_add_gtest(test_mpc_source_qp test/test_mpc_source_qp.cpp)
+  target_link_libraries(test_mpc_source_qp mpc_core Eigen3::Eigen)
+  target_link_libraries(test_mpc_trajectory_io mpc_core)
+  ament_add_gtest(test_unity_source_plant
+    test/test_unity_source_plant.cpp
+    src/unity_source_plant_c.cpp)
+  target_include_directories(test_unity_source_plant PRIVATE include)
+  ament_add_gtest(test_mpc_control_time_predictor
+    test/test_mpc_control_time_predictor.cpp)
+  target_link_libraries(test_mpc_control_time_predictor mpc_control_time)
+  ament_add_gtest(test_mpc_state_synchronizer
+    test/test_mpc_state_synchronizer.cpp)
+  target_link_libraries(test_mpc_state_synchronizer mpc_state_sync)
+  ament_add_gtest(test_mpc_drive_command_envelope
+    test/test_mpc_drive_command_envelope.cpp)
+  ament_add_gtest(test_mpc_publication_deadline
+    test/test_mpc_publication_deadline.cpp)
+  ament_add_gtest(test_mpc_speed_envelope
+    test/test_mpc_speed_envelope.cpp)
+  foreach(core_test IN ITEMS
+      test_mpc_drive_command_envelope test_mpc_publication_deadline
+      test_mpc_speed_envelope
+     )
+    target_include_directories(${core_test} PRIVATE include)
+  endforeach()
+endif()
+
+install(TARGETS mpc_core mpc_state_sync mpc_control_time mpc_controller_node
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION lib/${PROJECT_NAME})
+install(DIRECTORY include/ DESTINATION include)
+install(FILES
+  config/mpc_competition.yaml
+  config/mpc_practice.yaml
+  DESTINATION share/${PROJECT_NAME}/config)
+
+ament_export_include_directories(include)
+ament_export_libraries(mpc_core)
+ament_export_dependencies(ament_index_cpp rclcpp rclcpp_components nav_msgs geometry_msgs
+  std_msgs sdu_apex_msgs)
+
+ament_package()

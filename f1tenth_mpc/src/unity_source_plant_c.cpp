@@ -1,0 +1,264 @@
+#include "unity_source_plant_c.h"
+
+#include "unity_source_plant.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+
+namespace {
+
+f1tenth_mpc::UnitySourcePlantState from_c(
+    const double values[UNITY_SOURCE_PLANT_STATE_SIZE], int history_initialized)
+{
+  f1tenth_mpc::UnitySourcePlantState state;
+  state.u_mps = values[UNITY_SOURCE_U];
+  state.v_mps = values[UNITY_SOURCE_V];
+  state.yaw_rate_radps = values[UNITY_SOURCE_YAW_RATE];
+  std::copy_n(values + UNITY_SOURCE_WHEEL_OMEGA_FL, 4,
+              state.wheel_omega_radps.begin());
+  state.wheel_rotation_angle_rad = {0.0, 0.0, 0.0, 0.0};
+  state.body_height_m = values[UNITY_SOURCE_BODY_HEIGHT];
+  state.body_height_rate_mps = values[UNITY_SOURCE_BODY_HEIGHT_RATE];
+  state.roll_rad = values[UNITY_SOURCE_ROLL];
+  state.roll_rate_radps = values[UNITY_SOURCE_ROLL_RATE];
+  state.pitch_rad = values[UNITY_SOURCE_PITCH];
+  state.pitch_rate_radps = values[UNITY_SOURCE_PITCH_RATE];
+  state.physical_steering_rad = values[UNITY_SOURCE_PHYSICAL_STEERING];
+  std::copy_n(values + UNITY_SOURCE_SUSPENSION_JOUNCE_FL, 4,
+              state.suspension_jounce_m.begin());
+  std::copy_n(values + UNITY_SOURCE_LOW_FORWARD_SPEED_TIME_FL, 4,
+              state.low_forward_speed_time_s.begin());
+  std::copy_n(values + UNITY_SOURCE_LOW_SIDE_SPEED_TIME_FL, 4,
+              state.low_side_speed_time_s.begin());
+  state.suspension_history_initialized = history_initialized != 0;
+  return state;
+}
+
+void to_c(const f1tenth_mpc::UnitySourcePlantOutput &source,
+          UnitySourcePlantOutputC *output)
+{
+  const auto &state = source.state;
+  output->state[UNITY_SOURCE_U] = state.u_mps;
+  output->state[UNITY_SOURCE_V] = state.v_mps;
+  output->state[UNITY_SOURCE_YAW_RATE] = state.yaw_rate_radps;
+  output->integrated_body_forward_displacement_m =
+      source.integrated_body_forward_displacement_m;
+  output->integrated_body_lateral_displacement_m =
+      source.integrated_body_lateral_displacement_m;
+  output->integrated_yaw_delta_rad = source.integrated_yaw_delta_rad;
+  std::copy(state.wheel_omega_radps.begin(), state.wheel_omega_radps.end(),
+            output->state + UNITY_SOURCE_WHEEL_OMEGA_FL);
+  std::copy(state.wheel_rotation_angle_rad.begin(),
+            state.wheel_rotation_angle_rad.end(),
+            output->wheel_rotation_angle_rad);
+  output->state[UNITY_SOURCE_BODY_HEIGHT] = state.body_height_m;
+  output->state[UNITY_SOURCE_BODY_HEIGHT_RATE] = state.body_height_rate_mps;
+  output->state[UNITY_SOURCE_ROLL] = state.roll_rad;
+  output->state[UNITY_SOURCE_ROLL_RATE] = state.roll_rate_radps;
+  output->state[UNITY_SOURCE_PITCH] = state.pitch_rad;
+  output->state[UNITY_SOURCE_PITCH_RATE] = state.pitch_rate_radps;
+  output->state[UNITY_SOURCE_PHYSICAL_STEERING] =
+      state.physical_steering_rad;
+  std::copy(state.suspension_jounce_m.begin(), state.suspension_jounce_m.end(),
+            output->state + UNITY_SOURCE_SUSPENSION_JOUNCE_FL);
+  std::copy(state.low_forward_speed_time_s.begin(),
+            state.low_forward_speed_time_s.end(),
+            output->state + UNITY_SOURCE_LOW_FORWARD_SPEED_TIME_FL);
+  std::copy(state.low_side_speed_time_s.begin(),
+            state.low_side_speed_time_s.end(),
+            output->state + UNITY_SOURCE_LOW_SIDE_SPEED_TIME_FL);
+  output->suspension_history_initialized =
+      state.suspension_history_initialized ? 1 : 0;
+  std::copy(source.longitudinal_slip.begin(), source.longitudinal_slip.end(),
+            output->longitudinal_slip);
+  std::copy(source.maximum_positive_longitudinal_slip.begin(),
+            source.maximum_positive_longitudinal_slip.end(),
+            output->maximum_positive_longitudinal_slip);
+  std::copy(source.maximum_grip_loss.begin(), source.maximum_grip_loss.end(),
+            output->maximum_grip_loss);
+  std::copy(source.lateral_slip.begin(), source.lateral_slip.end(),
+            output->lateral_slip);
+  std::copy(source.normal_load_n.begin(), source.normal_load_n.end(),
+            output->normal_load_n);
+  std::copy(source.suspension_force_n.begin(), source.suspension_force_n.end(),
+            output->suspension_force_n);
+  std::copy(source.suspension_jounce_rate_mps.begin(),
+            source.suspension_jounce_rate_mps.end(),
+            output->suspension_jounce_rate_mps);
+  std::copy(source.tire_longitudinal_force_n.begin(),
+            source.tire_longitudinal_force_n.end(),
+            output->tire_longitudinal_force_n);
+  std::copy(source.tire_lateral_force_n.begin(),
+            source.tire_lateral_force_n.end(), output->tire_lateral_force_n);
+  output->longitudinal_acceleration_mps2 =
+      source.longitudinal_acceleration_mps2;
+  output->lateral_acceleration_mps2 = source.lateral_acceleration_mps2;
+  output->yaw_acceleration_radps2 = source.yaw_acceleration_radps2;
+}
+
+}  // namespace
+
+extern "C" int unity_source_plant_step_c(
+    const UnitySourcePlantInputC *input, double duration_s,
+    UnitySourcePlantOutputC *output)
+{
+  if (!input || !output) return 0;
+  const f1tenth_mpc::UnitySourcePlantInput plant_input{
+      input->steering_target_rad, input->throttle_normalized};
+  auto plant_state = from_c(input->state, input->suspension_history_initialized);
+  std::copy_n(input->wheel_rotation_angle_rad, 4,
+              plant_state.wheel_rotation_angle_rad.begin());
+  f1tenth_mpc::UnitySourcePlantOutput plant_output;
+  if (!f1tenth_mpc::unity_source_plant_step(
+          plant_state,
+          plant_input, duration_s, &plant_output)) {
+    return 0;
+  }
+  to_c(plant_output, output);
+  return 1;
+}
+
+extern "C" int unity_source_plant_rear_slip_trace_c(
+    const UnitySourcePlantInputC *input, double slip[50], double jacobian[50][20])
+{
+  if (!input || !slip) return 0;
+  auto state = from_c(input->state, input->suspension_history_initialized);
+  std::copy_n(input->wheel_rotation_angle_rad, 4, state.wheel_rotation_angle_rad.begin());
+  const f1tenth_mpc::UnitySourcePlantInput command{
+      input->steering_target_rad, input->throttle_normalized};
+  f1tenth_mpc::UnitySourcePlantRearSlipTrace trace;
+  if (!f1tenth_mpc::unity_source_plant_rear_slip_trace(
+          state, command, &trace, jacobian != nullptr)) return 0;
+  for (int row = 0; row < 50; ++row) {
+    slip[row] = trace.value[row];
+    if (jacobian)
+      std::copy(trace.derivative[row].begin(), trace.derivative[row].end(), jacobian[row]);
+  }
+  return 1;
+}
+
+extern "C" int unity_source_plant_instantaneous_lateral_slip_c(
+    const double state[UNITY_SOURCE_PLANT_STATE_SIZE], double slip[4])
+{
+    if(!state || !slip)return 0;
+    const auto physical=from_c(state,1);
+    std::array<double,4> result{};
+    if(!f1tenth_mpc::unity_source_plant_lateral_slip_at_state(
+           physical,&result))return 0;
+    std::copy(result.begin(),result.end(),slip);
+    return 1;
+}
+
+extern "C" int unity_source_plant_instantaneous_lateral_slip_ad_c(
+    const double state[UNITY_SOURCE_PLANT_STATE_SIZE],double slip[4],
+    double jacobian[4][UNITY_SOURCE_PLANT_STATE_SIZE])
+{
+    if(!state || !slip || !jacobian)return 0;
+    const auto physical=from_c(state,1);
+    std::array<double,4> values{};
+    std::array<std::array<double,UNITY_SOURCE_PLANT_STATE_SIZE>,4> deriv{};
+    if(!f1tenth_mpc::unity_source_plant_lateral_slip_with_sensitivities(
+            physical,&values,&deriv))return 0;
+    for(int w=0;w<4;++w) {
+        slip[w]=values[w];
+        for(int c=0;c<UNITY_SOURCE_PLANT_STATE_SIZE;++c)
+            jacobian[w][c]=deriv[w][c];
+    }
+    return 1;
+}
+
+extern "C" int unity_source_plant_step_hessian_c(
+    const UnitySourcePlantInputC *input, double duration_s,
+    unsigned int force_substep_cap, UnitySourcePlantHessianC *hessian)
+{
+  static_assert(UNITY_SOURCE_HESSIAN_INPUTS == f1tenth_mpc::kUnityPlantHessianInputs &&
+                UNITY_SOURCE_HESSIAN_OUTPUTS == f1tenth_mpc::kUnityPlantHessianOutputs);
+  if (!input || !hessian) return 0;
+  auto plant_state = from_c(input->state,
+                            input->suspension_history_initialized);
+  std::copy_n(input->wheel_rotation_angle_rad, 4,
+              plant_state.wheel_rotation_angle_rad.begin());
+  const f1tenth_mpc::UnitySourcePlantInput plant_input{
+      input->steering_target_rad, input->throttle_normalized};
+  f1tenth_mpc::UnitySourcePlantHessian typed;
+  if (!f1tenth_mpc::unity_source_plant_step_with_hessian(
+          plant_state, plant_input, duration_s, &typed, force_substep_cap)) return 0;
+  for (std::size_t o = 0; o < f1tenth_mpc::kUnityPlantHessianOutputs; ++o) {
+    hessian->value[o] = typed.value[o];
+    for (std::size_t i = 0; i < f1tenth_mpc::kUnityPlantHessianInputs; ++i) {
+      hessian->gradient[o][i] = typed.gradient[o][i];
+      for (std::size_t j = 0; j < f1tenth_mpc::kUnityPlantHessianInputs; ++j)
+        hessian->hessian[o][i][j] = typed.hessian[o][i][j];
+    }
+  }
+  return 1;
+}
+
+extern "C" int unity_source_plant_step_sensitivity_c(
+    const UnitySourcePlantInputC *input, double duration_s,
+    unsigned int force_substep_cap,
+    const UnitySourcePlantSensitivitySeedsC *seeds,
+    UnitySourcePlantSensitivityC *sensitivity)
+{
+  if (!input || !seeds || !sensitivity) return 0;
+  auto plant_state = from_c(input->state,
+                            input->suspension_history_initialized);
+  std::copy_n(input->wheel_rotation_angle_rad, 4,
+              plant_state.wheel_rotation_angle_rad.begin());
+  const f1tenth_mpc::UnitySourcePlantInput plant_input{
+      input->steering_target_rad, input->throttle_normalized};
+  f1tenth_mpc::UnitySourcePlantSensitivitySeeds typed_seeds;
+  for (std::size_t state = 0; state < UNITY_SOURCE_PLANT_STATE_SIZE; ++state)
+    for (std::size_t lane = 0;
+         lane < UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH; ++lane)
+      typed_seeds.state[state][lane] = seeds->state[state][lane];
+  for (std::size_t lane = 0;
+       lane < UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH; ++lane) {
+    typed_seeds.steering_target[lane] = seeds->steering_target[lane];
+    typed_seeds.throttle[lane] = seeds->throttle[lane];
+  }
+  f1tenth_mpc::UnitySourcePlantSensitivity typed_sensitivity;
+  if (!f1tenth_mpc::unity_source_plant_step_with_sensitivities(
+          plant_state, plant_input, duration_s, typed_seeds,
+          &typed_sensitivity, force_substep_cap)) return 0;
+  for (std::size_t wheel = 0; wheel < 4; ++wheel) {
+    sensitivity->maximum_grip_loss[wheel] =
+        typed_sensitivity.maximum_grip_loss[wheel];
+    for (std::size_t lane = 0;
+         lane < UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH; ++lane)
+      sensitivity->maximum_grip_loss_derivative[wheel][lane] =
+          typed_sensitivity.maximum_grip_loss_derivative[wheel][lane];
+  }
+  for (std::size_t state = 0; state < UNITY_SOURCE_PLANT_STATE_SIZE; ++state)
+    for (std::size_t lane = 0;
+         lane < UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH; ++lane)
+      sensitivity->state[state][lane] =
+          typed_sensitivity.state[state][lane];
+  for (std::size_t lane = 0;
+       lane < UNITY_SOURCE_PLANT_SENSITIVITY_WIDTH; ++lane) {
+    sensitivity->body_forward_displacement[lane] =
+        typed_sensitivity.body_forward_displacement[lane];
+    sensitivity->body_lateral_displacement[lane] =
+        typed_sensitivity.body_lateral_displacement[lane];
+    sensitivity->yaw_delta[lane] = typed_sensitivity.yaw_delta[lane];
+  }
+  return 1;
+}
+
+extern "C" int unity_source_plant_reconcile_suspension_jounce_c(
+    double state[UNITY_SOURCE_PLANT_STATE_SIZE],
+    int *suspension_history_initialized)
+{
+  if (!state || !suspension_history_initialized) return 0;
+  auto plant_state = from_c(state, *suspension_history_initialized);
+  if (!f1tenth_mpc::unity_source_plant_reconcile_suspension_jounce(
+          &plant_state))
+    return 0;
+  std::copy(plant_state.suspension_jounce_m.begin(),
+            plant_state.suspension_jounce_m.end(),
+            state + UNITY_SOURCE_SUSPENSION_JOUNCE_FL);
+  *suspension_history_initialized =
+      plant_state.suspension_history_initialized ? 1 : 0;
+  return 1;
+}
