@@ -1,0 +1,21 @@
+{
+  "input": "/tmp/claude-1000/tr/practice9.csv",
+  "input_sha256": "9eef76e23949691ffb552da899497779c8b19633bd66dd25ca57d72e9e57b138",
+  "output": "f1tenth_planning/trajectories/autodrive_practice_tracking_reserve/tracking_reserve_10cm.csv",
+  "map": "f1tenth_planning/maps/autodrive_practice_20260924_b.pgm",
+  "points": 4800,
+  "passes": 3,
+  "wall_margin_m": 0.05,
+  "tracking_reserve_m": 0.05,
+  "minimum_center_to_wall_m": 0.25,
+  "required_center_to_wall_m": 0.2365,
+  "swept_footprint_clearance_beyond_margin_m": 0.037960510813964274,
+  "maximum_displacement_m": 0.04953672689685462,
+  "geometry_smoothing_length_m": 0.0,
+  "geometry_smoothing_displacement_m": 0.0,
+  "speed_scale": 1.0,
+  "speed_samples_unchanged": true,
+  "source_OCP_feasibility_transfers": false,
+  "simulator_validated": false,
+  "speed_profile_integral_s": 4.858526497391248
+}

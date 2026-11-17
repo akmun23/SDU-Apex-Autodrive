@@ -6,6 +6,7 @@ import json
 import math
 import os
 import signal
+import socket
 import threading
 import time
 from collections import deque
@@ -39,6 +40,14 @@ _bridge_actuator_feedback_publisher: Any = None
 TIMING_FAULT_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault"
 TIMING_FAULT_DETAIL_TOPIC = "/autodrive/roboracer_1/bridge_timing_fault_detail"
 DEV_SIM_RESET_ENABLE_ENV = "SDU_APEX_DEV_SIM_RESET_ENABLED"
+# Development-only transport emulation. The competition image never enables
+# these optional variables, and both delays default to exactly zero.
+DEV_SENSOR_DELAY_ENV = "SDU_APEX_DEV_SENSOR_DELAY_MS"
+DEV_SENSOR_MIN_AGE_ENV = "SDU_APEX_DEV_SENSOR_MIN_AGE_MS"
+DEV_ACTUATOR_DELAY_ENV = "SDU_APEX_DEV_ACTUATOR_DELAY_MS"
+_dev_sensor_delay_s = 0.0
+_dev_sensor_min_age_s = 0.0
+_dev_command_delay_buffer: "DevCommandDelayBuffer | None" = None
 DEV_PACKET_DIAGNOSTICS_ENABLE_ENV = "SDU_APEX_DEV_PACKET_DIAGNOSTICS_ENABLED"
 DEV_SIM_RESET_TOPIC = "/autodrive/reset_command"
 _development_packet_diagnostics_enabled = False
@@ -61,6 +70,67 @@ def _env_enabled(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _parse_dev_delay_ms(name: str, maximum_ms: float = 75.0) -> float:
+    """Parse explicit development delay; never silently clamp invalid inputs."""
+    raw = os.environ.get(name, "0")
+    try:
+        delay = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a finite number in [0,{maximum_ms}]") from exc
+    if not math.isfinite(delay) or not 0.0 <= delay <= maximum_ms:
+        raise ValueError(f"{name} must be a finite number in [0,{maximum_ms}]")
+    return delay
+
+
+def _age_hold_seconds(request_timestamp_s: float, now_timestamp_s: float,
+                      minimum_age_ms: float) -> float:
+    """Additional sensor-packet hold needed to reach an absolute ROS age.
+
+    The request timestamp is never modified. The hold is zero if the packet
+    is already older than the requested age. This never delays the Bridge
+    request timer or the input actuator pair.
+    """
+    if not math.isfinite(request_timestamp_s) or not math.isfinite(now_timestamp_s):
+        raise ValueError("invalid ROS sensor/request timestamp")
+    if not math.isfinite(minimum_age_ms) or not 0 <= minimum_age_ms <= 75:
+        raise ValueError("minimum sensor age outside [0,75] ms")
+    if minimum_age_ms == 0:
+        return 0.0
+    age_s = now_timestamp_s - request_timestamp_s
+    if age_s < -1:
+        raise ValueError("request timestamp exceeds current ROS clock by >1s")
+    return max(0.0, minimum_age_ms * 0.001 - age_s)
+
+
+class DevCommandDelayBuffer:
+    """Choose latest available command with its ORIGINAL receive timestamp.
+
+    The command applied at Bridge request T is the newest ROS command received
+    no later than T-delay. The 40 Hz request clock is never delayed. Holding
+    the previous command between updates models Unity's zero-order hold.
+    """
+    def __init__(self, delay_ms: float):
+        if not math.isfinite(delay_ms) or not 0.0 <= delay_ms <= 75.0:
+            raise ValueError("invalid development command delay")
+        self.delay_ns = round(delay_ms * 1e6)
+        self.queue: deque[tuple[int, str, str]] = deque()
+
+    def append(self, received_ns: int, steering: str, throttle: str) -> None:
+        if self.queue and received_ns < self.queue[-1][0]:
+            raise ValueError("command event timestamps must be monotonic")
+        self.queue.append((received_ns, steering, throttle))
+
+    def mature(self, now_ns: int) -> tuple[int, str, str] | None:
+        selected = None
+        threshold = now_ns - self.delay_ns
+        while self.queue and self.queue[0][0] <= threshold:
+            selected = self.queue.popleft()
+        return selected
+
+    def clear(self) -> None:
+        self.queue.clear()
 
 
 # This state is shared by the gevent request sender and the native ROS
@@ -221,6 +291,11 @@ def _reset_request_pipeline() -> None:
         _active_simulator_packet = {}
         _active_request_slot_pool = None
     _bootstrap_packet_seen.clear()
+    if _dev_command_delay_buffer is not None:
+        with _command_lock:
+            _dev_command_delay_buffer.clear()
+            _latest_command["V1 Steering"] = "0.0"
+            _latest_command["V1 Throttle"] = "0.0"
     with _packet_stamp_lock:
         _packet_stamp = None
 
@@ -431,6 +506,10 @@ def _on_reset_command(message: Bool) -> None:
         _reset_deadline_monotonic = (
             time.monotonic() + _RESET_HOLD_SEC if _reset_level else None)
         _latest_command["V1 Reset"] = "True" if _reset_level else "False"
+        if changed and next_level and _dev_command_delay_buffer is not None:
+            _dev_command_delay_buffer.clear()
+            _latest_command["V1 Steering"] = "0.0"
+            _latest_command["V1 Throttle"] = "0.0"
     if changed and next_level:
         # Do not publish packets while reset is asserted. The first matched
         # packet after release starts a fresh request-time epoch.
@@ -709,7 +788,7 @@ def _rate_hz() -> float:
 
 def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
     """Keep the nominal request cadence without response-age stop gates."""
-    global _connection_generation
+    global _connection_generation, _latest_steering_update_monotonic_ns
     period = 1.0 / rate_hz
     next_send = time.monotonic()
     settled_generation: int | None = None
@@ -751,6 +830,13 @@ def _run_command_sender(original_emit: Any, rate_hz: float) -> None:
                 _reset_level = False
                 _reset_deadline_monotonic = None
                 _latest_command["V1 Reset"] = "False"
+            if _dev_command_delay_buffer is not None:
+                mature = _dev_command_delay_buffer.mature(time.monotonic_ns())
+                if mature is not None:
+                    stamped_ns, steer, throttle = mature
+                    _latest_command["V1 Steering"] = steer
+                    _latest_command["V1 Throttle"] = throttle
+                    _latest_steering_update_monotonic_ns = stamped_ns
             command = dict(_latest_command)
             steering_update_monotonic_ns = (
                 _latest_steering_update_monotonic_ns)
@@ -831,6 +917,25 @@ def _install_packet_contract() -> None:
                 )
                 return None
             try:
+                # Packet/request timestamp was captured BEFORE this hold.
+                # Delaying ROS publication therefore makes the state older to
+                # the controller, as in graphical Unity. Isolated to dev.
+                if _dev_sensor_delay_s > 0.0:
+                    gevent.sleep(_dev_sensor_delay_s)
+                if _dev_sensor_min_age_s > 0.0:
+                    # All ROS sensor topics decoded from this packet, plus
+                    # actuator feedback, share the unchanged request stamp.
+                    # Holding IMU alone would de-synchronize the MPC observer.
+                    stamp = _active_request_stamp
+                    clock = getattr(official_bridge, "autodrive_bridge", None)
+                    if stamp is None or clock is None:
+                        raise RuntimeError("cannot determine source request age")
+                    request_s = stamp.sec + stamp.nanosec * 1e-9
+                    now_s = clock.get_clock().now().nanoseconds * 1e-9
+                    hold_s = _age_hold_seconds(
+                        request_s, now_s, _dev_sensor_min_age_s * 1000.0)
+                    if hold_s > 0.0:
+                        gevent.sleep(hold_s)
                 _publish_packet_actuator_feedback(_active_request_stamp, data)
                 result = original_handler(sid, data)
             except Exception as exc:
@@ -855,6 +960,41 @@ def _disable_camera_path() -> None:
         official_bridge.np.empty((1, 1, 3), dtype=official_bridge.np.uint8))
 
 
+# A loopback TCP connection may stall when Nagle's algorithm and Linux's
+# delayed ACK timer interact across the Unity/Socket.IO request-response link.
+# Apply the production socket options at accept time rather than injecting a
+# sitecustomize module or modifying the official SDK or simulator.
+_QUICKACK_REARM_SECONDS = 0.005
+
+
+def _enable_low_latency_socket(sock: Any) -> bool:
+    """Disable outgoing Nagle and enable immediate inbound acknowledgements."""
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except (OSError, ValueError, AttributeError):
+        # Socket tuning is best-effort; an unsupported option must not prevent
+        # the competition bridge from accepting a connection.
+        return False
+    if hasattr(socket, "TCP_QUICKACK"):
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
+        except (OSError, ValueError, AttributeError):
+            pass
+    return True
+
+
+def _rearm_socket_quickack(sock: Any) -> None:
+    """Re-enable nonpersistent Linux QUICKACK until this client disconnects."""
+    while True:
+        try:
+            if sock.fileno() < 0:
+                return
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
+        except (OSError, ValueError, AttributeError):
+            return
+        gevent.sleep(_QUICKACK_REARM_SECONDS)
+
+
 def _force_ipv4_server() -> None:
     """Make the SDK bridge reachable by the prebuilt Unity player.
 
@@ -870,6 +1010,14 @@ def _force_ipv4_server() -> None:
             if isinstance(listener, tuple) and len(listener) >= 2 and listener[0] == "":
                 listener = ("0.0.0.0", listener[1], *listener[2:])
             super().__init__(listener, *args, **kwargs)
+
+        def do_handle(self, *args):
+            # gevent BaseServer.do_handle receives (accepted_socket, peer) before
+            # the HTTP handler and the WebSocket upgrade are scheduled.
+            if args and _enable_low_latency_socket(args[0]):
+                if hasattr(socket, "TCP_QUICKACK"):
+                    gevent.spawn(_rearm_socket_quickack, args[0])
+            return super().do_handle(*args)
 
     official_bridge.pywsgi.WSGIServer = IPv4WSGIServer
 
@@ -912,10 +1060,17 @@ def _update_drive_command(message: Any) -> None:
             not math.isfinite(throttle) or not 0.0 <= throttle <= 1.0):
         return
     with _command_lock:
-        _latest_command["V1 Steering"] = str(round(
+        steering_normalized = str(round(
             max(-1.0, min(1.0, steering / maximum_steering)), 3))
-        _latest_command["V1 Throttle"] = str(round(throttle, 3))
-        _latest_steering_update_monotonic_ns = time.monotonic_ns()
+        throttle_normalized = str(round(throttle, 3))
+        received_ns = time.monotonic_ns()
+        if _dev_command_delay_buffer is not None:
+            _dev_command_delay_buffer.append(
+                received_ns, steering_normalized, throttle_normalized)
+        else:
+            _latest_command["V1 Steering"] = steering_normalized
+            _latest_command["V1 Throttle"] = throttle_normalized
+            _latest_steering_update_monotonic_ns = received_ns
 
 
 def _run_command_listener() -> None:
@@ -926,7 +1081,11 @@ def _run_command_listener() -> None:
             time.sleep(0.01)
             continue
         try:
-            node = rclpy.create_node("autodrive_bridge_command_input")
+            # The bridge process is launched with __node:=autodrive_bridge; do not
+            # inherit that remap, so this subscriber keeps its own node identity.
+            node = rclpy.create_node(
+                "autodrive_bridge_command_input", use_global_arguments=False,
+                enable_rosout=False)
             qos = QoSProfile(
                 depth=1,
                 # These are latest-value actuator setpoints, not an event
@@ -978,7 +1137,23 @@ def _handle_shutdown_signal(signum: int, _frame: Any) -> None:
 
 def main() -> None:
     global _shutdown_requested, _development_packet_diagnostics_enabled
+    global _dev_sensor_delay_s, _dev_sensor_min_age_s, _dev_command_delay_buffer
     _shutdown_requested = False
+    sensor_ms = _parse_dev_delay_ms(DEV_SENSOR_DELAY_ENV)
+    min_age_ms = _parse_dev_delay_ms(DEV_SENSOR_MIN_AGE_ENV)
+    if min_age_ms and sensor_ms:
+        raise ValueError("Use either DEV_SENSOR_MIN_AGE_MS or DEV_SENSOR_DELAY_MS, not both")
+    command_ms = _parse_dev_delay_ms(DEV_ACTUATOR_DELAY_ENV)
+    _dev_sensor_delay_s = sensor_ms / 1000.0
+    _dev_sensor_min_age_s = min_age_ms / 1000.0
+    _dev_command_delay_buffer = (
+        DevCommandDelayBuffer(command_ms) if command_ms > 0.0 else None)
+    if sensor_ms or min_age_ms or command_ms:
+        print(f"[autodrive_bridge_40hz] DEV LATENCY EMULATION: "
+              f"sensor_delivery_extra={sensor_ms:g} ms, "
+              f"sensor_minimum_age={min_age_ms:g} ms, "
+              f"command_application_extra={command_ms:g} ms "
+              "(production and 40 Hz clock unchanged)", flush=True)
     _development_packet_diagnostics_enabled = _env_enabled(
         DEV_PACKET_DIAGNOSTICS_ENABLE_ENV, False)
     signal.signal(signal.SIGINT, _handle_shutdown_signal)

@@ -195,7 +195,8 @@ class BridgeRuntimeContractTests(unittest.TestCase):
             def __exit__(self, *_args):
                 snapshots.append(dict(payload))
         ns = dict(Any=typing.Any, math=math, time=SimpleNamespace(monotonic_ns=lambda: 123),
-                  _command_lock=Lock(), _latest_command=payload)
+                  _command_lock=Lock(), _latest_command=payload,
+                  _dev_command_delay_buffer=None)
         exec(compile(selected, str(BRIDGE), 'exec'), ns)
         update = ns['_update_drive_command']
         update(SimpleNamespace(steering_angle_rad=-.397 * math.pi / 6,

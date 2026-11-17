@@ -1,0 +1,155 @@
+{
+  "schema": 1,
+  "status": "source_witness_passed",
+  "source_plant_sha256": "34ba2432507484b527a930f7b9ce9fc99015083caaa3ef4e9f53b24af3e37826",
+  "trial_lap_s": 4.8500000000000005,
+  "elapsed_s": 1597.655249931995,
+  "required_margin_m": 0.05,
+  "rear_slip_limit": 0.015,
+  "clearance_numerical_tolerance_m": 1e-06,
+  "initial_residual": 0.36889140839395385,
+  "last_significant_iteration": 325,
+  "termination_reason": "Maximum_CpuTime_Exceeded",
+  "early_source_checkpoint": null,
+  "source_clearance_refinement": null,
+  "requested_source_clearance_cuts": [],
+  "max_constraint_violation": 9.022683428616673e-06,
+  "ipopt_status": "Maximum_CpuTime_Exceeded",
+  "ipopt_iterations": 899,
+  "error": null,
+  "rollout": {
+    "full_lap_xy_max_m": 7.640619520956265e-06,
+    "full_lap_xy_endpoint_m": 7.640619520956265e-06,
+    "minimum_sampled_footprint_slack_m": 0.010862145146400076,
+    "recursive_start_only": true,
+    "reset_count": 0,
+    "collision_swept_continuous_certificate": false,
+    "recursive_motion_errors": {
+      "yaw_rad": {
+        "rmse": 7.053009498733191e-07,
+        "max_abs": 9.259978952513848e-07
+      },
+      "u_mps": {
+        "rmse": 2.957617105964068e-07,
+        "max_abs": 1.6486009686289549e-06
+      },
+      "v_com_mps": {
+        "rmse": 1.6063176971148768e-07,
+        "max_abs": 1.9963148896531835e-06
+      },
+      "yaw_rate_radps": {
+        "rmse": 1.5265001943357621e-06,
+        "max_abs": 1.8045234691954626e-05
+      },
+      "wheel_fl_radps": {
+        "rmse": 1.8966123011142821e-06,
+        "max_abs": 1.9399925221819103e-05
+      },
+      "wheel_fr_radps": {
+        "rmse": 9.901555825760215e-07,
+        "max_abs": 1.2867475675193418e-05
+      },
+      "wheel_rl_radps": {
+        "rmse": 7.910488149194602e-07,
+        "max_abs": 9.050125299836509e-06
+      },
+      "wheel_rr_radps": {
+        "rmse": 1.3531135588563756e-06,
+        "max_abs": 1.7109029343487236e-05
+      },
+      "rack_rad": {
+        "rmse": 2.6626763076749574e-17,
+        "max_abs": 1.1102230246251565e-16
+      }
+    },
+    "minimum_1ms_footprint_slack_m": 0.008986457766072972,
+    "maximum_1ms_rear_lateral_slip": 0.014999999971905894,
+    "source_tick_rear_slip_validated": true,
+    "independent_1ms_vs_25ms_xy_endpoint_m": 7.724990523439038e-14,
+    "source_tick_perimeter_validated": true,
+    "clearance_numerical_tolerance_m": 1e-06,
+    "violating_source_ticks": [],
+    "violating_source_samples": [],
+    "worst_source_sample": {
+      "interval": 28,
+      "tick": 20,
+      "slack_m": 0.008986457766072972,
+      "lap_time_s": 0.72,
+      "x_m": -2.567037752603579,
+      "y_m": -5.715410590362056,
+      "yaw_rad": -4.565508872161302
+    },
+    "clearance_measurement": {
+      "map_resolution_m": 0.05,
+      "perimeter_probe_correction_m": 0.022750000000000003,
+      "source_tick_s": 0.001,
+      "source_model_only": true,
+      "numerical_tolerance_m": 1e-06,
+      "continuous_intertick_certificate": false
+    },
+    "source_trace": "live_runs/raceline_robust/seeded/d50s15/pass_00/source_trace.npz"
+  },
+  "controlled_stop_reason": null,
+  "stop_iteration": null,
+  "solver_initialization": {
+    "scaled_primal_shift_max": 1.8947806286936006e-16,
+    "largest_shift_coordinate": 3243
+  },
+  "ipopt_options": {
+    "bound_push": 1e-09,
+    "bound_frac": 1e-09,
+    "bound_relax_factor": 0.0,
+    "max_iter": 1500,
+    "max_cpu_time": 3600.0,
+    "hessian_approximation": "limited-memory",
+    "mu_strategy": "adaptive",
+    "tol": 1e-06,
+    "acceptable_tol": 1e-05,
+    "print_level": 5
+  },
+  "native_variable_bounds": true,
+  "jacobian_workers": 5,
+  "initializer": "f1tenth_planning/trajectories/autodrive_practice_20260924_b/source_command_4p800_witness.npz",
+  "objective_scaling_factor": 194000.0,
+  "stagnation_iterations": 0,
+  "initializer_strategy": "resample-or-exact-restart",
+  "seed_reconditioning": null,
+  "source_clearance_cuts": [],
+  "objective_mode": "repair",
+  "objective_value": 0.5059312653593191,
+  "initializer_sha256": "0b6dadb0b7d2028e9053da14d4d474a3ea456ed8ce7affe1267098297fc000f9",
+  "map_sha256": "0c39e17b3ae88ca70067c76c830c6de542af08c149f0616c06c9de227d79d016",
+  "unity_validated": false,
+  "mpc_validated": false,
+  "runtime_promoted": false,
+  "limitations": [
+    "Fixed trial duration, not a global minimum-time certificate.",
+    "Two-metre ordered initial-geometry basin; free pose on the phase cross-section.",
+    "Exact production transition is not Unity private native solver parity.",
+    "Perimeter checked at every 1 ms source tick; continuous inter-tick contact and Unity remain unvalidated."
+  ],
+  "quality": {
+    "clearance_slack_m": 0.008986457766072972,
+    "steering_step_rms_rad": 0.023452265820048307,
+    "steering_step_max_rad": 0.12891707187103676,
+    "throttle_step_rms": 0.014468579186202896
+  },
+  "reference_export": {
+    "path": "live_runs/raceline_robust/seeded/d50s15/pass_00/source_command_raceline.csv",
+    "sha256": "6b160f0863bf9715f485ccf6c1d461d502d809a6dfe839ecaa962b30bf78c149",
+    "points": 4850,
+    "spacing_max_m": 0.00920663701031832,
+    "exact_command_lap_s": 4.8500000000000005,
+    "body_forward_reference_integral_s": 4.850158091968799,
+    "source_trace": "live_runs/raceline_robust/seeded/d50s15/pass_00/source_trace.npz",
+    "post_export_geometry_smoothing": false,
+    "speed_mps_range": [
+      2.465501420924367,
+      9.206733864550754
+    ],
+    "unity_validated": false,
+    "mpc_validated": false,
+    "source_witness_csv": "live_runs/raceline_robust/seeded/d50s15/pass_00/source_command_raceline_with_witness.csv",
+    "source_witness_sha256": "11e85691fb460b0ae2967bf97c0fde622e428da628db51a1b40e0909018e80db"
+  }
+}

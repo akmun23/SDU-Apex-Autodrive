@@ -97,6 +97,23 @@ fi
 mkdir -p live_runs && touch live_runs/COLCON_IGNORE
 run_dir="live_runs/$run_id"
 [[ ! -e "$run_dir" ]] || { echo "Run already exists: $run_dir" >&2; exit 2; }
+# These are artificial delays in the DEVELOPMENT bridge, not MPC prediction
+# parameters. Record them for every trial: runs with different latency models
+# must never be compared as if they came from the same experimental plant.
+export SDU_APEX_DEV_SENSOR_DELAY_MS="${SDU_APEX_DEV_SENSOR_DELAY_MS:-0}"
+export SDU_APEX_DEV_SENSOR_MIN_AGE_MS="${SDU_APEX_DEV_SENSOR_MIN_AGE_MS:-0}"
+export SDU_APEX_DEV_ACTUATOR_DELAY_MS="${SDU_APEX_DEV_ACTUATOR_DELAY_MS:-0}"
+python3 - <<'PY_VALIDATE_LATENCY'
+import math,os
+for key in ('SDU_APEX_DEV_SENSOR_DELAY_MS','SDU_APEX_DEV_SENSOR_MIN_AGE_MS','SDU_APEX_DEV_ACTUATOR_DELAY_MS'):
+    try:value=float(os.environ[key])
+    except ValueError:raise SystemExit(f'{key} must be numeric')
+    if not math.isfinite(value) or not 0 <= value <= 75:
+        raise SystemExit(f'{key} must be finite in [0,75] ms')
+if (float(os.environ['SDU_APEX_DEV_SENSOR_MIN_AGE_MS'])>0 and
+        float(os.environ['SDU_APEX_DEV_SENSOR_DELAY_MS'])>0):
+    raise SystemExit('Choose sensor minimum age OR additional sensor delay, not both')
+PY_VALIDATE_LATENCY
 total_laps="${SDU_APEX_TRIAL_TOTAL_LAPS:-6}"
 [[ "$total_laps" =~ ^[0-9]+$ && "$total_laps" -ge 2 ]] || {
   echo 'SDU_APEX_TRIAL_TOTAL_LAPS must include warm-up plus >=1 scored lap' >&2
@@ -106,6 +123,19 @@ controller="${run_id}_controller"
 simulator="${run_id}_sim"
 recorder="rec_${run_id}"
 mkdir -p "$run_dir"
+python3 - "$run_dir" "$track" <<'PY_LATENCY_MANIFEST'
+import json,os,pathlib,sys
+path=pathlib.Path(sys.argv[1])/'latency_profile.json'
+path.write_text(json.dumps({
+    'schema_version':1,
+    'simulator_track':sys.argv[2],
+    'mode':'development_bridge_transport_injection',
+    'sensor_publish_extra_delay_ms':float(os.environ['SDU_APEX_DEV_SENSOR_DELAY_MS']),
+    'sensor_publish_minimum_age_ms':float(os.environ['SDU_APEX_DEV_SENSOR_MIN_AGE_MS']),
+    'command_application_extra_delay_ms':float(os.environ['SDU_APEX_DEV_ACTUATOR_DELAY_MS']),
+    'note':'Additional delays over unmodified batchmode; synthetic delay alone does not establish GUI/physics parity',
+},indent=2)+'\n')
+PY_LATENCY_MANIFEST
 set -- --config "mpc=$mpc_config" --config "amcl=$amcl_config"
 cp -- "$mpc_config" "$run_dir/mpc_parameters.yaml"
 cp -- "$amcl_config" "$run_dir/amcl_parameters.yaml"
@@ -136,10 +166,19 @@ PY
     "${SDU_APEX_SIM_RUNTIME_AFFINITY_CPUS:-}" "${SDU_APEX_RECORDER_CPUSET_CPUS:-}" "$jacobian_workers"
   env | sort | rg '^(OMP_|GOMP_)' || true
 } > "$run_dir/cpu_isolation.txt"
+# The manifest records the simulator image the run actually uses: the IROS
+# digest for the competition track, the practice digest otherwise.
+case "$track" in
+  competition) manifest_sim_image='autodriveecosystem/autodrive_roboracer_sim@sha256:749fbef07942109d18497cbcf6ffe9452e06ae487f2bfc915e92440bc4b4663d' ;;
+  practice) manifest_sim_image='autodriveecosystem/autodrive_roboracer_sim@sha256:b4bbda41fdb1da7a2eadba4350ed3a0cb5020e7eb783454e78399ef5852dbd76' ;;
+esac
+if [[ -n "${SDU_APEX_SIM_IMAGE_OVERRIDE:-}" ]]; then
+  manifest_sim_image="$SDU_APEX_SIM_IMAGE_OVERRIDE"
+fi
 python3 tools/analysis/write_run_manifest.py --run-id "$run_id" \
   --output "$run_dir/run_manifest.json" --acknowledge-not-started \
   --track "$track" --unity-mode batchmode \
-  --simulator-image autodriveecosystem/autodrive_roboracer_sim@sha256:b4bbda41fdb1da7a2eadba4350ed3a0cb5020e7eb783454e78399ef5852dbd76 \
+  --simulator-image "$manifest_sim_image" \
   --controller-image "${SDU_APEX_IMAGE:-sdu-apex-autodrive:dev}" \
   --simulator-container "$simulator" --controller-container "$controller" \
   --map "$map" --trajectory "$trajectory" "$@" \
