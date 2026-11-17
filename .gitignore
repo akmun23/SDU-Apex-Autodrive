@@ -26,3 +26,6 @@ __pycache__/
 *.bag
 *.db3
 *.csv.tmp
+
+# MCAP recordings of competition runs
+/bags/

@@ -11,4 +11,23 @@ source /home/autodrive_devkit/install/setup.bash
 source /workspace/install/setup.bash
 
 set -u
-exec ros2 launch sdu_apex_autodrive competition.launch.py >/dev/null 2>&1
+# Pin the background ROS processes to the same CPU pool as development;
+# MPC itself is separately pinned by the launch file. On unsupported hosts,
+# run without affinity.
+runtime_cpus="${SDU_APEX_COMPETITION_RUNTIME_CPUS:-}"
+if [[ -n "$runtime_cpus" ]]; then
+  exec taskset --cpu-list "$runtime_cpus" python3 -c '
+import logging
+import launch.logging
+from ros2cli.cli import main
+launch.logging.launch_config.log_handler_factory = lambda *a, **k: logging.NullHandler()
+raise SystemExit(main(argv=["launch", "sdu_apex_autodrive", "competition.launch.py"]))
+' >/dev/null 2>&1
+fi
+exec python3 -c '
+import logging
+import launch.logging
+from ros2cli.cli import main
+launch.logging.launch_config.log_handler_factory = lambda *a, **k: logging.NullHandler()
+raise SystemExit(main(argv=["launch", "sdu_apex_autodrive", "competition.launch.py"]))
+' >/dev/null 2>&1

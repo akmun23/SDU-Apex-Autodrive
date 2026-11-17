@@ -209,4 +209,7 @@ documentation-link check ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 | [docs/raceline-optimization.md](docs/raceline-optimization.md) | Minimum-time optimizer, outputs and validation |
 | [docs/mapping.md](docs/mapping.md) | Mapping an unknown track |
 | [docs/trials.md](docs/trials.md) | Running and evaluating simulator trials |
+| [docs/competition-runtime.md](docs/competition-runtime.md) | Competition image: startup order, CPU layout, bridge socket, recording |
+| [docs/competition-tuner.md](docs/competition-tuner.md) | Graphical MPC weight tuning against the Unity GUI |
+| [docs/latency-calibration.md](docs/latency-calibration.md) | Matching development and graphical transport latency |
 | [docs/development.md](docs/development.md) | Build flags, benchmarks, diagnostics, tests |

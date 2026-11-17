@@ -13,6 +13,7 @@ RUNTIME_FILES = (
     "sdu_apex_autodrive/launch/competition.launch.py",
     "sdu_apex_autodrive/sdu_apex_autodrive/bridge_40hz.py",
     "sdu_apex_autodrive/sdu_apex_autodrive/actuator_interface.py",
+    "sdu_apex_autodrive/sdu_apex_autodrive/competition_readiness.py",
     "f1tenth_localization/src/sensor_odometry_node.cpp",
     "f1tenth_localization/gpu_amcl_cpp/src/core/amcl_node.cpp",
     "f1tenth_localization/gpu_amcl_cpp/src/core/ekf_node.cpp",
@@ -128,6 +129,10 @@ def main() -> int:
         if relative.endswith("bridge_40hz.py"):
             if "_disable_restricted_bridge_subscriptions" not in text:
                 errors.append(f"{relative}: bridge reset guard is missing")
+            for token in ("socket.TCP_NODELAY", "socket.TCP_QUICKACK",
+                          "_rearm_socket_quickack", "def do_handle(self, *args)"):
+                if token not in text:
+                    errors.append(f"{relative}: low-latency socket hook missing {token}")
             continue
         for topic in RESTRICTED:
             if topic in text:
@@ -178,7 +183,7 @@ def main() -> int:
             f"{COMPETITION_FILES[0]}: rate-controlled official bridge wrapper is missing")
 
     competition_entrypoint = (ROOT / COMPETITION_FILES[1]).read_text(encoding="utf-8")
-    if "exec ros2 launch sdu_apex_autodrive competition.launch.py" not in competition_entrypoint:
+    if '"competition.launch.py"' not in competition_entrypoint:
         errors.append(
             f"{COMPETITION_FILES[1]}: entrypoint is not the fixed competition launch")
 

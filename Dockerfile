@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-rosidl-default-generators \
     ros-humble-nav2-lifecycle-manager ros-humble-nav2-map-server \
     ros-humble-slam-toolbox \
+    ros-humble-rosbag2-storage-mcap \
     ros-humble-rclc ros-humble-rclcpp-components \
     ros-humble-tf2-geometry-msgs \
     && rm -rf /var/lib/apt/lists/*
@@ -31,17 +32,18 @@ ARG AUTODRIVE_TRAJECTORY_REL
 ENV SDU_APEX_MAP_REL=${AUTODRIVE_MAP_REL}
 ENV SDU_APEX_TRAJECTORY_REL=${AUTODRIVE_TRAJECTORY_REL}
 
-# Native + LTO is explicitly opt-in, as the resulting binary targets the
-# CPU used by the Docker builder. Keep generic published images portable.
-ARG SDU_APEX_MPC_NATIVE_TUNING=OFF
-ARG SDU_APEX_MPC_LTO=OFF
+# The MPC is built for the CPU doing the build with link-time optimization:
+# build the image on the machine that runs it.
+ARG SDU_APEX_MPC_NATIVE_TUNING=ON
+ARG SDU_APEX_MPC_LTO=ON
+ARG SDU_APEX_CUDA_ARCHITECTURES="61;86;89"
 RUN source /opt/ros/humble/setup.bash \
     && source /home/autodrive_devkit/install/setup.bash \
     && CMAKE_BUILD_PARALLEL_LEVEL=8 colcon build --parallel-workers 8 --merge-install --symlink-install \
       --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
       -DSDU_APEX_MPC_NATIVE_TUNING=${SDU_APEX_MPC_NATIVE_TUNING} \
       -DSDU_APEX_MPC_LTO=${SDU_APEX_MPC_LTO} \
-      -DCMAKE_CUDA_ARCHITECTURES="61;86;89"
+      -DCMAKE_CUDA_ARCHITECTURES="${SDU_APEX_CUDA_ARCHITECTURES}"
 
 # The competition image has one fixed, self-contained startup path.
 COPY docker/competition_entrypoint.sh /home/autodrive_devkit.sh
