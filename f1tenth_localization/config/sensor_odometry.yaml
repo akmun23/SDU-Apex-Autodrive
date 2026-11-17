@@ -1,0 +1,34 @@
+sensor_odometry:
+  ros__parameters:
+    left_encoder_topic: /autodrive/roboracer_1/left_encoder
+    right_encoder_topic: /autodrive/roboracer_1/right_encoder
+    imu_topic: /autodrive/roboracer_1/imu
+    bridge_request_command_topic: /odom/bridge_request_command
+    bridge_actuator_feedback_topic: /odom/bridge_actuator_feedback
+    odom_topic: /odom
+    diagnostics_topic: /odom/diagnostics
+    publish_diagnostics: false
+    unity_plant_state_topic: /odom/unity_plant_state
+
+    odom_frame: odom
+    base_frame: base_link
+    publish_tf: true
+    lidar_frame: lidar
+    imu_frame: imu
+    lidar_x_m: 0.2733
+    lidar_y_m: 0.0
+    lidar_z_m: 0.096
+    imu_x_m: 0.08
+    imu_y_m: 0.0
+    imu_z_m: 0.055
+
+    wheel_radius_m: 0.059
+    encoder_ticks_per_revolution: 1920.0
+    imu_reference_forward_m: 0.15532
+    maximum_packet_dt_s: 0.10
+    lateral_acceleration_residual_gain: 1.0
+
+    pose_xy_variance: 0.01
+    pose_yaw_variance: 0.0001
+    twist_linear_variance: 0.04
+    twist_yaw_variance: 0.04

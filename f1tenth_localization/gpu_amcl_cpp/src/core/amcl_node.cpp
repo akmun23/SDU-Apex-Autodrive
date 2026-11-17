@@ -1,0 +1,2645 @@
+#include "gpu_amcl_cpp/core/amcl_node.hpp"
+#include "gpu_amcl_cpp/helpers/math_utils.hpp"
+#include "gpu_amcl_cpp/helpers/localization_math.hpp"
+#include "gpu_amcl_cpp/helpers/scan_validity.hpp"
+#include "gpu_amcl_cpp/helpers/odom_history.hpp"
+
+#include <chrono>
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <exception>
+#include <fstream>
+#include <limits>
+#include <sstream>
+#include <stdexcept>
+#include <sensor_msgs/msg/point_field.hpp>
+#include <std_msgs/msg/float64.hpp>
+#include <std_msgs/msg/int32.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
+
+using namespace std::chrono_literals;
+
+namespace gpu_amcl_cpp {
+
+AmclNode::AmclNode(const rclcpp::NodeOptions& options)
+    : Node("gpu_amcl_cpp", options) {
+
+    declare_all_parameters();
+    load_parameters();
+
+    // ── Publishers ─────────────────────────────────────────────────
+    pose_pub_  = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("amcl_pose", rclcpp::QoS(10));
+    current_map_pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
+        "current_map_pose", rclcpp::QoS(10));
+    cloud_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("particlecloud", rclcpp::QoS(2));
+    pre_resample_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+        "particlecloud_weighted_pre_resample", rclcpp::QoS(2));
+    timing_pub_ = create_publisher<std_msgs::msg::Float64>("amcl_timing", rclcpp::QoS(10));
+    particle_count_pub_ = create_publisher<std_msgs::msg::Int32>("amcl_particle_count", rclcpp::QoS(10));
+    kld_diag_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
+        "amcl_kld_diagnostics", rclcpp::QoS(10));
+    gpu_timing_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
+        "amcl_gpu_timing", rclcpp::QoS(10));
+    scan_alignment_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
+        "amcl_scan_alignment", rclcpp::QoS(10));
+    localization_health_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(
+        "amcl_localization_health", rclcpp::QoS(10));
+    if (publish_tf_) {
+        tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+    }
+    scan_retry_timer_ = create_wall_timer(
+        5ms, std::bind(&AmclNode::retry_pending_scans, this));
+
+    // ── Callback groups ──
+    // Separate mutually exclusive groups let scans and odometry run concurrently.
+    scan_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    odom_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
+    rclcpp::SubscriptionOptions scan_opts;
+    scan_opts.callback_group = scan_cb_group_;
+    rclcpp::SubscriptionOptions odom_opts;
+    odom_opts.callback_group = odom_cb_group_;
+
+    // ── Subscribers ────────────────────────────────────────────────
+    // The official AutoDRIVE bridge publishes these streams reliably.  Match
+    // that contract for localization-critical data rather than using the
+    // lossy sensor-data preset, which can otherwise leave global AMCL waiting
+    // silently for its first odometry or scan callback.
+    const auto autodrive_sensor_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
+    scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
+        scan_topic_, autodrive_sensor_qos,
+        std::bind(&AmclNode::scan_callback, this, std::placeholders::_1),
+        scan_opts);
+
+    odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+        odom_topic_, autodrive_sensor_qos,
+        std::bind(&AmclNode::odom_callback, this, std::placeholders::_1),
+        odom_opts);
+
+    map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+        "map", rclcpp::QoS(1).transient_local(),
+        std::bind(&AmclNode::map_callback, this, std::placeholders::_1));
+
+    if (!std::isfinite(cloud_publish_rate_) || cloud_publish_rate_ <= 0.0) {
+        RCLCPP_INFO(get_logger(),
+            "Particle cloud publishing disabled (cloud_publish_rate <= 0)");
+    } else if (cloud_publish_rate_ >= 39.5) {
+        RCLCPP_INFO(get_logger(),
+            "Particle cloud publishing every accepted scan (configured %.1f Hz)",
+            cloud_publish_rate_);
+    } else {
+        RCLCPP_INFO(get_logger(),
+            "Particle cloud publishing scan-synchronized, max %.1f Hz",
+            cloud_publish_rate_);
+    }
+
+    RCLCPP_INFO(get_logger(), "GPU AMCL C++ node created — waiting for map...");
+}
+
+void AmclNode::declare_all_parameters() {
+    declare_parameter<int>("num_particles", 2000);
+    declare_parameter<int>("min_particles", 100);
+    declare_parameter<int>("max_particles", 5000);
+
+    declare_parameter<bool>("use_kld_sampling", false);
+    declare_parameter<double>("kld_epsilon", 0.05);
+    declare_parameter<double>("kld_z", 2.33);
+    declare_parameter<double>("kld_bin_x", 0.5);
+    declare_parameter<double>("kld_bin_y", 0.5);
+    declare_parameter<double>("kld_bin_theta", 0.1);
+    declare_parameter<double>("kld_min_bin_weight", 0.0);
+
+    declare_parameter<std::string>("base_frame_id", "base_link");
+    declare_parameter<std::string>("odom_frame_id", "odom");
+    declare_parameter<std::string>("global_frame_id", "map");
+    declare_parameter<bool>("publish_tf", true);
+
+    declare_parameter<std::string>("scan_topic", "/autodrive/roboracer_1/lidar");
+    declare_parameter<double>("scan_acquisition_delay_s", 0.0);
+    declare_parameter<std::string>("odom_topic", "/odom");
+
+    declare_parameter<double>("update_min_d", 0.001);
+    declare_parameter<double>("update_min_a", 0.001);
+
+
+    declare_parameter<double>("alpha1", 0.1);
+    declare_parameter<double>("alpha2", 0.1);
+    declare_parameter<double>("alpha3", 0.2);
+    declare_parameter<double>("alpha4", 0.2);
+
+    declare_parameter<double>("slip_angular_threshold", 1.0);  // rad/s — above this, increase noise
+    declare_parameter<double>("slip_noise_multiplier", 2.0);   // multiplier when slip detected
+
+    declare_parameter<int>("max_beams", 270);
+    declare_parameter<double>("z_hit", 0.95);
+    declare_parameter<double>("z_rand", 0.05);
+    declare_parameter<double>("sigma_hit", 0.2);
+    declare_parameter<double>("laser_min_range", 0.06);
+    declare_parameter<double>("laser_max_range", 10.0);
+    declare_parameter<double>("laser_offset_x", 0.265);
+    declare_parameter<double>("laser_offset_y", 0.0);
+    declare_parameter<bool>("normalize_likelihood_by_beams", true);
+    declare_parameter<double>("likelihood_scale", 1.0);
+
+    declare_parameter<double>("resample_threshold", 0.5);
+    declare_parameter<bool>("enable_recovery_injection", false);
+    declare_parameter<double>("recovery_injection_ratio", 0.05);
+    declare_parameter<bool>("enable_local_roughening", true);
+    declare_parameter<double>("local_roughening_ratio", 0.20);
+    declare_parameter<double>("local_roughening_xy_std_m", 0.12);
+    declare_parameter<double>("local_roughening_yaw_std_rad", 0.0872664626);
+    declare_parameter<double>("local_roughening_bad_log_weight_per_beam", -1.0);
+    declare_parameter<double>("local_roughening_max_cloud_std_m", 0.75);
+    declare_parameter<bool>("use_cluster_estimate", true);
+    declare_parameter<double>("cluster_xy_bin_m", 0.25);
+    declare_parameter<double>("cluster_radius_m", 0.75);
+    declare_parameter<int>("cluster_iterations", 3);
+    declare_parameter<double>("cluster_min_covariance", 1e-4);
+    declare_parameter<double>("cluster_publish_min_weight", 0.60);
+    declare_parameter<bool>("enable_raycast_verification", false);
+    declare_parameter<bool>("raycast_verification_global_only", true);
+    declare_parameter<int>("raycast_verification_max_clusters", 5);
+    declare_parameter<int>("raycast_verification_particles_per_cluster", 20);
+    declare_parameter<int>("raycast_verification_top_particles", 20);
+    declare_parameter<int>("raycast_verification_max_beams", 270);
+    declare_parameter<double>("raycast_verification_cluster_radius_m", 0.35);
+    declare_parameter<double>("raycast_verification_yaw_tolerance_rad", 0.5235987756);
+    declare_parameter<double>("raycast_verification_beta", 0.30);
+    declare_parameter<double>("raycast_verification_min_factor", 0.20);
+    declare_parameter<double>("raycast_verification_step_m", 0.05);
+    declare_parameter<bool>("enable_startup_scan_refinement", false);
+    declare_parameter<int>("startup_scan_refinement_max_beams", 90);
+    declare_parameter<int>("startup_scan_refinement_iterations", 8);
+    declare_parameter<double>("startup_scan_refinement_max_match_distance_m", 0.60);
+    declare_parameter<double>("startup_scan_refinement_max_translation_m", 0.50);
+    declare_parameter<double>("startup_scan_refinement_max_yaw_rad", 0.52);
+    declare_parameter<double>("startup_scan_refinement_max_step_translation_m", 0.08);
+    declare_parameter<double>("startup_scan_refinement_max_step_yaw_rad", 0.06);
+
+    declare_parameter<bool>("pose_jump_gate_enabled", true);
+    declare_parameter<double>("pose_jump_max_distance_m", 1.0);
+    declare_parameter<double>("pose_jump_max_yaw_rad", 1.2);
+    declare_parameter<int>("pose_jump_confirm_scans", 5);
+    declare_parameter<double>("pose_jump_confirm_distance_m", 0.75);
+    declare_parameter<double>("pose_jump_confirm_yaw_rad", 0.6);
+
+    declare_parameter<bool>("global_initialization", true);
+    declare_parameter<bool>("initial_heading_from_raceline", false);
+    declare_parameter<bool>("initial_pose_from_raceline", false);
+    declare_parameter<double>("initial_pose_heading_offset_rad", 0.0);
+    declare_parameter<double>("global_heading_cone_rad", 0.5235987756);
+    declare_parameter<double>("global_track_margin_m", 0.15);
+    declare_parameter<double>("global_max_lateral_offset_m", 0.55);
+    declare_parameter<std::string>("global_heading_trajectory_file", "");
+    declare_parameter<std::string>("global_heading_trajectory_package", "f1tenth_planning");
+    declare_parameter<std::string>(
+        "global_heading_trajectory_rel_path",
+        "trajectories/autodrive_mintime_sim_5p0_dense/autodrive_mintime_raceline.csv");
+    declare_parameter<double>("global_pose_covariance_xy_max", 0.25);
+    declare_parameter<double>("global_pose_covariance_yaw_max", 0.12);
+    declare_parameter<double>("global_pose_max_track_distance_m", 0.45);
+    declare_parameter<double>("global_pose_max_track_heading_error_rad", 0.45);
+    declare_parameter<double>("local_tracking_max_raceline_distance_m", 0.65);
+    declare_parameter<double>("local_tracking_max_raceline_heading_error_rad", 1.20);
+    declare_parameter<bool>("global_start_anchor_enabled", false);
+    declare_parameter<double>("global_start_anchor_radius_m", 0.90);
+    declare_parameter<double>(
+        "global_start_anchor_x_m", std::numeric_limits<double>::quiet_NaN());
+    declare_parameter<double>(
+        "global_start_anchor_y_m", std::numeric_limits<double>::quiet_NaN());
+    declare_parameter<double>(
+        "global_start_anchor_yaw_rad", std::numeric_limits<double>::quiet_NaN());
+    declare_parameter<double>("global_start_anchor_heading_tolerance_rad", 0.80);
+    declare_parameter<int>("global_lock_confirm_scans", 5);
+    declare_parameter<double>("global_lock_stability_distance_m", 0.35);
+    declare_parameter<double>("global_lock_stability_yaw_rad", 0.25);
+    declare_parameter<double>("global_lock_min_cluster_weight", 0.50);
+    declare_parameter<double>("global_lock_min_travel_m", 0.75);
+    declare_parameter<bool>("global_lock_use_odom_heading", true);
+    declare_parameter<bool>("global_lock_use_anchor_position", false);
+    // A positive value would impose a per-scan innovation gate. Keep the
+    // default disabled: AMCL must be able to remove accumulated odometry
+    // drift continuously, with association/quality checks protecting against
+    // aliases rather than a correction budget.
+    declare_parameter<double>("local_scan_correction_max_distance_m", 0.0);
+    declare_parameter<double>("local_scan_correction_max_yaw_rad", 0.0);
+    declare_parameter<double>("local_cluster_association_max_distance_m", 0.80);
+    declare_parameter<double>("local_cluster_min_weight", 0.75);
+    declare_parameter<int>("local_tracking_recovery_after_rejected_scans", 3);
+    declare_parameter<int>("local_tracking_recovery_confirm_scans", 3);
+    declare_parameter<double>("local_tracking_recovery_min_cluster_weight", 0.80);
+    declare_parameter<double>("local_tracking_recovery_stability_distance_m", 0.35);
+    declare_parameter<double>("local_tracking_recovery_stability_yaw_rad", 0.25);
+    declare_parameter<double>("local_scan_correction_xy_gain", 0.0);
+    declare_parameter<bool>("local_scan_correction_cross_track_only", true);
+    declare_parameter<double>("local_scan_correction_along_track_gain", 1.0);
+    declare_parameter<double>("local_scan_correction_fast_speed_threshold_mps", 3.0);
+    declare_parameter<double>("local_scan_correction_fast_along_track_gain", 0.25);
+    declare_parameter<double>("local_scan_correction_yaw_gain", 0.0);
+    declare_parameter<bool>("local_tracking_reinitialize_cloud", true);
+    declare_parameter<double>("local_tracking_cloud_covariance_xy", 0.01);
+    declare_parameter<double>("local_tracking_cloud_covariance_yaw", 0.01);
+    declare_parameter<double>("initial_pose_x", 0.0);
+    declare_parameter<double>("initial_pose_y", 0.0);
+    declare_parameter<double>("initial_pose_a", 0.0);
+    declare_parameter<double>("initial_cov_xx", 0.5);
+    declare_parameter<double>("initial_cov_yy", 0.5);
+    declare_parameter<double>("initial_cov_aa", 0.2);
+
+    declare_parameter<double>("cloud_publish_rate", 2.0);  // Hz; <= 0 disables particle-cloud publishing
+    declare_parameter<bool>("debug_pre_resample_particles", false);
+    declare_parameter<double>("force_max_particles_initial_sec", 0.0);
+
+    declare_parameter<double>("odom_history_duration_s", 0.2);
+    declare_parameter<double>("odom_reset_distance_m", 2.0);
+    declare_parameter<double>("odom_reset_yaw_rad", 1.5);
+    declare_parameter<double>("local_large_correction_phase_distance_m", 51.7);
+    declare_parameter<double>("local_post_phase_correction_max_distance_m", 0.20);
+    declare_parameter<double>("local_post_phase_correction_max_yaw_rad", 0.12);
+    declare_parameter<double>("current_map_pose_process_xy_m2_per_s", 0.002);
+    declare_parameter<double>("current_map_pose_process_yaw2_per_s", 0.0005);
+    declare_parameter<double>("localization_degraded_after_s", 0.30);
+}
+
+void AmclNode::load_parameters() {
+    base_frame_   = get_parameter("base_frame_id").as_string();
+    odom_frame_   = get_parameter("odom_frame_id").as_string();
+    global_frame_ = get_parameter("global_frame_id").as_string();
+    publish_tf_   = get_parameter("publish_tf").as_bool();
+    scan_topic_   = get_parameter("scan_topic").as_string();
+    odom_topic_   = get_parameter("odom_topic").as_string();
+    update_min_d_ = get_parameter("update_min_d").as_double();
+    update_min_a_ = get_parameter("update_min_a").as_double();
+    cloud_publish_rate_ = get_parameter("cloud_publish_rate").as_double();
+    force_max_particles_initial_sec_ = std::max(
+        0.0, get_parameter("force_max_particles_initial_sec").as_double());
+    debug_pre_resample_particles_ =
+        get_parameter("debug_pre_resample_particles").as_bool();
+    initial_heading_from_raceline_ =
+        get_parameter("initial_heading_from_raceline").as_bool();
+    initial_pose_from_raceline_ =
+        get_parameter("initial_pose_from_raceline").as_bool();
+    initial_pose_heading_offset_rad_ = get_parameter(
+        "initial_pose_heading_offset_rad").as_double();
+    slip_angular_threshold_ = get_parameter("slip_angular_threshold").as_double();
+    slip_noise_multiplier_  = get_parameter("slip_noise_multiplier").as_double();
+    odom_history_duration_s_ = std::max(
+        0.0, get_parameter("odom_history_duration_s").as_double());
+    // Stock telemetry contains held LiDAR ranges, stamped by the bridge on
+    // packet receipt rather than acquisition. This is a sensor-age calibration,
+    // not a vehicle-physics parameter or a forward pose offset.
+    const double scan_delay = get_parameter("scan_acquisition_delay_s").as_double();
+    if (!std::isfinite(scan_delay) || scan_delay < 0.0 ||
+        scan_delay > odom_history_duration_s_) {
+        throw std::invalid_argument("scan_acquisition_delay_s must fit odom history");
+    }
+    scan_acquisition_delay_ns_ = std::llround(scan_delay * 1.e9);
+    odom_reset_distance_m_ = std::max(
+        0.0, get_parameter("odom_reset_distance_m").as_double());
+    odom_reset_yaw_rad_ = std::max(
+        0.0, get_parameter("odom_reset_yaw_rad").as_double());
+    local_large_correction_phase_distance_m_ = std::max(
+        0.0, get_parameter("local_large_correction_phase_distance_m").as_double());
+    local_post_phase_correction_max_distance_m_ = std::max(
+        0.0, get_parameter("local_post_phase_correction_max_distance_m").as_double());
+    local_post_phase_correction_max_yaw_rad_ = std::max(
+        0.0, get_parameter("local_post_phase_correction_max_yaw_rad").as_double());
+    current_map_pose_process_xy_m2_per_s_ = std::max(
+        0.0, get_parameter("current_map_pose_process_xy_m2_per_s").as_double());
+    current_map_pose_process_yaw2_per_s_ = std::max(
+        0.0, get_parameter("current_map_pose_process_yaw2_per_s").as_double());
+    localization_degraded_after_s_ = std::max(
+        0.0, get_parameter("localization_degraded_after_s").as_double());
+    global_pose_covariance_xy_max_ = std::max(
+        0.0, get_parameter("global_pose_covariance_xy_max").as_double());
+    global_pose_covariance_yaw_max_ = std::max(
+        0.0, get_parameter("global_pose_covariance_yaw_max").as_double());
+    global_pose_max_track_distance_m_ = std::max(
+        0.0, get_parameter("global_pose_max_track_distance_m").as_double());
+    global_pose_max_track_heading_error_rad_ = std::max(
+        0.0, get_parameter("global_pose_max_track_heading_error_rad").as_double());
+    local_tracking_max_raceline_distance_m_ = std::max(
+        0.0, get_parameter("local_tracking_max_raceline_distance_m").as_double());
+    local_tracking_max_raceline_heading_error_rad_ = std::max(
+        0.0, get_parameter(
+            "local_tracking_max_raceline_heading_error_rad").as_double());
+    global_start_anchor_enabled_ = get_parameter("global_start_anchor_enabled").as_bool();
+    global_start_anchor_radius_m_ = std::max(
+        0.0, get_parameter("global_start_anchor_radius_m").as_double());
+    global_start_anchor_x_m_ = get_parameter("global_start_anchor_x_m").as_double();
+    global_start_anchor_y_m_ = get_parameter("global_start_anchor_y_m").as_double();
+    global_start_anchor_yaw_rad_ = get_parameter("global_start_anchor_yaw_rad").as_double();
+    global_start_anchor_heading_tolerance_rad_ = std::max(
+        0.0, get_parameter("global_start_anchor_heading_tolerance_rad").as_double());
+    global_lock_confirm_scans_ = std::max(
+        1, static_cast<int>(get_parameter("global_lock_confirm_scans").as_int()));
+    global_lock_stability_distance_m_ = std::max(
+        0.0, get_parameter("global_lock_stability_distance_m").as_double());
+    global_lock_stability_yaw_rad_ = std::max(
+        0.0, get_parameter("global_lock_stability_yaw_rad").as_double());
+    global_lock_min_cluster_weight_ = std::clamp(
+        get_parameter("global_lock_min_cluster_weight").as_double(), 0.0, 1.0);
+    global_lock_min_travel_m_ = std::max(
+        0.0, get_parameter("global_lock_min_travel_m").as_double());
+    global_lock_use_odom_heading_ = get_parameter(
+        "global_lock_use_odom_heading").as_bool();
+    global_lock_use_anchor_position_ = get_parameter(
+        "global_lock_use_anchor_position").as_bool();
+    local_scan_correction_max_distance_m_ = std::max(
+        0.0, get_parameter("local_scan_correction_max_distance_m").as_double());
+    local_scan_correction_max_yaw_rad_ = std::max(
+        0.0, get_parameter("local_scan_correction_max_yaw_rad").as_double());
+    local_cluster_association_max_distance_m_ = std::max(
+        0.0, get_parameter("local_cluster_association_max_distance_m").as_double());
+    local_cluster_min_weight_ = std::clamp(
+        get_parameter("local_cluster_min_weight").as_double(), 0.0, 1.0);
+    local_tracking_recovery_after_rejected_scans_ = std::max(
+        1, static_cast<int>(get_parameter(
+            "local_tracking_recovery_after_rejected_scans").as_int()));
+    local_tracking_recovery_confirm_scans_ = std::max(
+        1, static_cast<int>(get_parameter(
+            "local_tracking_recovery_confirm_scans").as_int()));
+    local_tracking_recovery_min_cluster_weight_ = std::clamp(
+        get_parameter("local_tracking_recovery_min_cluster_weight").as_double(), 0.0, 1.0);
+    local_tracking_recovery_stability_distance_m_ = std::max(
+        0.0, get_parameter("local_tracking_recovery_stability_distance_m").as_double());
+    local_tracking_recovery_stability_yaw_rad_ = std::max(
+        0.0, get_parameter("local_tracking_recovery_stability_yaw_rad").as_double());
+    recovery_injection_configured_ =
+        get_parameter("enable_recovery_injection").as_bool();
+    local_scan_correction_xy_gain_ = std::clamp(
+        get_parameter("local_scan_correction_xy_gain").as_double(), 0.0, 1.0);
+    local_scan_correction_cross_track_only_ = get_parameter(
+        "local_scan_correction_cross_track_only").as_bool();
+    local_scan_correction_along_track_gain_ = std::clamp(
+        get_parameter("local_scan_correction_along_track_gain").as_double(), 0.0, 1.0);
+    local_scan_correction_fast_speed_threshold_mps_ = std::max(
+        0.0, get_parameter("local_scan_correction_fast_speed_threshold_mps").as_double());
+    local_scan_correction_fast_along_track_gain_ = std::clamp(
+        get_parameter("local_scan_correction_fast_along_track_gain").as_double(), 0.0, 1.0);
+    local_scan_correction_yaw_gain_ = std::clamp(
+      get_parameter("local_scan_correction_yaw_gain").as_double(), 0.0, 1.0);
+    local_tracking_reinitialize_cloud_ = get_parameter(
+        "local_tracking_reinitialize_cloud").as_bool();
+    local_tracking_cloud_covariance_xy_ = std::max(
+        1.0e-4, get_parameter("local_tracking_cloud_covariance_xy").as_double());
+    local_tracking_cloud_covariance_yaw_ = std::max(
+        1.0e-4, get_parameter("local_tracking_cloud_covariance_yaw").as_double());
+    pose_jump_gate_enabled_ = get_parameter("pose_jump_gate_enabled").as_bool();
+    pose_jump_max_distance_m_ = std::max(
+        0.0, get_parameter("pose_jump_max_distance_m").as_double());
+    pose_jump_max_yaw_rad_ = std::max(
+        0.0, get_parameter("pose_jump_max_yaw_rad").as_double());
+    pose_jump_confirm_scans_ = std::max(
+        1, static_cast<int>(get_parameter("pose_jump_confirm_scans").as_int()));
+    pose_jump_confirm_distance_m_ = std::max(
+        0.0, get_parameter("pose_jump_confirm_distance_m").as_double());
+    pose_jump_confirm_yaw_rad_ = std::max(
+        0.0, get_parameter("pose_jump_confirm_yaw_rad").as_double());
+
+    RCLCPP_INFO(get_logger(),
+        "[AMCL] Parameters: update_min_d=%.5f, update_min_a=%.5f, "
+        "odom_history=%.3fs, cloud_publish_rate=%.1f Hz, "
+        "debug_pre_resample=%s, slip_threshold=%.2f rad/s, initial_raceline_heading=%s, "
+        "local_correction_gate=%.2fm/%.2frad xy_gain=%.3f cross_track_only=%s "
+        "along_track_gain=%.3f fast_speed=%.2fmps fast_along_gain=%.3f yaw_gain=%.3f "
+        "association=%.2fm recenter_cloud=%s",
+        update_min_d_, update_min_a_, odom_history_duration_s_,
+        cloud_publish_rate_, debug_pre_resample_particles_ ? "true" : "false",
+        slip_angular_threshold_,
+        initial_heading_from_raceline_ ? "true" : "false",
+        local_scan_correction_max_distance_m_, local_scan_correction_max_yaw_rad_,
+        local_scan_correction_xy_gain_,
+        local_scan_correction_cross_track_only_ ? "true" : "false",
+        local_scan_correction_along_track_gain_,
+        local_scan_correction_fast_speed_threshold_mps_,
+        local_scan_correction_fast_along_track_gain_,
+        local_scan_correction_yaw_gain_,
+        local_cluster_association_max_distance_m_,
+        local_tracking_reinitialize_cloud_ ? "true" : "false");
+    RCLCPP_INFO(get_logger(),
+        "[AMCL] local correction phase: large-correction travel limit=%.2fm, "
+        "post-phase max step=%.3fm/%.3frad",
+        local_large_correction_phase_distance_m_,
+        local_post_phase_correction_max_distance_m_,
+        local_post_phase_correction_max_yaw_rad_);
+}
+
+void AmclNode::reset_pose_jump_gate() {
+    have_last_published_pose_ = false;
+    have_pending_jump_pose_ = false;
+    pending_jump_pose_count_ = 0;
+}
+
+bool AmclNode::should_publish_pose_estimate(const PoseEstimate& est) {
+    if (!pose_jump_gate_enabled_ || !have_last_published_pose_) {
+        have_pending_jump_pose_ = false;
+        pending_jump_pose_count_ = 0;
+        return true;
+    }
+
+    const double dx = est.x - last_published_pose_.x;
+    const double dy = est.y - last_published_pose_.y;
+    const double jump_distance = std::hypot(dx, dy);
+    const double jump_yaw =
+        std::abs(math_utils::angle_diff(est.theta, last_published_pose_.theta));
+    const bool is_jump =
+        jump_distance > pose_jump_max_distance_m_ ||
+        jump_yaw > pose_jump_max_yaw_rad_;
+
+    if (!is_jump) {
+        have_pending_jump_pose_ = false;
+        pending_jump_pose_count_ = 0;
+        return true;
+    }
+
+    // A locked local estimate must still pass the confirmation streak below.
+    // Association, cluster-quality, raceline and confirmation gates apply
+    // to both local tracking and explicit global recovery.
+
+    bool same_pending = false;
+    if (have_pending_jump_pose_) {
+        const double pdx = est.x - pending_jump_pose_.x;
+        const double pdy = est.y - pending_jump_pose_.y;
+        const double pending_distance = std::hypot(pdx, pdy);
+        const double pending_yaw =
+            std::abs(math_utils::angle_diff(est.theta, pending_jump_pose_.theta));
+        same_pending =
+            pending_distance <= pose_jump_confirm_distance_m_ &&
+            pending_yaw <= pose_jump_confirm_yaw_rad_;
+    }
+
+    if (!same_pending) {
+        pending_jump_pose_ = est;
+        pending_jump_pose_count_ = 1;
+        have_pending_jump_pose_ = true;
+        RCLCPP_WARN(
+            get_logger(),
+            "AMCL pose jump gated: %.2f m, %.2f rad. Waiting for %d consistent scans.",
+            jump_distance,
+            jump_yaw,
+            pose_jump_confirm_scans_);
+        return false;
+    }
+
+    ++pending_jump_pose_count_;
+    if (pending_jump_pose_count_ < pose_jump_confirm_scans_) {
+        return false;
+    }
+
+    RCLCPP_WARN(
+        get_logger(),
+        "AMCL accepted confirmed pose jump after %d scans.",
+        pending_jump_pose_count_);
+    have_pending_jump_pose_ = false;
+    pending_jump_pose_count_ = 0;
+    return true;
+}
+
+void AmclNode::push_odom_sample(const rclcpp::Time& stamp,
+                                double x,
+                                double y,
+                                double theta,
+                                const nav_msgs::msg::Odometry& msg) {
+    if (!odom_history_.empty() && stamp <= odom_history_.back().stamp) {
+        // Rebase on the newest callback instead of letting a timestamp
+        // reversal poison the sorted interpolation history.
+        odom_history_.clear();
+    }
+    odom_history_.push_back({
+        stamp,
+        x,
+        y,
+        theta,
+        msg.pose.covariance[0],
+        msg.pose.covariance[1],
+        msg.pose.covariance[7],
+        msg.pose.covariance[5],
+        msg.pose.covariance[11],
+        msg.pose.covariance[35]});
+
+    // Keep one interpolation interval even when the configured time window is very small.
+    while (odom_history_.size() > 2 &&
+           (stamp - odom_history_.front().stamp).seconds() > odom_history_duration_s_) {
+        odom_history_.pop_front();
+    }
+}
+
+bool AmclNode::interpolate_odom_pose(const rclcpp::Time& stamp,
+                                     double& x,
+                                     double& y,
+                                     double& theta,
+                                     rclcpp::Time* matched_stamp,
+                                     rclcpp::Time* bracket_before_stamp,
+                                     rclcpp::Time* bracket_after_stamp,
+                                     Eigen::Matrix3d* covariance) const {
+    const auto bracket = odom_history::bracket(odom_history_, stamp);
+    if (bracket.first == nullptr) {
+        return false;
+    }
+    const auto& a = *bracket.first;
+    const auto& b = *bracket.second;
+    const auto sample_covariance = [](const OdomSample& sample) {
+        Eigen::Matrix3d result = Eigen::Matrix3d::Zero();
+        result(0, 0) = sample.covariance_xx;
+        result(0, 1) = sample.covariance_xy;
+        result(1, 0) = sample.covariance_xy;
+        result(1, 1) = sample.covariance_yy;
+        result(0, 2) = sample.covariance_xyaw;
+        result(2, 0) = sample.covariance_xyaw;
+        result(1, 2) = sample.covariance_yyaw;
+        result(2, 1) = sample.covariance_yyaw;
+        result(2, 2) = sample.covariance_yawyaw;
+        if (!result.allFinite()) {
+            result.setZero();
+        }
+        for (int i = 0; i < 3; ++i) {
+            result(i, i) = std::max(0.0, result(i, i));
+        }
+        return result;
+    };
+    if (matched_stamp != nullptr) *matched_stamp = stamp;
+    if (bracket_before_stamp != nullptr) *bracket_before_stamp = a.stamp;
+    if (bracket_after_stamp != nullptr) *bracket_after_stamp = b.stamp;
+    const double dt = (b.stamp - a.stamp).seconds();
+    const double t = dt > 0.0 ? (stamp - a.stamp).seconds() / dt : 0.0;
+    x = a.x + t * (b.x - a.x);
+    y = a.y + t * (b.y - a.y);
+    theta = math_utils::normalize_angle(
+        a.theta + t * math_utils::angle_diff(b.theta, a.theta));
+    if (covariance != nullptr) {
+        *covariance = (1.0 - t) * sample_covariance(a) + t * sample_covariance(b);
+    }
+    return true;
+}
+
+void AmclNode::retry_pending_scans() {
+    if (processing_scan_.load()) {
+        return;
+    }
+
+    sensor_msgs::msg::LaserScan::SharedPtr pending;
+    {
+        std::lock_guard<std::mutex> lock(pending_scan_mutex_);
+        if (pending_scans_.empty()) {
+            return;
+        }
+        pending = pending_scans_.front();
+        pending_scans_.pop_front();
+    }
+
+    scan_callback(pending);
+}
+
+void AmclNode::publish_scan_alignment_diagnostic(
+    const rclcpp::Time& scan_stamp,
+    const rclcpp::Time& matched_odom_stamp,
+    const rclcpp::Time& bracket_before_stamp,
+    const rclcpp::Time& bracket_after_stamp,
+    double matched_odom_error_ms,
+    bool accepted,
+    std::size_t sampled_valid_beams,
+    std::size_t sampled_beams) {
+    if (scan_alignment_pub_->get_subscription_count() == 0) {
+        return;
+    }
+    size_t queued_scans = 0;
+    {
+        std::lock_guard<std::mutex> lock(pending_scan_mutex_);
+        queued_scans = pending_scans_.size();
+    }
+    // [scan source stamp, matched odom stamp, source-time error ms, accepted,
+    //  queued scans, dropped scans, bracket-before stamp, bracket-after stamp,
+    //  processing drops, sampled valid/total beams, original packet stamp,
+    //  configured acquisition delay seconds]. Corrected acquisition epoch is
+    //  in slot 0, keeping odometry bracket diagnostics meaningful.
+    std_msgs::msg::Float64MultiArray msg;
+    msg.data = {
+        scan_stamp.seconds(),
+        matched_odom_stamp.nanoseconds() == 0 ?
+            std::numeric_limits<double>::quiet_NaN() : matched_odom_stamp.seconds(),
+        matched_odom_error_ms,
+        accepted ? 1.0 : 0.0,
+        static_cast<double>(queued_scans),
+        static_cast<double>(pending_scan_drop_count_.load()),
+        bracket_before_stamp.nanoseconds() == 0 ?
+            std::numeric_limits<double>::quiet_NaN() : bracket_before_stamp.seconds(),
+        bracket_after_stamp.nanoseconds() == 0 ?
+            std::numeric_limits<double>::quiet_NaN() : bracket_after_stamp.seconds(),
+        static_cast<double>(scan_processing_drop_count_.load()),
+        static_cast<double>(sampled_valid_beams),
+        static_cast<double>(sampled_beams),
+        rclcpp::Time(scan_stamp.nanoseconds() + scan_acquisition_delay_ns_,
+                     scan_stamp.get_clock_type()).seconds(),
+        static_cast<double>(scan_acquisition_delay_ns_) * 1.e-9,
+    };
+    scan_alignment_pub_->publish(msg);
+}
+
+std::string AmclNode::resolve_global_heading_trajectory_file() const {
+    const std::string configured_path =
+        get_parameter("global_heading_trajectory_file").as_string();
+    if (!configured_path.empty()) {
+        return configured_path;
+    }
+
+    const std::string package =
+        get_parameter("global_heading_trajectory_package").as_string();
+    const std::string rel_path =
+        get_parameter("global_heading_trajectory_rel_path").as_string();
+    if (package.empty() || rel_path.empty()) {
+        return "";
+    }
+
+    try {
+        return ament_index_cpp::get_package_share_directory(package) + "/" + rel_path;
+    } catch (const std::exception& ex) {
+        RCLCPP_WARN(get_logger(),
+                    "Failed to resolve global heading trajectory from package '%s': %s",
+                    package.c_str(), ex.what());
+        return "";
+    }
+}
+
+std::vector<ParticleFilter::TrackHeadingPoint> AmclNode::load_global_heading_points() const {
+    std::vector<ParticleFilter::TrackHeadingPoint> points;
+    const std::string path = resolve_global_heading_trajectory_file();
+    if (path.empty()) {
+        return points;
+    }
+
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        RCLCPP_WARN(get_logger(), "Cannot open global heading trajectory: %s", path.c_str());
+        return points;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+
+        std::istringstream ss(line);
+        std::string token;
+        std::vector<double> values;
+        while (std::getline(ss, token, ',')) {
+            try {
+                values.push_back(std::stod(token));
+            } catch (...) {
+                values.clear();
+                break;
+            }
+        }
+
+        if (values.size() < 4) {
+            continue;
+        }
+
+        ParticleFilter::TrackHeadingPoint point;
+        point.x = static_cast<float>(values[1]);
+        point.y = static_cast<float>(values[2]);
+        point.yaw = static_cast<float>(values[3]);
+        if (values.size() >= 9) {
+            point.d_left = static_cast<float>(std::max(0.0, values[7]));
+            point.d_right = static_cast<float>(std::max(0.0, values[8]));
+        }
+        points.push_back(point);
+    }
+
+    RCLCPP_INFO(get_logger(), "Loaded %zu global heading points from %s",
+                points.size(), path.c_str());
+    return points;
+}
+
+double AmclNode::raceline_heading_near_pose(
+    double x,
+    double y,
+    double fallback_yaw,
+    const std::vector<ParticleFilter::TrackHeadingPoint>& heading_points) const {
+    if (heading_points.empty()) {
+        return math_utils::normalize_angle(fallback_yaw);
+    }
+
+    const auto* best = &heading_points.front();
+    double best_d2 = std::numeric_limits<double>::infinity();
+    for (const auto& point : heading_points) {
+        const double dx = static_cast<double>(point.x) - x;
+        const double dy = static_cast<double>(point.y) - y;
+        const double d2 = dx * dx + dy * dy;
+        if (d2 < best_d2) {
+            best_d2 = d2;
+            best = &point;
+        }
+    }
+
+    return math_utils::normalize_angle(static_cast<double>(best->yaw));
+}
+
+double AmclNode::raceline_distance_to_pose(double x, double y) const {
+    if (global_heading_points_.empty()) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    double best_distance = std::numeric_limits<double>::infinity();
+    for (const auto& point : global_heading_points_) {
+        best_distance = std::min(
+            best_distance,
+            std::hypot(x - static_cast<double>(point.x),
+                       y - static_cast<double>(point.y)));
+    }
+    return best_distance;
+}
+
+double AmclNode::raceline_heading_error_to_pose(
+    double x, double y, double theta) const {
+    if (global_heading_points_.empty()) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    const ParticleFilter::TrackHeadingPoint* nearest = nullptr;
+    double best_d2 = std::numeric_limits<double>::infinity();
+    for (const auto& point : global_heading_points_) {
+        const double dx = x - static_cast<double>(point.x);
+        const double dy = y - static_cast<double>(point.y);
+        const double d2 = dx * dx + dy * dy;
+        if (d2 < best_d2) {
+            best_d2 = d2;
+            nearest = &point;
+        }
+    }
+    return nearest == nullptr ? std::numeric_limits<double>::infinity() :
+        std::abs(math_utils::angle_diff(theta, static_cast<double>(nearest->yaw)));
+}
+
+void AmclNode::map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
+    try {
+    static size_t map_msg_count = 0;
+    ++map_msg_count;
+
+    if (map_msg_count == 1) {
+        RCLCPP_INFO(get_logger(),
+                    "Received first map (%dx%d @ %.3f m/cell) — initialising PF",
+                    msg->info.width, msg->info.height, msg->info.resolution);
+    } else {
+        RCLCPP_WARN(get_logger(),
+                    "Received map update #%zu (%dx%d @ %.3f m/cell) — reinitialising PF",
+                    map_msg_count, msg->info.width, msg->info.height,
+                    msg->info.resolution);
+    }
+
+    std::lock_guard<std::mutex> lock(pf_mutex_);
+
+    map_.load_from_msg(*msg);
+
+    ParticleFilter::Config pf_cfg;
+    pf_cfg.num_particles     = get_parameter("num_particles").as_int();
+    pf_cfg.min_particles     = get_parameter("min_particles").as_int();
+    pf_cfg.max_particles     = get_parameter("max_particles").as_int();
+    pf_cfg.start_with_max_particles = force_max_particles_initial_sec_ > 0.0;
+    pf_cfg.resample_threshold = get_parameter("resample_threshold").as_double();
+    pf_cfg.use_kld           = get_parameter("use_kld_sampling").as_bool();
+    pf_cfg.kld_epsilon       = get_parameter("kld_epsilon").as_double();
+    pf_cfg.kld_z             = get_parameter("kld_z").as_double();
+    pf_cfg.kld_bin_x         = get_parameter("kld_bin_x").as_double();
+    pf_cfg.kld_bin_y         = get_parameter("kld_bin_y").as_double();
+    pf_cfg.kld_bin_theta     = get_parameter("kld_bin_theta").as_double();
+    pf_cfg.kld_min_bin_weight = get_parameter("kld_min_bin_weight").as_double();
+    pf_cfg.enable_recovery_injection = get_parameter("enable_recovery_injection").as_bool();
+    pf_cfg.recovery_injection_ratio = get_parameter("recovery_injection_ratio").as_double();
+    pf_cfg.enable_local_roughening = get_parameter("enable_local_roughening").as_bool();
+    pf_cfg.local_roughening_ratio = get_parameter("local_roughening_ratio").as_double();
+    pf_cfg.local_roughening_xy_std_m = get_parameter("local_roughening_xy_std_m").as_double();
+    pf_cfg.local_roughening_yaw_std_rad = get_parameter("local_roughening_yaw_std_rad").as_double();
+    pf_cfg.local_roughening_bad_log_weight_per_beam =
+        get_parameter("local_roughening_bad_log_weight_per_beam").as_double();
+    pf_cfg.local_roughening_max_cloud_std_m =
+        get_parameter("local_roughening_max_cloud_std_m").as_double();
+    pf_cfg.use_cluster_estimate = get_parameter("use_cluster_estimate").as_bool();
+    pf_cfg.cluster_xy_bin_m = get_parameter("cluster_xy_bin_m").as_double();
+    pf_cfg.cluster_radius_m = get_parameter("cluster_radius_m").as_double();
+    pf_cfg.cluster_iterations = get_parameter("cluster_iterations").as_int();
+    pf_cfg.cluster_min_covariance = get_parameter("cluster_min_covariance").as_double();
+    pf_cfg.cluster_publish_min_weight =
+        get_parameter("cluster_publish_min_weight").as_double();
+    pf_cfg.enable_raycast_verification =
+        get_parameter("enable_raycast_verification").as_bool();
+    pf_cfg.raycast_verification_global_only =
+        get_parameter("raycast_verification_global_only").as_bool();
+    pf_cfg.raycast_verification_max_clusters =
+        get_parameter("raycast_verification_max_clusters").as_int();
+    pf_cfg.raycast_verification_particles_per_cluster =
+        get_parameter("raycast_verification_particles_per_cluster").as_int();
+    pf_cfg.raycast_verification_top_particles =
+        get_parameter("raycast_verification_top_particles").as_int();
+    pf_cfg.raycast_verification_max_beams =
+        get_parameter("raycast_verification_max_beams").as_int();
+    pf_cfg.raycast_verification_cluster_radius_m =
+        get_parameter("raycast_verification_cluster_radius_m").as_double();
+    pf_cfg.raycast_verification_yaw_tolerance_rad =
+        get_parameter("raycast_verification_yaw_tolerance_rad").as_double();
+    pf_cfg.raycast_verification_beta =
+        get_parameter("raycast_verification_beta").as_double();
+    pf_cfg.raycast_verification_min_factor =
+        get_parameter("raycast_verification_min_factor").as_double();
+    pf_cfg.raycast_verification_step_m =
+        get_parameter("raycast_verification_step_m").as_double();
+    pf_cfg.enable_startup_scan_refinement =
+        get_parameter("enable_startup_scan_refinement").as_bool();
+    pf_cfg.startup_scan_refinement_max_beams =
+        get_parameter("startup_scan_refinement_max_beams").as_int();
+    pf_cfg.startup_scan_refinement_iterations =
+        get_parameter("startup_scan_refinement_iterations").as_int();
+    pf_cfg.startup_scan_refinement_max_match_distance_m =
+        get_parameter("startup_scan_refinement_max_match_distance_m").as_double();
+    pf_cfg.startup_scan_refinement_max_translation_m =
+        get_parameter("startup_scan_refinement_max_translation_m").as_double();
+    pf_cfg.startup_scan_refinement_max_yaw_rad =
+        get_parameter("startup_scan_refinement_max_yaw_rad").as_double();
+    pf_cfg.startup_scan_refinement_max_step_translation_m =
+        get_parameter("startup_scan_refinement_max_step_translation_m").as_double();
+    pf_cfg.startup_scan_refinement_max_step_yaw_rad =
+        get_parameter("startup_scan_refinement_max_step_yaw_rad").as_double();
+    pf_cfg.global_initialization = get_parameter("global_initialization").as_bool();
+    pf_cfg.global_heading_cone_rad = get_parameter("global_heading_cone_rad").as_double();
+    pf_cfg.global_track_margin_m = get_parameter("global_track_margin_m").as_double();
+    pf_cfg.global_max_lateral_offset_m = get_parameter("global_max_lateral_offset_m").as_double();
+    pf_cfg.init_x            = get_parameter("initial_pose_x").as_double();
+    pf_cfg.init_y            = get_parameter("initial_pose_y").as_double();
+    pf_cfg.init_a            = get_parameter("initial_pose_a").as_double();
+    pf_cfg.init_cov_xx       = get_parameter("initial_cov_xx").as_double();
+    pf_cfg.init_cov_yy       = get_parameter("initial_cov_yy").as_double();
+    pf_cfg.init_cov_aa       = get_parameter("initial_cov_aa").as_double();
+
+    std::vector<ParticleFilter::TrackHeadingPoint> heading_points;
+    if (pf_cfg.global_initialization ||
+        pf_cfg.enable_recovery_injection ||
+        initial_heading_from_raceline_ ||
+        initial_pose_from_raceline_) {
+        heading_points = load_global_heading_points();
+    }
+    global_heading_points_ = heading_points;
+    if (pf_cfg.global_initialization || pf_cfg.enable_recovery_injection) {
+        pf_cfg.global_heading_points = heading_points;
+    }
+    if (!pf_cfg.global_initialization &&
+        initial_pose_from_raceline_ &&
+        !heading_points.empty()) {
+        const auto& start = heading_points.front();
+        pf_cfg.init_x = start.x;
+        pf_cfg.init_y = start.y;
+        pf_cfg.init_a = start.yaw;
+        RCLCPP_INFO(
+            get_logger(),
+            "Initial local pose loaded from raceline start: x=%.2f y=%.2f yaw=%.3f rad",
+            pf_cfg.init_x, pf_cfg.init_y, pf_cfg.init_a);
+    }
+    if (!pf_cfg.global_initialization && initial_heading_from_raceline_) {
+        const double fallback_yaw = pf_cfg.init_a;
+        pf_cfg.init_a = raceline_heading_near_pose(
+            pf_cfg.init_x, pf_cfg.init_y, fallback_yaw, heading_points);
+        if (heading_points.empty()) {
+            RCLCPP_WARN(get_logger(),
+                        "Initial raceline heading requested but no heading points loaded; using fallback yaw %.3f rad",
+                        pf_cfg.init_a);
+        } else {
+            RCLCPP_INFO(get_logger(),
+                        "Initial local pose uses raceline heading: x=%.2f y=%.2f yaw=%.3f rad",
+                        pf_cfg.init_x, pf_cfg.init_y, pf_cfg.init_a);
+        }
+    }
+    if (!pf_cfg.global_initialization && std::isfinite(initial_pose_heading_offset_rad_)) {
+        pf_cfg.init_a = math_utils::normalize_angle(
+            pf_cfg.init_a + initial_pose_heading_offset_rad_);
+        RCLCPP_INFO(
+            get_logger(),
+            "Applied local AMCL startup heading offset: %.3f rad -> yaw %.3f rad",
+            initial_pose_heading_offset_rad_, pf_cfg.init_a);
+    }
+
+    MotionModel::Config mm_cfg;
+    mm_cfg.alpha1 = get_parameter("alpha1").as_double();
+    mm_cfg.alpha2 = get_parameter("alpha2").as_double();
+    mm_cfg.alpha3 = get_parameter("alpha3").as_double();
+    mm_cfg.alpha4 = get_parameter("alpha4").as_double();
+
+    SensorModel::Config sm_cfg;
+    sm_cfg.max_beams       = get_parameter("max_beams").as_int();
+    sm_cfg.z_hit           = get_parameter("z_hit").as_double();
+    sm_cfg.z_rand          = get_parameter("z_rand").as_double();
+    sm_cfg.sigma_hit       = get_parameter("sigma_hit").as_double();
+    sm_cfg.laser_min_range = get_parameter("laser_min_range").as_double();
+    sm_cfg.laser_max_range = get_parameter("laser_max_range").as_double();
+    max_beams_ = sm_cfg.max_beams;
+    laser_min_range_m_ = sm_cfg.laser_min_range;
+    laser_max_range_m_ = sm_cfg.laser_max_range;
+    sm_cfg.laser_offset_x  = get_parameter("laser_offset_x").as_double();
+    sm_cfg.laser_offset_y  = get_parameter("laser_offset_y").as_double();
+    sm_cfg.normalize_likelihood_by_beams =
+        get_parameter("normalize_likelihood_by_beams").as_bool();
+    sm_cfg.likelihood_scale = get_parameter("likelihood_scale").as_double();
+
+    pf_.init(pf_cfg, mm_cfg, sm_cfg, map_);
+    const bool explicit_start_anchor =
+        global_start_anchor_enabled_ &&
+        std::isfinite(global_start_anchor_x_m_) &&
+        std::isfinite(global_start_anchor_y_m_) &&
+        std::isfinite(global_start_anchor_yaw_rad_);
+    if (pf_cfg.global_initialization && explicit_start_anchor) {
+        // Seed global initialization from the saved map-start prior with local
+        // tracking covariance. Half-metre covariance spreads probability into
+        // closed-track aliases. Scan, stability and travel gates still control
+        // handoff; the prior is measured map data, not runtime simulator truth.
+        const double anchor_xy_covariance =
+            local_tracking_cloud_covariance_xy_;
+        const double anchor_yaw_covariance =
+            local_tracking_cloud_covariance_yaw_;
+        pf_.reinitialize(
+            global_start_anchor_x_m_, global_start_anchor_y_m_,
+            global_start_anchor_yaw_rad_,
+            anchor_xy_covariance, anchor_xy_covariance,
+            anchor_yaw_covariance);
+        RCLCPP_INFO(
+            get_logger(),
+            "Global AMCL startup prior centred at saved map start "
+            "(%.3f, %.3f, %.3f) with covariance (%.3f, %.3f, %.3f).",
+            global_start_anchor_x_m_, global_start_anchor_y_m_,
+            global_start_anchor_yaw_rad_, anchor_xy_covariance,
+            anchor_xy_covariance, anchor_yaw_covariance);
+    } else if (!pf_cfg.global_initialization) {
+        // The competition launch knows the deterministic simulator start.
+        // Keep the broad covariance for deliberate global-recovery tests, but
+        // do not seed a known-start local run with half-metre particles: the
+        // scan cluster then looks ambiguous even before the car moves.
+        pf_.reinitialize(
+            pf_cfg.init_x,
+            pf_cfg.init_y,
+            pf_cfg.init_a,
+            local_tracking_cloud_covariance_xy_,
+            local_tracking_cloud_covariance_xy_,
+            local_tracking_cloud_covariance_yaw_);
+    }
+    pf_.set_force_max_particles(force_max_particles_initial_sec_ > 0.0);
+
+    prediction_baseline_ready_ = false;
+    global_pose_published_ = false;
+    global_localization_locked_ = false;
+    last_processed_scan_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+    {
+        std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
+        map_odom_valid_ = false;
+        last_map_correction_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        last_current_map_pose_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        current_map_pose_covariance_.setIdentity();
+    }
+    consecutive_rejected_scans_ = 0;
+    last_scan_correction_accepted_ = false;
+    have_recovery_candidate_ = false;
+    recovery_candidate_scans_ = 0;
+    recovery_candidate_pose_ = PoseEstimate{};
+    last_scan_correction_distance_m_ = std::numeric_limits<double>::quiet_NaN();
+    last_scan_correction_yaw_rad_ = std::numeric_limits<double>::quiet_NaN();
+    last_scan_correction_x_m_ = std::numeric_limits<double>::quiet_NaN();
+    last_scan_correction_y_m_ = std::numeric_limits<double>::quiet_NaN();
+    last_scan_applied_xy_correction_m_ = 0.0;
+    last_scan_applied_yaw_correction_rad_ = 0.0;
+    last_scan_applied_x_m_ = 0.0;
+    last_scan_applied_y_m_ = 0.0;
+    local_odom_reference_ready_ = false;
+    initial_scan_update_pending_ = true;
+    localization_start_time_set_ = false;
+    startup_scan_refinement_attempted_ = false;
+    global_lock_candidate_scans_ = 0;
+    global_lock_candidate_pose_ = PoseEstimate{};
+    global_start_odom_ready_ = false;
+    global_start_odom_x_ = 0.0;
+    global_start_odom_y_ = 0.0;
+    global_start_odom_theta_ = 0.0;
+    accumulated_odom_travel_m_ = 0.0;
+    reset_pose_jump_gate();
+    RCLCPP_INFO(get_logger(), "Particle filter initialised with %d particles (%s)",
+                pf_cfg.num_particles,
+                pf_cfg.global_initialization ? "global" : "local");
+
+    std_msgs::msg::Int32 particle_count_msg;
+    particle_count_msg.data = pf_.num_particles();
+    particle_count_pub_->publish(particle_count_msg);
+    last_cloud_publish_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+    publish_particle_cloud(now());
+
+    // A global cloud's weighted mean is meaningless until scan updates
+    // concentrate the particles.
+    if (!pf_cfg.global_initialization) {
+        auto init_est = pf_.get_estimate();
+        init_est.covariance.setZero();
+        init_est.covariance(0, 0) = local_tracking_cloud_covariance_xy_;
+        init_est.covariance(1, 1) = local_tracking_cloud_covariance_xy_;
+        init_est.covariance(2, 2) = local_tracking_cloud_covariance_yaw_;
+
+        // Local race-start initialization is already a valid map lock. Anchor
+        // the local cloud to the odom sample used at startup so subsequent
+        // scan updates are checked against a fixed map-to-odom reference.
+        if (odom_received_) {
+            local_odom_reference_x_ = prev_x_;
+            local_odom_reference_y_ = prev_y_;
+            local_odom_reference_theta_ = prev_theta_;
+            local_pose_reference_ = init_est;
+            local_odom_reference_ready_ = true;
+            global_localization_locked_ = true;
+            RCLCPP_INFO(
+                get_logger(),
+                "Local AMCL lock anchored at (%.3f, %.3f, %.3f) with odom reference "
+                "(%.3f, %.3f, %.3f).",
+                init_est.x, init_est.y, init_est.theta,
+                prev_x_, prev_y_, prev_theta_);
+        }
+        publish_pose(init_est, now());
+        global_pose_published_ = true;
+        RCLCPP_INFO(get_logger(), "Published initial pose: (%.2f, %.2f, %.2f)",
+                    init_est.x, init_est.y, init_est.theta);
+    } else {
+        RCLCPP_INFO(get_logger(),
+                    "Global particle initialization active; waiting for scans before publishing pose");
+    }
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(get_logger(), "AMCL map callback failed: %s", e.what());
+    } catch (...) {
+        RCLCPP_ERROR(get_logger(), "AMCL map callback failed with unknown exception");
+    }
+}
+
+void AmclNode::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+    double x     = msg->pose.pose.position.x;
+    double y     = msg->pose.pose.position.y;
+    double theta = math_utils::quaternion_to_yaw(msg->pose.pose.orientation);
+
+    // Store absolute odom for delta computation in scan callback.
+    std::lock_guard<std::mutex> lock(pf_mutex_);
+
+    const bool first_odom = !odom_received_;
+    const bool odom_reset =
+        !first_odom &&
+        ((odom_reset_distance_m_ > 0.0 &&
+          std::hypot(x - prev_x_, y - prev_y_) > odom_reset_distance_m_) ||
+         (odom_reset_yaw_rad_ > 0.0 &&
+          std::abs(math_utils::angle_diff(theta, prev_theta_)) > odom_reset_yaw_rad_));
+
+    if (odom_reset) {
+        RCLCPP_WARN(
+            get_logger(),
+            "Detected odometry reset/jump (from %.2f, %.2f, %.2f to %.2f, %.2f, %.2f); "
+            "restarting global AMCL initialization.",
+            prev_x_, prev_y_, prev_theta_, x, y, theta);
+
+        odom_history_.clear();
+        prediction_baseline_ready_ = false;
+        global_pose_published_ = false;
+        global_localization_locked_ = false;
+        local_odom_reference_ready_ = false;
+        initial_scan_update_pending_ = true;
+        localization_start_time_set_ = false;
+        startup_scan_refinement_attempted_ = false;
+        global_lock_candidate_scans_ = 0;
+        global_lock_candidate_pose_ = PoseEstimate{};
+        global_start_odom_ready_ = false;
+        global_start_odom_x_ = 0.0;
+        global_start_odom_y_ = 0.0;
+        global_start_odom_theta_ = 0.0;
+        accumulated_odom_travel_m_ = 0.0;
+        last_scan_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        last_processed_scan_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        last_distinct_scan_.reset();
+        reset_pose_jump_gate();
+        {
+            std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
+            map_odom_valid_ = false;
+            last_map_correction_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        }
+        // A simulator reset starts a new localization epoch.  Do not carry
+        // the previous run's propagated covariance or timestamp into the new
+        // map pose: when the first post-reset scan is conservatively rejected,
+        // that stale covariance would grow until controllers stop even though
+        // the known-start pose has already been restored.
+        {
+            std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
+            last_current_map_pose_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+            current_map_pose_covariance_.setZero();
+        }
+        const bool known_start = !pf_.config().global_initialization;
+        {
+            std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
+            current_map_pose_covariance_(0, 0) = known_start ?
+                local_tracking_cloud_covariance_xy_ :
+                get_parameter("initial_cov_xx").as_double();
+            current_map_pose_covariance_(1, 1) = known_start ?
+                local_tracking_cloud_covariance_xy_ :
+                get_parameter("initial_cov_yy").as_double();
+            current_map_pose_covariance_(2, 2) = known_start ?
+                local_tracking_cloud_covariance_yaw_ :
+                get_parameter("initial_cov_aa").as_double();
+        }
+        consecutive_rejected_scans_ = 0;
+        last_scan_correction_accepted_ = false;
+        have_recovery_candidate_ = false;
+        recovery_candidate_scans_ = 0;
+        recovery_candidate_pose_ = PoseEstimate{};
+        last_scan_correction_distance_m_ = std::numeric_limits<double>::quiet_NaN();
+        last_scan_correction_yaw_rad_ = std::numeric_limits<double>::quiet_NaN();
+        last_scan_correction_x_m_ = std::numeric_limits<double>::quiet_NaN();
+        last_scan_correction_y_m_ = std::numeric_limits<double>::quiet_NaN();
+        last_scan_applied_xy_correction_m_ = 0.0;
+        last_scan_applied_yaw_correction_rad_ = 0.0;
+        last_scan_applied_x_m_ = 0.0;
+        last_scan_applied_y_m_ = 0.0;
+
+        if (map_.is_loaded()) {
+            if (pf_.config().global_initialization) {
+                pf_.reinitialize_global(map_);
+                const bool explicit_start_anchor =
+                    global_start_anchor_enabled_ &&
+                    std::isfinite(global_start_anchor_x_m_) &&
+                    std::isfinite(global_start_anchor_y_m_) &&
+                    std::isfinite(global_start_anchor_yaw_rad_);
+                if (explicit_start_anchor) {
+                    pf_.reinitialize(
+                        global_start_anchor_x_m_, global_start_anchor_y_m_,
+                        global_start_anchor_yaw_rad_,
+                        get_parameter("initial_cov_xx").as_double(),
+                        get_parameter("initial_cov_yy").as_double(),
+                        get_parameter("initial_cov_aa").as_double());
+                }
+                pf_.set_force_max_particles(force_max_particles_initial_sec_ > 0.0);
+            } else {
+                // A known-start reset uses the same local prior as map startup
+                // to disambiguate corridor aliases.
+                double reset_x = get_parameter("initial_pose_x").as_double();
+                double reset_y = get_parameter("initial_pose_y").as_double();
+                double reset_a = get_parameter("initial_pose_a").as_double();
+                if (initial_pose_from_raceline_ && !global_heading_points_.empty()) {
+                    const auto & start = global_heading_points_.front();
+                    reset_x = start.x;
+                    reset_y = start.y;
+                    reset_a = math_utils::normalize_angle(
+                        start.yaw + initial_pose_heading_offset_rad_);
+                } else if (initial_heading_from_raceline_) {
+                    reset_a = raceline_heading_near_pose(
+                        reset_x, reset_y, reset_a, global_heading_points_);
+                    reset_a = math_utils::normalize_angle(
+                        reset_a + initial_pose_heading_offset_rad_);
+                }
+                pf_.reinitialize(
+                    reset_x, reset_y, reset_a,
+                    local_tracking_cloud_covariance_xy_,
+                    local_tracking_cloud_covariance_xy_,
+                    local_tracking_cloud_covariance_yaw_);
+                RCLCPP_INFO(
+                    get_logger(),
+                    "Odometry reset: restored local AMCL prior at (%.3f, %.3f, %.3f).",
+                    reset_x, reset_y, reset_a);
+            }
+        }
+    }
+
+    if (!first_odom && !odom_reset) {
+        accumulated_odom_travel_m_ += std::hypot(x - prev_x_, y - prev_y_);
+    }
+    odom_received_ = true;
+
+    prev_x_     = x;
+    prev_y_     = y;
+    prev_theta_ = theta;
+
+    const auto clock_type = get_clock()->get_clock_type();
+    const rclcpp::Time odom_stamp(msg->header.stamp, clock_type);
+    push_odom_sample(odom_stamp, x, y, theta, *msg);
+
+    // Publish the last accepted map->odom correction from the newest odom
+    // sample before entering pf_mutex_. A slow or stale LiDAR callback must
+    // not block the controller-facing pose stream.
+    publish_current_map_pose(odom_stamp, x, y, theta, *msg);
+
+    if (first_odom) {
+        RCLCPP_INFO(get_logger(),
+                    "Received first odometry sample at (%.2f, %.2f, %.2f).",
+                    x, y, theta);
+    }
+}
+
+void AmclNode::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
+    auto t_callback_start = std::chrono::high_resolution_clock::now();
+    static std::atomic<uint64_t> scan_callback_count{0};
+    const uint64_t callback_count = ++scan_callback_count;
+
+    RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "Received LiDAR callback #%llu (%zu ranges).",
+        static_cast<unsigned long long>(callback_count), msg->ranges.size());
+
+    // Queue a scan rather than dropping it when the particle filter is still
+    // working on an earlier callback. Hardware-dependent callback delay is
+    // not a sensor-validity gate.
+    if (processing_scan_.exchange(true)) {
+        std::lock_guard<std::mutex> pending_lock(pending_scan_mutex_);
+        pending_scans_.push_back(msg);
+        return;
+    }
+
+    try {
+    // ── Guard 2: Skip if not ready ──
+    if (!map_.is_loaded() || !odom_received_) {
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "Waiting for AMCL inputs: map=%s odom=%s.",
+            map_.is_loaded() ? "ready" : "missing",
+            odom_received_ ? "ready" : "missing");
+        processing_scan_ = false;
+        return;
+    }
+
+    // Keep measured scan age for diagnostics only. Timing age never discards
+    // a structurally valid scan.
+    const auto clock_type = get_clock()->get_clock_type();
+    const rclcpp::Time packet_time(msg->header.stamp, clock_type);
+    std::int64_t acquisition_ns = 0;
+    if (!scan_validity::acquisition_stamp_ns(
+            packet_time.nanoseconds(), scan_acquisition_delay_ns_, acquisition_ns)) {
+        ++pending_scan_drop_count_;
+        processing_scan_ = false;
+        return;
+    }
+    const rclcpp::Time scan_time(acquisition_ns, clock_type);
+    auto age = (now() - scan_time).seconds();
+
+    std::lock_guard<std::mutex> lock(pf_mutex_);
+
+    double odom_x_at_scan = 0.0;
+    double odom_y_at_scan = 0.0;
+    double odom_theta_at_scan = 0.0;
+    if (last_processed_scan_stamp_.nanoseconds() != 0 &&
+        scan_time <= last_processed_scan_stamp_) {
+        // A deferred scan must never apply a negative odometry increment or
+        // reuse an already consumed measurement after a newer scan completed.
+        ++scan_processing_drop_count_;
+        processing_scan_ = false;
+        return;
+    }
+    rclcpp::Time matched_odom_stamp(0, 0, clock_type);
+    rclcpp::Time bracket_before_stamp(0, 0, clock_type);
+    rclcpp::Time bracket_after_stamp(0, 0, clock_type);
+    Eigen::Matrix3d odom_covariance_at_scan = Eigen::Matrix3d::Zero();
+    if (!interpolate_odom_pose(
+            scan_time, odom_x_at_scan, odom_y_at_scan, odom_theta_at_scan,
+            &matched_odom_stamp, &bracket_before_stamp, &bracket_after_stamp,
+            &odom_covariance_at_scan)) {
+        const bool waiting_for_future_odom =
+            !odom_history_.empty() && scan_time > odom_history_.back().stamp;
+        if (waiting_for_future_odom) {
+            std::lock_guard<std::mutex> pending_lock(pending_scan_mutex_);
+            pending_scans_.push_back(msg);
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Queued LiDAR scan until source-time odometry arrives (queued=%zu).",
+                pending_scans_.size());
+        } else {
+            pending_scan_drop_count_.fetch_add(1);
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Dropping LiDAR scan with no bracketed source-time odometry (drops=%zu).",
+                pending_scan_drop_count_.load());
+        }
+        processing_scan_ = false;
+        return;
+    }
+
+    if (scan_time > last_processed_scan_stamp_)
+        last_processed_scan_stamp_ = scan_time;
+
+    const auto scan_range_counts = scan_validity::count_sampled_valid_ranges(
+        msg->ranges, max_beams_, laser_min_range_m_, laser_max_range_m_);
+    if (scan_range_counts.valid == 0) {
+        // With no usable returns, the sensor model assigns every particle the
+        // same weight. Running clustering/resampling after that prediction can
+        // look like a successful map correction even though this scan carried
+        // no map evidence. Preserve the particle state and odometry baseline;
+        // the next valid scan will propagate the full accumulated odom delta.
+        last_scan_correction_accepted_ = false;
+        ++consecutive_rejected_scans_;
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "LiDAR scan has no usable sampled returns (%zu/%zu); "
+            "not refreshing AMCL map-correction health.",
+            scan_range_counts.valid, scan_range_counts.sampled);
+        publish_scan_alignment_diagnostic(
+            scan_time, matched_odom_stamp, bracket_before_stamp,
+            bracket_after_stamp, 0.0, false,
+            scan_range_counts.valid, scan_range_counts.sampled);
+        processing_scan_ = false;
+        return;
+    }
+
+    if (global_localization_locked_ && last_distinct_scan_ &&
+        scan_validity::same_observation(*msg, *last_distinct_scan_)) {
+        // Unity republishes CurrentRangeArray until its next LaserScan().
+        // Racing captures contain occasional identical arrays at fresh ROS
+        // stamps while moving. Do not move/reweight the PF using that stale
+        // scene at a new pose, or refresh correction health from it. Keep the
+        // odometry baseline so the next distinct scan consumes all motion.
+        // Global bootstrap deliberately retains its repeated-evidence search.
+        ++scan_processing_drop_count_;
+        publish_scan_alignment_diagnostic(scan_time, matched_odom_stamp,
+            bracket_before_stamp, bracket_after_stamp, 0.0, false,
+            scan_range_counts.valid, scan_range_counts.sampled);
+        processing_scan_ = false;
+        return;
+    }
+    last_distinct_scan_ = msg;
+
+    // ── Baseline initialization ──
+    // For the first scan after startup/reinit, just seed the odom baseline
+    if (!prediction_baseline_ready_) {
+        pred_last_x_ = odom_x_at_scan;
+        pred_last_y_ = odom_y_at_scan;
+        pred_last_theta_ = odom_theta_at_scan;
+        prediction_baseline_ready_ = true;
+        if (!global_start_odom_ready_) {
+            global_start_odom_x_ = odom_x_at_scan;
+            global_start_odom_y_ = odom_y_at_scan;
+            global_start_odom_theta_ = odom_theta_at_scan;
+            global_start_odom_ready_ = true;
+        }
+    }
+
+    // Global initialization is a startup mode only. Once a scan-supported,
+    // raceline-consistent pose has been accepted, the particle cloud is
+    // explicitly collapsed around that pose and AMCL continues locally. This
+    // prevents a later symmetric track hypothesis from pulling the controller
+    // to a different location on the circuit.
+    const bool global_sensor_bootstrap =
+        pf_.config().global_initialization && !global_localization_locked_;
+
+    // The map can arrive before the first odometry sample.  Complete the
+    // local race-start lock at the first scan in that case, before prediction
+    // or scan weighting can move the particle cloud.
+    if (!global_sensor_bootstrap &&
+        !global_localization_locked_ &&
+        !local_odom_reference_ready_) {
+        const auto init_est = pf_.get_estimate();
+        local_odom_reference_x_ = odom_x_at_scan;
+        local_odom_reference_y_ = odom_y_at_scan;
+        local_odom_reference_theta_ = odom_theta_at_scan;
+        local_pose_reference_ = init_est;
+        local_odom_reference_ready_ = true;
+        global_localization_locked_ = true;
+        RCLCPP_INFO(
+            get_logger(),
+            "Local AMCL lock anchored on first scan at (%.3f, %.3f, %.3f) with odom "
+            "reference (%.3f, %.3f, %.3f).",
+            init_est.x, init_est.y, init_est.theta,
+            odom_x_at_scan, odom_y_at_scan, odom_theta_at_scan);
+    }
+
+    // ── Compute odom delta (odom frame) ──
+    double dx_odom = odom_x_at_scan - pred_last_x_;
+    double dy_odom = odom_y_at_scan - pred_last_y_;
+    double dtheta  = math_utils::angle_diff(odom_theta_at_scan, pred_last_theta_);
+
+    // ── Guard 4: Skip update if robot hasn't moved enough ──
+    double dist_moved = std::sqrt(dx_odom * dx_odom + dy_odom * dy_odom);
+    const bool moved_enough =
+        dist_moved >= update_min_d_ || std::abs(dtheta) >= update_min_a_;
+    RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "AMCL odom delta: at_scan=(%.3f, %.3f, %.3f) baseline=(%.3f, %.3f, %.3f) "
+        "delta=(%.3f, %.3f, %.3f) moved=%s scan_age=%.3fs",
+        odom_x_at_scan, odom_y_at_scan, odom_theta_at_scan,
+        pred_last_x_, pred_last_y_, pred_last_theta_,
+        dx_odom, dy_odom, dtheta, moved_enough ? "true" : "false", age);
+    const bool pose_jump_confirmation_pending = have_pending_jump_pose_;
+    if (!global_sensor_bootstrap &&
+        !moved_enough &&
+        !initial_scan_update_pending_ &&
+        !pose_jump_confirmation_pending) {
+        // A stationary vehicle still needs repeated pose messages so
+        // downstream controllers can complete their startup confirmation
+        // window.  Republish the last accepted estimate without running a new
+        // particle update or inventing motion.
+        if (global_pose_published_ && have_last_published_pose_) {
+            publish_pose(last_published_pose_, scan_time);
+        }
+        processing_scan_ = false;
+        return;
+    }
+
+    // ── Transform odom-frame delta to robot-frame ──
+    // Robot's last heading determines the rotation
+    double c = std::cos(pred_last_theta_);
+    double s = std::sin(pred_last_theta_);
+    float dx_robot = static_cast<float>( dx_odom * c + dy_odom * s);
+    float dy_robot = static_cast<float>(-dx_odom * s + dy_odom * c);
+
+    pred_last_x_     = odom_x_at_scan;
+    pred_last_y_     = odom_y_at_scan;
+    pred_last_theta_ = odom_theta_at_scan;
+
+    if (force_max_particles_initial_sec_ > 0.0 &&
+        moved_enough &&
+        !localization_start_time_set_) {
+        localization_start_time_ = scan_time;
+        localization_start_time_set_ = true;
+    }
+    bool force_max_particles = false;
+    if (force_max_particles_initial_sec_ > 0.0) {
+        if (!localization_start_time_set_) {
+            // Keep max particles armed while waiting for the first real movement.
+            force_max_particles = true;
+        } else {
+            const double localization_elapsed =
+                (scan_time - localization_start_time_).seconds();
+            force_max_particles =
+                localization_elapsed >= 0.0 &&
+                localization_elapsed < force_max_particles_initial_sec_;
+        }
+    }
+    pf_.set_force_max_particles(force_max_particles);
+
+    // ── Timing start ──
+    auto t_pf_start = std::chrono::high_resolution_clock::now();
+
+    RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "Starting AMCL scan update #%llu (sampled from %zu ranges).",
+        static_cast<unsigned long long>(callback_count), msg->ranges.size());
+
+    // STEP 1: PREDICT — Propagate particles by odom delta + noise
+    pf_.reset_stage_timing();
+
+    // Slip-aware noise scaling: increase noise during aggressive turns
+    double dt = 0.0;
+    if (last_scan_time_.nanoseconds() != 0) {
+        dt = (scan_time - last_scan_time_).seconds();
+    }
+    double scan_angular_velocity = 0.0;
+    if (dt > 0.001 && dt < 1.0) {
+        scan_angular_velocity = std::abs(dtheta) / dt;
+        if (scan_angular_velocity > slip_angular_threshold_) {
+            pf_.motion_model().set_noise_multiplier(slip_noise_multiplier_);
+        } else {
+            pf_.motion_model().reset_noise_multiplier();
+        }
+    }
+    last_scan_time_ = scan_time;
+
+    pf_.predict(dx_robot, dy_robot, static_cast<float>(dtheta)); 
+
+    // STEP 2: UPDATE — Weight particles by scan, debug, then resample
+    bool weights_updated = pf_.update_weights(
+        msg->ranges.data(),
+        static_cast<int>(msg->ranges.size()),
+        msg->angle_min,
+        msg->angle_increment);
+    if (!weights_updated) {
+        processing_scan_ = false;
+        return;
+    }
+    initial_scan_update_pending_ = false;
+
+    RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "AMCL scan update #%llu completed; evaluating pose confidence.",
+        static_cast<unsigned long long>(callback_count));
+    if (global_sensor_bootstrap &&
+        !startup_scan_refinement_attempted_ &&
+        pf_.config().enable_startup_scan_refinement) {
+        ParticleFilter::StartupScanRefinementDiagnostics refinement_diag;
+        const bool refined = pf_.refine_startup_with_scan(
+            msg->ranges.data(),
+            static_cast<int>(msg->ranges.size()),
+            msg->angle_min,
+            msg->angle_increment,
+            &refinement_diag);
+        startup_scan_refinement_attempted_ = true;
+
+        if (refined) {
+            RCLCPP_INFO(
+                get_logger(),
+                "Startup GPU scan refinement done: refined_particles=%d/%d, beams=%d, best_mean_dist=%.3f m, time=%.2f ms",
+                refinement_diag.accepted,
+                pf_.num_particles(),
+                refinement_diag.beams,
+                refinement_diag.best_mean_distance_m,
+                refinement_diag.elapsed_ms);
+            weights_updated = pf_.update_weights(
+                msg->ranges.data(),
+                static_cast<int>(msg->ranges.size()),
+                msg->angle_min,
+                msg->angle_increment);
+            if (!weights_updated) {
+                processing_scan_ = false;
+                return;
+            }
+        } else {
+            RCLCPP_WARN(
+                get_logger(),
+                "Startup GPU scan refinement finished with no accepted particles (time=%.2f ms)",
+                refinement_diag.elapsed_ms);
+        }
+    }
+    if (pf_.config().enable_raycast_verification &&
+        (!pf_.config().raycast_verification_global_only || global_sensor_bootstrap)) {
+        pf_.apply_raycast_verification(
+            msg->ranges.data(),
+            static_cast<int>(msg->ranges.size()),
+            msg->angle_min,
+            msg->angle_increment);
+    }
+    publish_pre_resample_weighted_cloud(scan_time);
+
+    // During local tracking, first predict the map pose causally from the
+    // accepted AMCL pose and this scan's odometry delta.  The prediction is
+    // also used to associate the GPU scan cluster, so a repeated corridor
+    // cannot select a visually similar section elsewhere on the circuit.
+    const bool local_tracking = global_localization_locked_;
+    bool local_scan_correction_rejected = false;
+    bool local_tracking_update = false;
+    const auto causal_odom_covariance = [&]() {
+        std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
+        // A rejected scan does not invalidate the causal odometry estimate.
+        // Odom callbacks already propagate covariance using the configured
+        // process model; preserve that estimate and expose scan outages via
+        // the localization health counter.
+        Eigen::Matrix3d covariance = current_map_pose_covariance_;
+        if (!map_odom_valid_ || !covariance.allFinite()) {
+            covariance.setZero();
+            covariance(0, 0) = 0.04;
+            covariance(1, 1) = 0.04;
+            covariance(2, 2) = 0.02;
+        }
+        if (odom_covariance_at_scan.allFinite()) {
+            covariance(0, 0) = std::max(
+                covariance(0, 0), odom_covariance_at_scan(0, 0));
+            covariance(1, 1) = std::max(
+                covariance(1, 1), odom_covariance_at_scan(1, 1));
+            covariance(2, 2) = std::max(
+                covariance(2, 2), odom_covariance_at_scan(2, 2));
+        }
+        return covariance;
+    };
+    PoseEstimate odom_prediction;
+    if (!global_sensor_bootstrap && local_tracking && local_odom_reference_ready_) {
+        const double dx_from_lock = odom_x_at_scan - local_odom_reference_x_;
+        const double dy_from_lock = odom_y_at_scan - local_odom_reference_y_;
+        const double dtheta_from_lock = math_utils::angle_diff(
+            odom_theta_at_scan, local_odom_reference_theta_);
+        const double c_odom = std::cos(local_odom_reference_theta_);
+        const double s_odom = std::sin(local_odom_reference_theta_);
+        const double dx_from_lock_robot =
+            dx_from_lock * c_odom + dy_from_lock * s_odom;
+        const double dy_from_lock_robot =
+            -dx_from_lock * s_odom + dy_from_lock * c_odom;
+        const double c_map = std::cos(local_pose_reference_.theta);
+        const double s_map = std::sin(local_pose_reference_.theta);
+        odom_prediction = local_pose_reference_;
+        odom_prediction.x += c_map * dx_from_lock_robot -
+                             s_map * dy_from_lock_robot;
+        odom_prediction.y += s_map * dx_from_lock_robot +
+                             c_map * dy_from_lock_robot;
+        odom_prediction.theta = math_utils::normalize_angle(
+            local_pose_reference_.theta + dtheta_from_lock);
+
+    }
+
+    // Estimate from the strongest local mode before resampling. A global
+    // weighted mean is invalid while particles are split across plausible
+    // poses. In local mode, associate the cluster with the causal prediction.
+    double cluster_weight = 1.0;
+    double second_cluster_weight = 0.0;
+    auto t_cluster_start = std::chrono::high_resolution_clock::now();
+    auto est = local_tracking && local_odom_reference_ready_ ?
+        pf_.get_cluster_estimate_near(
+            odom_prediction, local_cluster_association_max_distance_m_,
+            &cluster_weight, &second_cluster_weight) :
+        pf_.get_cluster_estimate(&cluster_weight, &second_cluster_weight);
+    auto t_cluster_end = std::chrono::high_resolution_clock::now();
+    auto t_pose_estimate_ready = std::chrono::high_resolution_clock::now();
+    const double cluster_estimate_ms =
+        std::chrono::duration<double, std::milli>(
+            t_cluster_end - t_cluster_start).count();
+
+    const double min_cluster_weight =
+        std::clamp(pf_.config().cluster_publish_min_weight, 0.0, 1.0);
+    bool local_cluster_valid =
+        !pf_.config().use_cluster_estimate ||
+        cluster_weight >= local_cluster_min_weight_;
+    bool publish_cluster =
+        local_tracking ? local_cluster_valid :
+        (!pf_.config().use_cluster_estimate || cluster_weight >= min_cluster_weight);
+
+    bool local_tracking_recovery_confirmed = false;
+    if (recovery_injection_configured_ &&
+        local_tracking && local_odom_reference_ready_ &&
+        !local_cluster_valid &&
+        consecutive_rejected_scans_ + 1 >=
+            static_cast<uint64_t>(local_tracking_recovery_after_rejected_scans_)) {
+        // The normal local query deliberately rejects clusters outside the
+        // causal odometry neighbourhood. Once that query has failed
+        // repeatedly, search the recovery particles globally. They are
+        // sampled from the map/raceline envelope, never from simulator truth.
+        double recovery_cluster_weight = 0.0;
+        double recovery_second_cluster_weight = 0.0;
+        const auto recovery_est = pf_.get_cluster_estimate(
+            &recovery_cluster_weight, &recovery_second_cluster_weight);
+        const bool recovery_quality =
+            std::isfinite(recovery_est.x) && std::isfinite(recovery_est.y) &&
+            std::isfinite(recovery_est.theta) &&
+            recovery_cluster_weight >= local_tracking_recovery_min_cluster_weight_;
+        if (recovery_quality) {
+            const bool stable = have_recovery_candidate_ &&
+                std::hypot(
+                    recovery_est.x - recovery_candidate_pose_.x,
+                    recovery_est.y - recovery_candidate_pose_.y) <=
+                    local_tracking_recovery_stability_distance_m_ &&
+                std::abs(math_utils::angle_diff(
+                    recovery_est.theta, recovery_candidate_pose_.theta)) <=
+                    local_tracking_recovery_stability_yaw_rad_;
+            if (stable) {
+                ++recovery_candidate_scans_;
+            } else {
+                recovery_candidate_scans_ = 1;
+            }
+            recovery_candidate_pose_ = recovery_est;
+            have_recovery_candidate_ = true;
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 1000,
+                "AMCL recovery candidate: pose=(%.3f, %.3f, %.3f) "
+                "weight=%.3f stable_scans=%d/%d odom_prediction=(%.3f, %.3f).",
+                recovery_est.x, recovery_est.y, recovery_est.theta,
+                recovery_cluster_weight, recovery_candidate_scans_,
+                local_tracking_recovery_confirm_scans_,
+                odom_prediction.x, odom_prediction.y);
+            if (recovery_candidate_scans_ >=
+                local_tracking_recovery_confirm_scans_) {
+                est = recovery_est;
+                cluster_weight = recovery_cluster_weight;
+                second_cluster_weight = recovery_second_cluster_weight;
+                local_cluster_valid = true;
+                publish_cluster = true;
+                local_tracking_recovery_confirmed = true;
+                have_recovery_candidate_ = false;
+                recovery_candidate_scans_ = 0;
+                RCLCPP_WARN(
+                    get_logger(),
+                    "AMCL accepted confirmed lost-track recovery after %d scans.",
+                    local_tracking_recovery_confirm_scans_);
+            }
+        } else {
+            have_recovery_candidate_ = false;
+            recovery_candidate_scans_ = 0;
+        }
+    } else if (!local_tracking || local_cluster_valid) {
+        have_recovery_candidate_ = false;
+        recovery_candidate_scans_ = 0;
+    }
+
+    if (local_tracking && local_odom_reference_ready_) {
+        if (!local_cluster_valid) {
+            // Keep publishing a continuous pose when no particle cluster is
+            // associated with the causal prediction. This is odometry-based
+            // continuity, not a new sensor or simulator-state input.
+            est = odom_prediction;
+            est.covariance = causal_odom_covariance();
+            local_scan_correction_rejected = true;
+            publish_cluster = true;
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 1000,
+                "No local AMCL cluster near odometry prediction; using causal odometry pose.");
+        } else {
+            const double correction_distance = std::hypot(
+                est.x - odom_prediction.x, est.y - odom_prediction.y);
+            const double correction_yaw = std::abs(math_utils::angle_diff(
+                est.theta, odom_prediction.theta));
+            last_scan_correction_distance_m_ = correction_distance;
+            last_scan_correction_yaw_rad_ = correction_yaw;
+            last_scan_correction_x_m_ = est.x - odom_prediction.x;
+            last_scan_correction_y_m_ = est.y - odom_prediction.y;
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 1000,
+                "AMCL local correction: odom_prediction=(%.3f, %.3f, %.3f) "
+                "scan=(%.3f, %.3f, %.3f) correction=%.3f m/%.3f rad "
+                "cluster_weight=%.3f publish=%s",
+                odom_prediction.x, odom_prediction.y, odom_prediction.theta,
+                est.x, est.y, est.theta, correction_distance, correction_yaw,
+                cluster_weight, publish_cluster ? "true" : "false");
+
+            const bool post_startup_phase =
+                local_large_correction_phase_distance_m_ > 0.0 &&
+                accumulated_odom_travel_m_ >=
+                    local_large_correction_phase_distance_m_;
+            const double correction_distance_limit = post_startup_phase
+                ? local_post_phase_correction_max_distance_m_
+                : local_scan_correction_max_distance_m_;
+            const double correction_yaw_limit = post_startup_phase
+                ? local_post_phase_correction_max_yaw_rad_
+                : local_scan_correction_max_yaw_rad_;
+            // The phase limit is a limit on the correction delivered to the
+            // controller, not on the unattenuated particle-cluster
+            // innovation.  The latter can be slightly larger than the
+            // allowed step while xy/along-track gains reduce the actual pose
+            // update well below it. Apply the association and raceline gates
+            // below, then clamp only the applied local correction.
+            if (!local_scan_correction_rejected) {
+                // A confirmed global recovery is already a full map-frame
+                // pose. Do not attenuate it back toward the failed odometry
+                // prediction; the locked-pose gate below still requires
+                // multiple consistent scans for a large jump.
+                const double xy_gain = local_tracking_recovery_confirmed ?
+                    1.0 : local_scan_correction_xy_gain_;
+                double correction_x = est.x - odom_prediction.x;
+                double correction_y = est.y - odom_prediction.y;
+                if (!global_heading_points_.empty()) {
+                    // Corridor scans constrain the normal more reliably than the tangent.
+                    // Keep the normal innovation and attenuate the tangent to avoid
+                    // hairpin aliases while still correcting odometry scale drift.
+                    const double track_heading = raceline_heading_near_pose(
+                        odom_prediction.x, odom_prediction.y,
+                        odom_prediction.theta, global_heading_points_);
+                    const double tangent_x = std::cos(track_heading);
+                    const double tangent_y = std::sin(track_heading);
+                    const double normal_x = -std::sin(track_heading);
+                    const double normal_y = std::cos(track_heading);
+                    const double normal_error =
+                        correction_x * normal_x + correction_y * normal_y;
+                    const double along_error =
+                        correction_x * tangent_x + correction_y * tangent_y;
+                    // Select by source-time motion, not raceline location.
+                    // The independently configured fast gain may be smaller:
+                    // a valid cluster is not proof of tangent observability.
+                    const double scan_speed_mps = dt > 0.001 && dt < 1.0 ?
+                        dist_moved / dt : 0.0;
+                    const double along_gain =
+                        scan_validity::along_track_correction_gain(
+                            local_scan_correction_cross_track_only_, scan_speed_mps,
+                            local_scan_correction_fast_speed_threshold_mps_,
+                            local_scan_correction_along_track_gain_,
+                            local_scan_correction_fast_along_track_gain_);
+                    correction_x = normal_x * normal_error +
+                        tangent_x * along_gain * along_error;
+                    correction_y = normal_y * normal_error +
+                        tangent_y * along_gain * along_error;
+                }
+                est.x = odom_prediction.x + xy_gain * correction_x;
+                est.y = odom_prediction.y + xy_gain * correction_y;
+                const double yaw_gain = local_tracking_recovery_confirmed ?
+                    1.0 : local_scan_correction_yaw_gain_;
+                est.theta = math_utils::normalize_angle(
+                    odom_prediction.theta + yaw_gain * math_utils::angle_diff(
+                        est.theta, odom_prediction.theta));
+
+                if (!local_tracking_recovery_confirmed) {
+                    if (correction_yaw_limit > 0.0) {
+                        const double applied_yaw = math_utils::angle_diff(
+                            est.theta, odom_prediction.theta);
+                        if (std::abs(applied_yaw) > correction_yaw_limit) {
+                            est.theta = math_utils::normalize_angle(
+                                odom_prediction.theta +
+                                std::copysign(correction_yaw_limit, applied_yaw));
+                        }
+                    }
+                }
+
+                if (!local_tracking_recovery_confirmed &&
+                    correction_distance_limit > 0.0) {
+                    const double applied_x = est.x - odom_prediction.x;
+                    const double applied_y = est.y - odom_prediction.y;
+                    const double applied_distance =
+                        std::hypot(applied_x, applied_y);
+                    if (applied_distance > correction_distance_limit) {
+                        const double scale = correction_distance_limit /
+                            applied_distance;
+                        est.x = odom_prediction.x + scale * applied_x;
+                        est.y = odom_prediction.y + scale * applied_y;
+                        RCLCPP_INFO_THROTTLE(
+                            get_logger(), *get_clock(), 1000,
+                            "Bounded local AMCL scan correction after %.2f m "
+                            "travel (%.3f -> %.3f m); retaining scan update.",
+                            accumulated_odom_travel_m_, applied_distance,
+                            correction_distance_limit);
+                    }
+                }
+
+                last_scan_applied_xy_correction_m_ = std::hypot(
+                    est.x - odom_prediction.x, est.y - odom_prediction.y);
+                last_scan_applied_x_m_ = est.x - odom_prediction.x;
+                last_scan_applied_y_m_ = est.y - odom_prediction.y;
+                last_scan_applied_yaw_correction_rad_ = std::abs(
+                    math_utils::angle_diff(est.theta, odom_prediction.theta));
+            } else {
+                last_scan_applied_xy_correction_m_ = 0.0;
+                last_scan_applied_yaw_correction_rad_ = 0.0;
+                last_scan_applied_x_m_ = 0.0;
+                last_scan_applied_y_m_ = 0.0;
+            }
+        }
+        local_tracking_update = true;
+    }
+
+    // A local likelihood-field cluster can be close to the causal odometry
+    // prediction and still belong to a visually similar wall section. Once
+    // AMCL is locked, reject that map-frame alias before it reaches the
+    // controller if it leaves the known raceline envelope. This is a map /
+    // scan-consistency gate, not a timing or source-timestamp gate; a rejected
+    // scan falls back to the causal odometry pose above.
+    if (local_tracking && local_tracking_update &&
+        !local_scan_correction_rejected && !global_heading_points_.empty()) {
+        const double local_raceline_distance = raceline_distance_to_pose(
+            est.x, est.y);
+        const double local_raceline_heading_error =
+            raceline_heading_error_to_pose(est.x, est.y, est.theta);
+        const bool local_pose_on_raceline =
+            (local_tracking_max_raceline_distance_m_ <= 0.0 ||
+             local_raceline_distance <= local_tracking_max_raceline_distance_m_) &&
+            (local_tracking_max_raceline_heading_error_rad_ <= 0.0 ||
+             local_raceline_heading_error <=
+                 local_tracking_max_raceline_heading_error_rad_);
+        if (!local_pose_on_raceline) {
+            local_scan_correction_rejected = true;
+            est = odom_prediction;
+            est.covariance = causal_odom_covariance();
+            last_scan_applied_xy_correction_m_ = 0.0;
+            last_scan_applied_yaw_correction_rad_ = 0.0;
+            last_scan_applied_x_m_ = 0.0;
+            last_scan_applied_y_m_ = 0.0;
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 1000,
+                "Rejected local AMCL raceline alias: distance=%.3f/%.3f m "
+                "heading_error=%.3f/%.3f rad; using causal odometry pose.",
+                local_raceline_distance,
+                local_tracking_max_raceline_distance_m_,
+                local_raceline_heading_error,
+                local_tracking_max_raceline_heading_error_rad_);
+        }
+    }
+
+    // A scan correction is genuine map support only when the local cluster
+    // was associated with the causal odometry prediction and passed the
+    // innovation gate. Keep rejected/fallback updates visible in covariance
+    // instead of publishing the same healthy-looking fixed uncertainty.
+    if (local_tracking_update && local_scan_correction_rejected) {
+        ++consecutive_rejected_scans_;
+        last_scan_correction_accepted_ = false;
+    } else if (global_sensor_bootstrap) {
+        last_scan_correction_accepted_ = false;
+    } else {
+        consecutive_rejected_scans_ = 0;
+        last_scan_correction_accepted_ = true;
+        last_map_correction_stamp_ = scan_time;
+    }
+
+    // Recovery particles are injected only after the local association has
+    // been rejected repeatedly. This keeps the normal locked cloud local and
+    // makes the global search an explicit lost-track path.
+    pf_.set_recovery_injection_enabled(
+        recovery_injection_configured_ && local_tracking &&
+        consecutive_rejected_scans_ >= static_cast<uint64_t>(
+            local_tracking_recovery_after_rejected_scans_));
+
+    const double pose_covariance_xy = std::max(
+        est.covariance(0, 0), est.covariance(1, 1));
+    const double pose_covariance_yaw = est.covariance(2, 2);
+    const bool global_pose_confident =
+        std::isfinite(pose_covariance_xy) &&
+        std::isfinite(pose_covariance_yaw) &&
+        pose_covariance_xy >= 0.0 &&
+        pose_covariance_yaw >= 0.0 &&
+        pose_covariance_xy <= global_pose_covariance_xy_max_ &&
+        pose_covariance_yaw <= global_pose_covariance_yaw_max_;
+
+    /* A circuit can contain visually identical corridors. At race startup,
+     * the known start waypoint is a map prior: a low-covariance alias elsewhere
+     * on the raceline is not sufficient to unlock the controller. */
+    const bool explicit_start_anchor =
+        std::isfinite(global_start_anchor_x_m_) &&
+        std::isfinite(global_start_anchor_y_m_) &&
+        std::isfinite(global_start_anchor_yaw_rad_);
+    const bool global_odom_heading_available =
+        global_sensor_bootstrap &&
+        global_lock_use_odom_heading_ &&
+        global_start_odom_ready_ &&
+        explicit_start_anchor;
+    const double global_odom_heading = global_odom_heading_available ?
+        math_utils::normalize_angle(
+            global_start_anchor_yaw_rad_ + math_utils::angle_diff(
+                odom_theta_at_scan, global_start_odom_theta_)) :
+        est.theta;
+    const bool global_anchor_position_available =
+        global_sensor_bootstrap && global_lock_use_anchor_position_ &&
+        global_start_odom_ready_ && explicit_start_anchor;
+    PoseEstimate global_anchor_pose = est;
+    if (global_anchor_position_available) {
+        const double dx_from_start = odom_x_at_scan - global_start_odom_x_;
+        const double dy_from_start = odom_y_at_scan - global_start_odom_y_;
+        const double c_odom_start = std::cos(global_start_odom_theta_);
+        const double s_odom_start = std::sin(global_start_odom_theta_);
+        const double dx_robot =
+            dx_from_start * c_odom_start + dy_from_start * s_odom_start;
+        const double dy_robot =
+            -dx_from_start * s_odom_start + dy_from_start * c_odom_start;
+        const double c_anchor = std::cos(global_start_anchor_yaw_rad_);
+        const double s_anchor = std::sin(global_start_anchor_yaw_rad_);
+        global_anchor_pose.x = global_start_anchor_x_m_ +
+            c_anchor * dx_robot - s_anchor * dy_robot;
+        global_anchor_pose.y = global_start_anchor_y_m_ +
+            s_anchor * dx_robot + c_anchor * dy_robot;
+        global_anchor_pose.theta = global_odom_heading;
+    }
+    const double raceline_distance = raceline_distance_to_pose(est.x, est.y);
+    const double raceline_heading_error = raceline_heading_error_to_pose(
+        est.x, est.y, est.theta);
+    // In anchor-position startup mode, the scan cluster is used to confirm
+    // the map/start hypothesis, but the pose that is published is the saved
+    // start anchor propagated by causal odometry. Apply the raceline gate to
+    // that published pose, not to the raw cluster's known translation bias.
+    const double global_gate_x = global_anchor_position_available ?
+        global_anchor_pose.x : est.x;
+    const double global_gate_y = global_anchor_position_available ?
+        global_anchor_pose.y : est.y;
+    const double global_gate_yaw = global_anchor_position_available ?
+        global_anchor_pose.theta : est.theta;
+    const double global_gate_raceline_distance =
+        raceline_distance_to_pose(global_gate_x, global_gate_y);
+    const double global_gate_raceline_heading_error =
+        raceline_heading_error_to_pose(
+            global_gate_x, global_gate_y, global_gate_yaw);
+    const bool global_pose_on_track =
+        !global_sensor_bootstrap ||
+        ((global_pose_max_track_distance_m_ <= 0.0 ||
+          global_gate_raceline_distance <= global_pose_max_track_distance_m_) &&
+         (global_pose_max_track_heading_error_rad_ <= 0.0 ||
+          global_gate_raceline_heading_error <=
+              global_pose_max_track_heading_error_rad_));
+    double start_distance = std::numeric_limits<double>::infinity();
+    double start_heading_error = std::numeric_limits<double>::infinity();
+    if (explicit_start_anchor) {
+        start_distance = std::hypot(
+            est.x - global_start_anchor_x_m_,
+            est.y - global_start_anchor_y_m_);
+        start_heading_error = std::abs(math_utils::angle_diff(
+            est.theta, global_start_anchor_yaw_rad_));
+    } else if (!global_heading_points_.empty()) {
+        const auto & start = global_heading_points_.front();
+        start_distance = std::hypot(
+            est.x - static_cast<double>(start.x),
+            est.y - static_cast<double>(start.y));
+    }
+    const double global_start_travel = global_start_odom_ready_ ?
+        std::hypot(
+            odom_x_at_scan - global_start_odom_x_,
+            odom_y_at_scan - global_start_odom_y_) : 0.0;
+    const bool global_travel_enough =
+        !global_sensor_bootstrap ||
+        global_lock_min_travel_m_ <= 0.0 ||
+        global_start_travel >= global_lock_min_travel_m_;
+
+    // Release the start-anchor gate after slow-ramp travel so a stable
+    // estimate elsewhere on the circuit can establish global lock.
+    const bool global_pose_near_start =
+        !global_sensor_bootstrap ||
+        global_travel_enough ||
+        !global_start_anchor_enabled_ ||
+        global_start_anchor_radius_m_ <= 0.0 ||
+        start_distance <= global_start_anchor_radius_m_ ||
+        global_anchor_position_available;
+    const bool global_heading_near_start =
+        !global_sensor_bootstrap ||
+        global_travel_enough ||
+        !global_start_anchor_enabled_ ||
+        !explicit_start_anchor ||
+        global_start_anchor_heading_tolerance_rad_ <= 0.0 ||
+        start_heading_error <= global_start_anchor_heading_tolerance_rad_;
+
+    // Closed-track aliases can have low covariance. Require a strong, stable
+    // cluster over several startup scans; after lock, use causal odometry
+    // association and local innovation gates.
+    const bool global_scan_quality =
+        global_sensor_bootstrap &&
+        publish_cluster &&
+        cluster_weight >= global_lock_min_cluster_weight_ &&
+        global_pose_confident && global_pose_on_track && global_pose_near_start &&
+        global_heading_near_start;
+    const bool global_candidate_quality =
+        global_scan_quality && global_travel_enough;
+    if (global_sensor_bootstrap) {
+        if (!global_scan_quality) {
+            global_lock_candidate_scans_ = 0;
+        } else if (global_lock_candidate_scans_ == 0) {
+            global_lock_candidate_pose_ = est;
+            global_lock_candidate_scans_ = 1;
+        } else {
+            const double candidate_distance = std::hypot(
+                est.x - global_lock_candidate_pose_.x,
+                est.y - global_lock_candidate_pose_.y);
+            const double candidate_yaw = std::abs(math_utils::angle_diff(
+                est.theta, global_lock_candidate_pose_.theta));
+            if (candidate_distance <= global_lock_stability_distance_m_ &&
+                candidate_yaw <= global_lock_stability_yaw_rad_) {
+                global_lock_candidate_pose_ = est;
+                ++global_lock_candidate_scans_;
+            } else {
+                global_lock_candidate_pose_ = est;
+                global_lock_candidate_scans_ = 1;
+            }
+        }
+    }
+    const bool global_lock_confirmed =
+        !global_sensor_bootstrap ||
+        (global_candidate_quality &&
+         global_lock_candidate_scans_ >= global_lock_confirm_scans_);
+    // A global scan estimate must be made available to the slow ramp before
+    // the travel gate can be satisfied. Otherwise the controller waits for
+    // /current_map_pose while AMCL waits for the car to move: a deadlock.
+    // Requiring the same spatially stable scan streak as the lock gate keeps a
+    // single ambiguous stationary corridor from becoming the startup pose.
+    const bool global_provisional_pose_allowed =
+        global_scan_quality &&
+        global_lock_candidate_scans_ >= global_lock_confirm_scans_;
+
+    // The corridor likelihood-field match has a repeatable heading bias,
+    // while source-time odometry yaw is calibrated and agrees with truth.
+    // Keep LiDAR responsible for global x/y localization, but derive the
+    // startup heading from the saved map-start heading plus the odometry
+    // delta. Otherwise the scan bias is frozen into map->odom and becomes a
+    // growing lateral position error as the car travels.
+    // The saved map-start pose is a measured map prior, not simulator truth.
+    // When enabled, use it only to remove the fixed startup translation bias
+    // observed in the first global scan match, then propagate the short slow
+    // ramp with the timestamped odometry delta.  The scan cluster still has
+    // to pass all global quality/track gates before this pose is published;
+    // after global lock, normal local scan corrections remain active.
+    // Stationary scans on a closed track are often ambiguous. Resampling
+    // them immediately can collapse the global cloud onto a wrong but
+    // visually plausible corridor before motion provides disambiguation.
+    // Keep the weighted hypotheses until the configured startup travel has
+    // been reached; the first moving scan can then separate alternatives.
+    const bool hold_global_cloud =
+        global_sensor_bootstrap && !global_travel_enough;
+    const bool pose_candidate_allowed =
+        publish_cluster &&
+        (!global_sensor_bootstrap ||
+         global_lock_confirmed ||
+         global_provisional_pose_allowed);
+    // Gate once, before deciding whether this cloud has any future consumer.
+    // should_publish_pose_estimate updates jump-confirmation history.
+    const bool pose_gate_passed =
+        pose_candidate_allowed &&
+        (!local_tracking_update || should_publish_pose_estimate(est));
+    const bool replace_local_cloud = pose_gate_passed &&
+        !global_sensor_bootstrap && local_tracking_update &&
+        local_tracking_reinitialize_cloud_ && !local_scan_correction_rejected;
+    // An accepted local scan below replaces every particle and weight with
+    // a fresh cloud at the fused pose. KLD counting, resampling, roughening
+    // and recovery injection immediately before that overwrite are dead work.
+    // Rejected scans/global hypotheses still retain their normal PF update.
+    if (!hold_global_cloud && !replace_local_cloud) {
+        pf_.resample_if_needed();
+    }
+
+    if (pf_.config().use_kld) {
+        const auto& diag = pf_.kld_diagnostics();
+        if (diag.sequence != 0 && diag.sequence != last_published_kld_diag_seq_) {
+            std_msgs::msg::Float64MultiArray diag_msg;
+            diag_msg.data = {
+                static_cast<double>(diag.pre_resample_particles),
+                static_cast<double>(diag.occupied_bins),
+                diag.target_unclamped,
+                static_cast<double>(diag.target_clamped),
+                diag.epsilon,
+                diag.z,
+                diag.bin_x,
+                diag.bin_y,
+                diag.bin_theta,
+                static_cast<double>(diag.sequence),
+                diag.min_bin_weight,
+            };
+            kld_diag_pub_->publish(diag_msg);
+            last_published_kld_diag_seq_ = diag.sequence;
+        }
+    }
+
+    // ── Timing end — publish if subscribed ──
+    auto t_pf_end = std::chrono::high_resolution_clock::now();
+    if (timing_pub_->get_subscription_count() > 0) {
+        double pf_ms = std::chrono::duration<double, std::milli>(
+                           t_pf_end - t_pf_start).count();
+        std_msgs::msg::Float64 timing_msg;
+        timing_msg.data = pf_ms;
+        timing_pub_->publish(timing_msg);
+    }
+
+    bool pose_published = false;
+    double callback_to_pose_publish_ms =
+        std::numeric_limits<double>::quiet_NaN();
+    // Local estimates have already been gated against the odometry-predicted
+    // pose above. Comparing them with the previous scan-time pose would gate
+    // normal vehicle motion rather than a localization innovation.
+    if (!pose_gate_passed && local_tracking_recovery_confirmed) {
+        // The confirmed recovery still has to pass the large-jump guard. Keep
+        // it visible as an outage while the guard accumulates its evidence.
+        ++consecutive_rejected_scans_;
+        last_scan_correction_accepted_ = false;
+    }
+    if (pose_gate_passed) {
+        if (global_anchor_position_available) {
+            est.x = global_anchor_pose.x;
+            est.y = global_anchor_pose.y;
+        }
+        if (global_odom_heading_available) {
+            est.theta = global_odom_heading;
+        }
+        // Publish only when the best local mode is dominant enough. During
+        // global localization, ambiguous clusters should stay visible in RViz
+        // but not pull the controller to a wrong symmetric pose.
+        if (global_sensor_bootstrap && global_lock_confirmed) {
+            // Keep the accepted global mode, but hand subsequent updates to a
+            // compact local cloud. The odometry prediction baseline is kept
+            // unchanged, so no artificial motion is introduced.
+            pf_.reinitialize(
+                est.x, est.y, est.theta,
+                local_tracking_cloud_covariance_xy_,
+                local_tracking_cloud_covariance_xy_,
+                local_tracking_cloud_covariance_yaw_);
+            global_localization_locked_ = true;
+            local_odom_reference_x_ = odom_x_at_scan;
+            local_odom_reference_y_ = odom_y_at_scan;
+            local_odom_reference_theta_ = odom_theta_at_scan;
+            local_pose_reference_ = est;
+            local_odom_reference_ready_ = true;
+            RCLCPP_INFO(
+                get_logger(),
+                "Global AMCL lock accepted at (%.3f, %.3f, %.3f); continuing with local tracking.",
+                est.x, est.y, est.theta);
+        } else if (global_sensor_bootstrap) {
+            // Publish a provisional map pose so the controller can perform
+            // the deliberately slow localization ramp. Do not collapse the
+            // global cloud or mark the run locally locked until the vehicle
+            // has travelled and the startup gate is satisfied.
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Publishing provisional global AMCL pose for localization ramp; "
+                "travel=%.3f/%.3f m stable_scans=%d/%d.",
+                global_start_travel, global_lock_min_travel_m_,
+                global_lock_candidate_scans_, global_lock_confirm_scans_);
+        } else {
+            if (local_scan_correction_rejected) {
+                pf_.reinitialize(
+                    est.x, est.y, est.theta,
+                    local_tracking_cloud_covariance_xy_,
+                    local_tracking_cloud_covariance_xy_,
+                    local_tracking_cloud_covariance_yaw_);
+            }
+            local_odom_reference_x_ = odom_x_at_scan;
+            local_odom_reference_y_ = odom_y_at_scan;
+            local_odom_reference_theta_ = odom_theta_at_scan;
+            local_pose_reference_ = est;
+            local_odom_reference_ready_ = true;
+        }
+        if (replace_local_cloud) {
+            // The particle cloud is a scan-matching aid, not a second dead-
+            // reckoning state. Recenter it on the fused pose so a small
+            // systematic scan bias cannot be integrated again on the next
+            // native scan update.
+            pf_.reinitialize(
+                est.x, est.y, est.theta,
+                local_tracking_cloud_covariance_xy_,
+                local_tracking_cloud_covariance_xy_,
+                local_tracking_cloud_covariance_yaw_);
+        }
+        publish_pose(est, scan_time);
+        pose_published = true;
+        const auto t_pose_published = std::chrono::high_resolution_clock::now();
+        callback_to_pose_publish_ms =
+            std::chrono::duration<double, std::milli>(
+                t_pose_published - t_callback_start).count();
+        if (global_sensor_bootstrap) {
+            global_pose_published_ = true;
+        }
+    } else if (global_sensor_bootstrap) {
+        RCLCPP_INFO_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "Global AMCL refining: cluster_weight=%.3f, covariance xy=%.3f (max %.3f), yaw=%.3f (max %.3f).",
+            cluster_weight,
+            pose_covariance_xy,
+            global_pose_covariance_xy_max_,
+            pose_covariance_yaw,
+            global_pose_covariance_yaw_max_);
+        RCLCPP_INFO_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "Global AMCL lock evidence: quality=%s stable_scans=%d/%d "
+            "travel=%.3f/%.3f m (min_weight=%.3f).",
+            global_candidate_quality ? "true" : "false",
+            global_lock_candidate_scans_, global_lock_confirm_scans_,
+            global_start_travel, global_lock_min_travel_m_,
+            global_lock_min_cluster_weight_);
+        if (global_pose_confident && !global_pose_near_start &&
+            global_start_anchor_enabled_ && global_start_anchor_radius_m_ > 0.0) {
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Global AMCL candidate rejected: start-anchor distance %.3f m > %.3f m.",
+                start_distance, global_start_anchor_radius_m_);
+        } else if (global_pose_confident && !global_heading_near_start &&
+                   global_start_anchor_enabled_ && explicit_start_anchor) {
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Global AMCL candidate rejected: start-anchor heading error %.3f rad > %.3f rad.",
+                start_heading_error, global_start_anchor_heading_tolerance_rad_);
+        } else if (global_pose_confident && !global_pose_on_track &&
+            global_pose_max_track_distance_m_ > 0.0 &&
+            global_gate_raceline_distance > global_pose_max_track_distance_m_) {
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Global AMCL candidate rejected at (%.3f, %.3f, %.3f): "
+                "scan distance %.3f m, published-pose distance %.3f m "
+                "> %.3f m.",
+                est.x,
+                est.y,
+                est.theta,
+                raceline_distance,
+                global_gate_raceline_distance,
+                global_pose_max_track_distance_m_);
+        } else if (global_pose_confident && !global_pose_on_track) {
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Global AMCL candidate rejected: scan heading error %.3f rad, "
+                "published-pose heading error %.3f rad > %.3f rad.",
+                raceline_heading_error,
+                global_gate_raceline_heading_error,
+                global_pose_max_track_heading_error_rad_);
+        }
+    }
+
+    if (gpu_timing_pub_->get_subscription_count() > 0) {
+        const auto& transfer = pf_.transfer_diagnostics();
+        const auto& stages = pf_.stage_timing_diagnostics();
+        const double total_transfer_ms =
+            (std::isfinite(transfer.scan_upload_ms) ? transfer.scan_upload_ms : 0.0) +
+            (std::isfinite(transfer.particle_download_ms) ? transfer.particle_download_ms : 0.0) +
+            (std::isfinite(transfer.weight_download_ms) ? transfer.weight_download_ms : 0.0);
+        std_msgs::msg::Float64MultiArray timing_msg;
+        timing_msg.data = {
+            transfer.scan_upload_ms,
+            transfer.particle_download_ms,
+            transfer.weight_download_ms,
+            total_transfer_ms,
+            static_cast<double>(transfer.scan_upload_bytes),
+            static_cast<double>(transfer.particle_download_bytes),
+            static_cast<double>(transfer.weight_download_bytes),
+            static_cast<double>(transfer.active_particles),
+            static_cast<double>(transfer.sequence),
+            std::chrono::duration<double, std::milli>(
+                t_pose_estimate_ready - t_pf_start).count(),
+            stages.predict_ms,
+            stages.sensor_model_ms,
+            stages.normalize_ms,
+            stages.scan_confidence_ms,
+            stages.update_weights_total_ms,
+            cluster_estimate_ms,
+            stages.resample_ms,
+            stages.kld_target_ms,
+            std::chrono::duration<double, std::milli>(
+                t_pf_end - t_pf_start).count(),
+            callback_to_pose_publish_ms,
+            pose_published ? 1.0 : 0.0,
+            cluster_weight,
+            stages.raycast_setup_ms,
+            stages.raycast_score_ms,
+            stages.raycast_correction_ms,
+            second_cluster_weight,
+        };
+        gpu_timing_pub_->publish(timing_msg);
+    }
+
+    std_msgs::msg::Int32 particle_count_msg;
+    particle_count_msg.data = pf_.num_particles();
+    particle_count_pub_->publish(particle_count_msg);
+
+    if (publish_cluster) {
+        std::lock_guard<std::mutex> lk(estimate_mutex_);
+        cached_estimate_ = est;
+    }
+    publish_particle_cloud(scan_time);
+
+    publish_scan_alignment_diagnostic(
+        scan_time,
+        matched_odom_stamp,
+        bracket_before_stamp,
+        bracket_after_stamp,
+        0.0,
+        pose_published && last_scan_correction_accepted_,
+        scan_range_counts.valid,
+        scan_range_counts.sampled);
+
+    processing_scan_ = false;
+    } catch (const std::exception& e) {
+        processing_scan_ = false;
+        RCLCPP_ERROR(get_logger(), "AMCL scan callback failed: %s", e.what());
+    } catch (...) {
+        processing_scan_ = false;
+        RCLCPP_ERROR(get_logger(), "AMCL scan callback failed with unknown exception");
+    }
+}
+
+void AmclNode::publish_pose(const PoseEstimate& est, const rclcpp::Time& stamp) {
+    auto pose_msg = geometry_msgs::msg::PoseWithCovarianceStamped();
+    
+    pose_msg.header.stamp    = stamp;
+    pose_msg.header.frame_id = global_frame_;
+    
+    pose_msg.pose.pose.position.x = est.x;
+    pose_msg.pose.pose.position.y = est.y;
+    pose_msg.pose.pose.position.z = 0.0;
+
+    pose_msg.pose.pose.orientation = math_utils::yaw_to_quaternion(est.theta);
+
+    // 6×6 covariance: fill from 3×3
+    // ROS uses indices: x=0, y=1, z=2, roll=3, pitch=4, yaw=5
+    auto& cov = pose_msg.pose.covariance;
+    std::fill(cov.begin(), cov.end(), 0.0);
+
+    // Map 3×3 → 6×6:
+    // [0]  = xx,  [1]  = xy,  [5]  = x-yaw
+    // [6]  = yx,  [7]  = yy,  [11] = y-yaw
+    // [30] = yaw-x, [31] = yaw-y, [35] = yaw-yaw
+    cov[0]  = est.covariance(0, 0);  // xx
+    cov[1]  = est.covariance(0, 1);  // xy
+    cov[5]  = est.covariance(0, 2);  // x-yaw
+    cov[6]  = est.covariance(1, 0);  // yx
+    cov[7]  = est.covariance(1, 1);  // yy
+    cov[11] = est.covariance(1, 2);  // y-yaw
+    cov[30] = est.covariance(2, 0);  // yaw-x
+    cov[31] = est.covariance(2, 1);  // yaw-y
+    cov[35] = est.covariance(2, 2);  // yaw-yaw
+
+    pose_pub_->publish(pose_msg);
+
+    // Keep AMCL independent from the local EKF. The local odometry remains
+    // odom->base_link; AMCL supplies only the global map->odom correction.
+    // The odom history is already timestamped for scan alignment, so use the
+    // same interpolation rule here instead of pairing unrelated callbacks.
+    double odom_x = prev_x_;
+    double odom_y = prev_y_;
+    double odom_theta = prev_theta_;
+    if (odom_received_) {
+        (void)interpolate_odom_pose(stamp, odom_x, odom_y, odom_theta);
+    }
+    const Eigen::Vector3d map_pose(est.x, est.y, est.theta);
+    const Eigen::Vector3d odom_pose(odom_x, odom_y, odom_theta);
+    const Eigen::Vector3d map_odom = math_utils::se2_compose(
+        map_pose, math_utils::se2_inverse(odom_pose));
+    {
+        std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
+        map_odom_pose_ = map_odom;
+        map_odom_valid_ = true;
+        current_map_pose_covariance_ = est.covariance;
+    }
+
+    if (publish_tf_ && tf_broadcaster_) {
+        geometry_msgs::msg::TransformStamped map_odom_tf;
+        map_odom_tf.header.stamp = stamp;
+        map_odom_tf.header.frame_id = global_frame_;
+        map_odom_tf.child_frame_id = odom_frame_;
+        map_odom_tf.transform.translation.x = map_odom[0];
+        map_odom_tf.transform.translation.y = map_odom[1];
+        map_odom_tf.transform.rotation = math_utils::yaw_to_quaternion(map_odom[2]);
+        tf_broadcaster_->sendTransform(map_odom_tf);
+    }
+
+    last_published_pose_ = est;
+    have_last_published_pose_ = true;
+}
+
+void AmclNode::publish_current_map_pose(
+    const rclcpp::Time& stamp,
+    double odom_x,
+    double odom_y,
+    double odom_theta,
+    const nav_msgs::msg::Odometry& odom_msg) {
+    std::lock_guard<std::mutex> map_lock(map_pose_mutex_);
+    if (!map_odom_valid_) {
+        return;
+    }
+    if (last_current_map_pose_stamp_.nanoseconds() != 0 &&
+        stamp <= last_current_map_pose_stamp_) {
+        return;
+    }
+
+    // The EKF output covariance is cumulative in its local odom epoch. Use it
+    // as the lower bound for propagated map-pose uncertainty. Configured
+    // process rates are used only when the incoming covariance is unusable.
+    Eigen::Matrix3d odom_covariance = Eigen::Matrix3d::Zero();
+    odom_covariance(0, 0) = odom_msg.pose.covariance[0];
+    odom_covariance(0, 1) = odom_msg.pose.covariance[1];
+    odom_covariance(1, 0) = odom_msg.pose.covariance[6];
+    odom_covariance(1, 1) = odom_msg.pose.covariance[7];
+    odom_covariance(0, 2) = odom_msg.pose.covariance[5];
+    odom_covariance(2, 0) = odom_msg.pose.covariance[30];
+    odom_covariance(1, 2) = odom_msg.pose.covariance[11];
+    odom_covariance(2, 1) = odom_msg.pose.covariance[31];
+    odom_covariance(2, 2) = odom_msg.pose.covariance[35];
+    const bool usable_odom_covariance = odom_covariance.allFinite() &&
+        odom_covariance(0, 0) >= 0.0 && odom_covariance(1, 1) >= 0.0 &&
+        odom_covariance(2, 2) >= 0.0;
+    if (usable_odom_covariance) {
+        // Keep a malformed scan covariance from poisoning the
+        // controller-facing propagated pose before valid odometry arrives.
+        if (!current_map_pose_covariance_.allFinite()) {
+            current_map_pose_covariance_.setZero();
+        }
+        current_map_pose_covariance_ = 0.5 *
+            (current_map_pose_covariance_ + current_map_pose_covariance_.transpose());
+        for (int i = 0; i < 3; ++i) {
+            if (!std::isfinite(current_map_pose_covariance_(i, i)) ||
+                current_map_pose_covariance_(i, i) < 0.0) {
+                current_map_pose_covariance_(i, i) = 0.0;
+            }
+            current_map_pose_covariance_(i, i) = std::max(
+                current_map_pose_covariance_(i, i), odom_covariance(i, i));
+        }
+    } else if (last_current_map_pose_stamp_.nanoseconds() != 0) {
+        const double dt = (stamp - last_current_map_pose_stamp_).seconds();
+        if (dt > 0.0) {
+            current_map_pose_covariance_ = localization_math::grow_pose_covariance(
+                current_map_pose_covariance_,
+                dt,
+                current_map_pose_process_xy_m2_per_s_,
+                current_map_pose_process_yaw2_per_s_);
+        }
+    }
+    last_current_map_pose_stamp_ = stamp;
+
+    const Eigen::Vector3d current_odom(odom_x, odom_y, odom_theta);
+    const Eigen::Vector3d current_map = math_utils::se2_compose(
+        map_odom_pose_, current_odom);
+
+    geometry_msgs::msg::PoseWithCovarianceStamped pose_msg;
+    pose_msg.header.stamp = stamp;
+    pose_msg.header.frame_id = global_frame_;
+    pose_msg.pose.pose.position.x = current_map[0];
+    pose_msg.pose.pose.position.y = current_map[1];
+    pose_msg.pose.pose.position.z = 0.0;
+    pose_msg.pose.pose.orientation = math_utils::yaw_to_quaternion(current_map[2]);
+    auto& cov = pose_msg.pose.covariance;
+    std::fill(cov.begin(), cov.end(), 0.0);
+    cov[0] = current_map_pose_covariance_(0, 0);
+    cov[1] = current_map_pose_covariance_(0, 1);
+    cov[5] = current_map_pose_covariance_(0, 2);
+    cov[6] = current_map_pose_covariance_(1, 0);
+    cov[7] = current_map_pose_covariance_(1, 1);
+    cov[11] = current_map_pose_covariance_(1, 2);
+    cov[30] = current_map_pose_covariance_(2, 0);
+    cov[31] = current_map_pose_covariance_(2, 1);
+    cov[35] = current_map_pose_covariance_(2, 2);
+    current_map_pose_pub_->publish(pose_msg);
+
+    if (publish_tf_ && tf_broadcaster_) {
+        geometry_msgs::msg::TransformStamped map_odom_tf;
+        map_odom_tf.header.stamp = stamp;
+        map_odom_tf.header.frame_id = global_frame_;
+        map_odom_tf.child_frame_id = odom_frame_;
+        map_odom_tf.transform.translation.x = map_odom_pose_[0];
+        map_odom_tf.transform.translation.y = map_odom_pose_[1];
+        map_odom_tf.transform.rotation = math_utils::yaw_to_quaternion(map_odom_pose_[2]);
+        tf_broadcaster_->sendTransform(map_odom_tf);
+    }
+
+    if (localization_health_pub_->get_subscription_count() > 0) {
+        double correction_age = std::numeric_limits<double>::infinity();
+        if (last_map_correction_stamp_.nanoseconds() != 0) {
+            correction_age = std::max(
+                0.0, (stamp - last_map_correction_stamp_).seconds());
+        }
+        const bool degraded =
+            !std::isfinite(correction_age) ||
+            correction_age > localization_degraded_after_s_;
+        std_msgs::msg::Float64MultiArray health;
+        health.data = {
+            correction_age,
+            last_scan_correction_accepted_ ? 1.0 : 0.0,
+            static_cast<double>(consecutive_rejected_scans_),
+            degraded ? 1.0 : 0.0,
+            std::max(current_map_pose_covariance_(0, 0),
+                     current_map_pose_covariance_(1, 1)),
+            current_map_pose_covariance_(2, 2),
+            last_scan_correction_distance_m_,
+            last_scan_correction_yaw_rad_,
+            last_scan_applied_xy_correction_m_,
+            last_scan_applied_yaw_correction_rad_,
+            last_scan_correction_x_m_,
+            last_scan_correction_y_m_,
+            last_scan_applied_x_m_,
+            last_scan_applied_y_m_,
+            // Source epoch for joining correction age to the scan/pose packet.
+            stamp.seconds(),
+        };
+        localization_health_pub_->publish(health);
+    }
+}
+
+void AmclNode::publish_particle_cloud(const rclcpp::Time& stamp) {
+    if (!std::isfinite(cloud_publish_rate_) || cloud_publish_rate_ <= 0.0) {
+        return;
+    }
+    if (cloud_pub_->get_subscription_count() == 0) {
+        return;
+    }
+
+    // At high requested publish rates, publish every accepted scan so
+    // visualization/recording does not discard source-timestamped clouds.
+    if (cloud_publish_rate_ < 39.5) {
+        const double period_s = 1.0 / cloud_publish_rate_;
+        if (last_cloud_publish_time_.nanoseconds() != 0) {
+            const double elapsed_s = (stamp - last_cloud_publish_time_).seconds();
+            if (elapsed_s >= 0.0 && elapsed_s + 1e-6 < period_s) {
+                return;
+            }
+        }
+    }
+
+    std::vector<float> particles;
+    pf_.get_particles(particles);
+
+    auto cloud = geometry_msgs::msg::PoseArray();
+    cloud.header.stamp = stamp;
+    cloud.header.frame_id = global_frame_;
+
+    const int np = static_cast<int>(particles.size() / 3);
+    cloud.poses.reserve(np);
+
+    for (int i = 0; i < np; ++i) {
+        geometry_msgs::msg::Pose p;
+        p.position.x = particles[i * 3 + 0];
+        p.position.y = particles[i * 3 + 1];
+        p.position.z = 0.0;
+        p.orientation = math_utils::yaw_to_quaternion(particles[i * 3 + 2]);
+        cloud.poses.push_back(p);
+    }
+
+    cloud_pub_->publish(cloud);
+    last_cloud_publish_time_ = stamp;
+}
+
+void AmclNode::publish_pre_resample_weighted_cloud(const rclcpp::Time& stamp) {
+    if (!debug_pre_resample_particles_) {
+        return;
+    }
+    if (pre_resample_cloud_pub_->get_subscription_count() == 0) {
+        return;
+    }
+
+    std::vector<float> particles;
+    std::vector<float> weights;
+    pf_.get_particles(particles, weights);
+
+    const int np = static_cast<int>(weights.size());
+    auto cloud = sensor_msgs::msg::PointCloud2();
+    cloud.header.stamp = stamp;
+    cloud.header.frame_id = global_frame_;
+    cloud.height = 1;
+    cloud.width = static_cast<uint32_t>(np);
+    cloud.is_bigendian = false;
+    cloud.is_dense = true;
+
+    const auto make_field = [](const char* name, uint32_t offset) {
+        sensor_msgs::msg::PointField field;
+        field.name = name;
+        field.offset = offset;
+        field.datatype = sensor_msgs::msg::PointField::FLOAT32;
+        field.count = 1;
+        return field;
+    };
+    cloud.fields = {
+        make_field("x", 0),
+        make_field("y", 4),
+        make_field("z", 8),
+        make_field("yaw", 12),
+        make_field("weight", 16),
+    };
+    cloud.point_step = 20;
+    cloud.row_step = cloud.point_step * cloud.width;
+    cloud.data.resize(cloud.row_step);
+
+    for (int i = 0; i < np; ++i) {
+        const float values[5] = {
+            particles[i * 3 + 0],
+            particles[i * 3 + 1],
+            0.0f,
+            particles[i * 3 + 2],
+            weights[i],
+        };
+        std::memcpy(&cloud.data[static_cast<size_t>(i) * cloud.point_step],
+                    values,
+                    sizeof(values));
+    }
+
+    pre_resample_cloud_pub_->publish(cloud);
+}
+
+}  // namespace gpu_amcl_cpp
