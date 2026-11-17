@@ -1,0 +1,9 @@
+# Tested with Python 3.12
+casadi==3.8.1
+numpy==2.5.4
+scipy==1.18.1
+opencv-python-headless==5.0.0.93
+scikit-image==0.26.0
+networkx==3.7
+PyYAML==6.0.3
+pytest==9.1.1
